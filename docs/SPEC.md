@@ -35,7 +35,7 @@ Everything below elaborates that paragraph.
 |---|---|
 | **Key** | An iroh keypair = one device / one `EndpointId`. The only cryptographic identifier. Ed25519. |
 | **Person** | A *local* clustering of keys, via attestations you trust. Not a protocol object. |
-| **Petname** | Your local, private name for a person. Never sent on the wire. |
+| **Petname** | A *client-level* label you assign a person (the term of art for a locally-assigned, observer-specific name). **Not a protocol object** — becomes a `name` attestation only if you choose to broadcast it. |
 | **Attestation** | A signed, gossiped, *advisory* claim linking keys or naming them. |
 | **Conversation** | A DAG of messages rooted at a genesis message; identified by the genesis hash. |
 | **Message** | A content-addressed (BLAKE3) signed object; its hash is its id. |
@@ -78,15 +78,18 @@ Uses, all the same primitive:
   people" work: clients aggregate contacts' claims, weighted by trust, and show
   *"your friends call them …"*.
 
-On the wire, attestations link **key → key**; the human `label` is a local petname
-overlay, never required to be shared.
+On the wire, attestations link **key → key**. A human label enters the protocol
+*only* as a broadcast `name` attestation. The label you assign but keep to yourself —
+your **petname** for a person — is a pure client convention the core protocol never
+sees; broadcasting it is exactly what turns it into a `name` attestation.
 
 ### 3.3 Name resolution = the addressing layer
 
-Sending "to Alice" means: resolve petname → the set of keys you currently believe are
-Alice (your attestations + trusted contacts' attestations + manual overrides), then
-fan out to those keys. A repudiated key drops out of the set. **Identity resolution
-and message addressing are the same step.**
+Sending "to Alice" means: resolve the petname "Alice" → the set of keys you
+currently believe are Alice (your attestations + trusted contacts' attestations +
+manual overrides), then fan out to those keys. A repudiated key drops out of the set.
+The petname→cluster binding is your local convention; the resolution to keys uses
+trusted attestations. **Identity resolution and message addressing are the same step.**
 
 ### 3.4 Recovery is social, not cryptographic
 
