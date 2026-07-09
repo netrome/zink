@@ -195,12 +195,17 @@ backlog** and **your own new device catching up** — device sync *is* peer sync
   This is also how backlog privacy works (don't want the newcomer to see old
   messages? don't serve the parents).
 
-**Decryptability, not mechanism, is the only difference between a new device and a
-new person.** A new device fetches identical body ciphertext from any peer; one of
-your *existing* devices then **re-wraps** each message's content-key to the new
-device's key (cheap — no re-encryption of bodies). You re-wrap for your own device;
-you might not for a stranger. No shared "family key" exists. Backfill is never
-guaranteed complete, and the DAG makes incompleteness visible.
+**There is no cryptographic difference between your new device and a new member** —
+both need *someone holding a message's content-key* to **re-wrap** it to their key
+(cheap — no re-encryption of the body). The content-key is symmetric and shared, so
+*any* recipient of a message can re-wrap it for anyone; nothing privileges your own
+devices. In practice your own devices re-wrap for each other (trust + they hold your
+full history), but a friend who was in the conversation could re-wrap for your new
+device just as well. The only gate is **willingness to re-wrap**, i.e. the same
+serving discretion as everything else — no shared "family key" exists. (This is not a
+new leak: a recipient could always re-send plaintext; re-wrapping is just the
+efficient form of the same inherent capability.) Backfill is never guaranteed
+complete, and the DAG makes incompleteness visible.
 
 ### 5.3 Offline delivery & notifications (foundational, not a late feature)
 
