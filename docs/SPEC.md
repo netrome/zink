@@ -117,7 +117,7 @@ MessageCore {                          // id = BLAKE3(borsh(MessageCore))
   parents:       [message hash]        // current heads at send time
   recipients:    [key]                 // who this was fanned out to (advisory, but signed)
   sender:        key
-  seq:           u64                   // per-sender sequence number (completeness / gap detection)
+  seq:           u64                   // per (sender, conversation) sequence — completeness / gap detection
   logical:       u64                   // Lamport clock = 1 + max(parents.logical); ordering
   timestamp:     wall-clock hint       // display only, never trusted for ordering
   body:          ciphertext            // encrypted ONCE with a random content-key
@@ -153,9 +153,12 @@ Two small integers, different jobs, plus the DAG:
 - **`logical` (Lamport):** lets a client linearize *any subset* of messages
   consistently with causality by sorting on `(logical, tiebreak-by-id)` — works even
   with a partial view, without walking the whole DAG. This is the linear **default view**.
-- **`seq` (per-sender):** completeness / gap detection. `seq` gaps, and a presence
-  beacon advertising a sender's latest `seq`, tell you when you're missing a sender's
-  *newest* messages — which dangling parent pointers alone cannot reveal.
+- **`seq` (per `(sender, conversation)`):** completeness / gap detection. Scoped to
+  the conversation so contiguity is meaningful — a global per-sender counter would
+  show spurious "gaps" that are just the sender's messages in *other* chats, and
+  would leak cross-chat volume. `seq` gaps, and a per-conversation presence beacon
+  advertising a sender's latest `seq`, reveal when you're missing a sender's *newest*
+  messages — which dangling parent pointers alone cannot.
 - **`parents`:** source of truth for **concurrency**. Multiple heads = "these
   messages crossed in flight," real data that advanced clients *may* choose to show.
 
