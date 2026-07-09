@@ -36,7 +36,7 @@ Everything below elaborates that paragraph.
 | **Key** | An iroh keypair = one device / one `EndpointId`. The only cryptographic identifier. Ed25519. |
 | **Person** | A *local* clustering of keys, via attestations you trust. Not a protocol object. |
 | **Petname** | A *client-level* label you assign a person (the term of art for a locally-assigned, observer-specific name). **Not a protocol object** — becomes a `name` attestation only if you choose to broadcast it. |
-| **Attestation** | A signed, gossiped, *advisory* claim linking keys or naming them. |
+| **Attestation** | A signed, *advisory* claim linking keys or naming them; shared **by request**, never broadcast. |
 | **Conversation** | A DAG of messages rooted at a genesis message; identified by the genesis hash. |
 | **Message** | A content-addressed (BLAKE3) signed object; its hash is its id. |
 | **Content-key** | Random per-message symmetric key; encrypts the body once. Sealed per recipient. |
@@ -50,13 +50,13 @@ Everything below elaborates that paragraph.
 ### 3.1 Model
 
 - A person = a set of keys. **No** mandatory long-lived "identity key."
-- Keys are linked by **attestations** you and your contacts sign and gossip.
+- Keys are linked by **attestations** you and your contacts sign and share on request.
 - "Who is Alice" is **your local belief**, not a global fact. Manual override always
   wins over any received attestation.
 
 ### 3.2 Attestations (one primitive, several uses)
 
-A signed statement, gossiped to contacts, treated as *advisory input*:
+A signed statement, shared with contacts on request, treated as *advisory input*:
 
 ```
 Attestation {
@@ -97,7 +97,24 @@ Losing a key forks your identity. You and an attacker can both claim to be you; 
 protocol does not arbitrate — and deliberately offers **no cryptographic recovery
 anchor** (it would add complexity and contradict the philosophy). You call a friend
 out-of-band; they re-attest which key is really you, mark the other `negative`, and
-gossip it — their clients stop routing your messages to the bad key.
+share it — their clients stop routing your messages to the bad key.
+
+### 3.5 Identity discovery: the "who is this?" query
+
+There is a **single identity primitive**: a `who-is-this(key)` request, answerable by
+**yourself** (return your self-attestations) or by **anyone else** (return their
+attestations about that key). You send it to your contacts; each answers at
+discretion. Default reach is **1 hop** (your direct contacts); a contact may forward
+to theirs within a small hop limit, as their own choice.
+
+Anyone can claim anything about anybody, so **your social graph is your trust
+boundary** — and *ranking* those claims is client policy: weight a close friend over
+an acquaintance, require agreement from N contacts, prefer self-asserted over
+third-party, automatically or manually. This is where clients differentiate while the
+protocol stays tiny.
+
+Because there is no broadcast channel, **default privacy is structural**: an outsider
+has no path to your attestations unless someone in your circle chooses to relay one.
 
 ---
 
@@ -159,9 +176,9 @@ Two small integers, different jobs, plus the DAG:
 - **`seq` (per `(sender, conversation)`):** completeness / gap detection. Scoped to
   the conversation so contiguity is meaningful — a global per-sender counter would
   show spurious "gaps" that are just the sender's messages in *other* chats, and
-  would leak cross-chat volume. `seq` gaps, and a per-conversation presence beacon
-  advertising a sender's latest `seq`, reveal when you're missing a sender's *newest*
-  messages — which dangling parent pointers alone cannot.
+  would leak cross-chat volume. `seq` gaps — plus a peer advertising its latest `seq`
+  per conversation at connect/sync time — reveal when you're missing a sender's
+  *newest* messages, which dangling parent pointers alone cannot.
 - **`parents`:** source of truth for **concurrency**. Multiple heads = "these
   messages crossed in flight," real data that advanced clients *may* choose to show.
 
@@ -178,16 +195,20 @@ you send to, and what history you choose to serve (§5.2).
 
 ## 5. Delivery & sync
 
-### 5.1 Two transport planes
+### 5.1 Two interaction patterns (no gossip plane)
 
-- **Direct plane** (reliable, dedicated ALPN): message delivery, blob transfer,
-  device pairing, history sync. Direct iroh connections + acks; relay-routed for
-  browsers.
-- **Gossip plane** (best-effort, `iroh-gossip`): attestations, presence beacons, and
-  the "who is this?" discovery query.
+Everything runs over direct iroh connections (relay-routed for browsers), in two shapes:
 
-Gossip is **not** reliable delivery. Anything that must arrive uses the direct plane
-+ mailbox.
+- **Fan-out (push):** deliver a message/blob to the recipient keys you chose —
+  reliable, acked, parked in the recipient's mailbox if offline.
+- **Request/response (pull):** content-addressed `get` / `get-successors` for history
+  and blobs, and the `who-is-this` identity query (§3.5) — each served at the
+  answering peer's discretion.
+
+At friend/family scale, epidemic **gossip buys nothing**: delivery is already
+per-recipient fan-out (§4.2), and identity/profile discovery is pull-based (§3.5).
+There is **no gossip plane in the core**; `iroh-gossip` stays an optional future
+optimization for swarms large enough to want it.
 
 ### 5.2 History sync = one primitive, best-effort (tenet 6)
 
@@ -258,7 +279,7 @@ complete, and the DAG makes incompleteness visible.
 ## 8. System components
 
 ```
-┌─────────────────┐    gossip + direct (relay-routed — browsers can't hole-punch)   ┌─────────────────┐
+┌─────────────────┐    direct connections (relay-routed — browsers can't hole-punch)   ┌─────────────────┐
 │  PWA client      │◀────────────────────────────────────────────────────────────────▶│  PWA client      │
 │  (WASM + iroh)   │                                                                 │  (WASM + iroh)   │
 └───────┬─────────┘                                                                 └─────────────────┘
@@ -287,12 +308,12 @@ complete, and the DAG makes incompleteness visible.
 
 1. **Message** — content-addressed, signed core + per-recipient envelope; carries
    `conversation, parents, recipients, sender, seq, logical, timestamp, body, blob-refs`.
-2. **Attestation** — signed, gossiped, advisory; links / names / repudiates keys.
+2. **Attestation** — signed, advisory, shared by request; links / names / repudiates keys.
 3. **Local name resolution** — petname → trusted key-set; the fan-out addressing
    function; manual override wins.
-4. **Delivery + sync** — per-key fan-out send (direct or mailbox); content-addressed
-   `get` / `get-successors`, served at each peer's discretion; content-key re-wrap for
-   backfill.
+4. **Delivery + sync** — per-key fan-out send (push, direct or mailbox); pull via
+   `get` / `get-successors` / `who-is-this`, served at each peer's discretion;
+   content-key re-wrap for backfill.
 
 Everything else — grouping, naming, ordering-for-display, membership presentation,
 custom conversation views — is **client policy/UX**.
@@ -323,8 +344,8 @@ custom conversation views — is **client policy/UX**.
 | Ordering | **Lamport (`logical`) + per-sender `seq` + DAG** | Partial-view ordering, gap detection, honest concurrency. |
 
 **Still to pin down (implementation-level):** exact AEAD choice (e.g.
-XChaCha20-Poly1305), Web Push payload/encryption specifics, presence-beacon format,
-relay discovery/configuration UX.
+XChaCha20-Poly1305), Web Push payload/encryption specifics, the `who-is-this` query
+format and default hop limit, sync-time head/`seq` exchange, relay discovery/config UX.
 
 ---
 
@@ -344,4 +365,5 @@ relay discovery/configuration UX.
 - [Iroh 1.0 — Dial Keys, not IPs](https://www.iroh.computer/blog/v1)
 - [iroh WebAssembly & browser support](https://docs.iroh.computer/deployment/wasm-browser-support)
 - [Iroh & the Web](https://www.iroh.computer/blog/iroh-and-the-web)
-- iroh-gossip, iroh-blobs — separate protocol crates on top of iroh
+- iroh-blobs — content-addressed blob transfer on top of iroh
+- iroh-gossip — optional/future; not used in the core protocol
