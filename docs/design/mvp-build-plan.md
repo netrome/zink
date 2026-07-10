@@ -46,13 +46,18 @@ web/                   # (Stage C) PWA assets + service worker
   manual run works **and** an automated test spins up relay + two clients end-to-end.
   **This is the milestone — the spine works.** ✅ *(2026-07-10: manual run + automated
   `walking_skeleton` test both green.)*
-- [ ] **A6 · 🎯🚩 Browser→relay spike.** A near-empty WASM client that
+- [x] **A6 · 🎯🚩 Browser→relay spike.** A near-empty WASM client that
   opens a browser→relay connection on the mailbox transport and round-trips one frame;
   also confirm **iroh-blobs compiles for WASM**. *Done when:* a browser round-trips a
   frame against the relay. **Converts the plan's biggest unknown into a known before
   Stage B commits to the transport/blob shape.** If iroh-in-WASM/ALPN doesn't hold, fall
   back to WebSocket + signed-challenge auth (already spec'd, SPEC §5.3) and serve blobs
   over the mailbox ALPN. *(Risk spike: iroh-in-WASM.)*
+  ✅ *(2026-07-10: browser registered a mailbox through the iroh-relay ws path — no
+  fallback needed. iroh + iroh-blobs both compile for wasm32 with
+  `default-features = false`. Caveats: iroh-blobs is at 0.103 (pre-1.0, API may move);
+  browser needs the relay co-located iroh-relay server (`examples/browser_spike.rs` is
+  the dev-mode preview; production shape + TLS lands in C0/C1).)*
 
 ## Stage B — Phase 0 completeness (native, via CLI)
 
