@@ -1,0 +1,13 @@
+[package]
+name = "zink-client"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iroh = { version = "1.0.2", default-features = false, features = ["tls-ring"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+zink-protocol = { path = "../zink-protocol" }

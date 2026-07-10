@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>zink · A6 browser spike</title>
+  <style>
+    body { font-family: monospace; max-width: 40rem; margin: 3rem auto; }
+    input { width: 100%; margin: .3rem 0 1rem; font-family: inherit; }
+    #out { white-space: pre-wrap; margin-top: 1.5rem; }
+    .ok { color: green; } .err { color: crimson; }
+  </style>
+</head>
+<body>
+  <h1>zink · browser→relay spike</h1>
+  <p>Values from <code>cargo run -p zink-relay --example browser_spike</code>:</p>
+  <label>relay url <input id="url" placeholder="http://1.2.3.4:3340"></label>
+  <label>endpoint id <input id="id" placeholder="hex endpoint id"></label>
+  <button id="go">register mailbox</button>
+  <div id="out"></div>
+  <script type="module">
+    import init, { spike_register } from "./pkg/zink_client.js";
+    const out = document.getElementById("out");
+    document.getElementById("go").onclick = async () => {
+      out.textContent = "connecting…"; out.className = "";
+      try {
+        await init();
+        const result = await spike_register(
+          document.getElementById("url").value.trim(),
+          document.getElementById("id").value.trim(),
+        );
+        out.textContent = "✅ " + result; out.className = "ok";
+      } catch (e) {
+        out.textContent = "❌ " + e; out.className = "err";
+      }
+    };
+  </script>
+</body>
+</html>

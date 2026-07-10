@@ -4,6 +4,7 @@ members = [
     "crates/zink-protocol",
     "crates/zink-relay",
     "crates/zink-cli",
+    "crates/zink-client",
 ]
 
 [workspace.package]
