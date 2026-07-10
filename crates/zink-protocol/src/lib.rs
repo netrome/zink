@@ -7,6 +7,7 @@ mod attestation;
 mod codec;
 mod crypto;
 mod dag;
+mod fanout;
 mod keys;
 mod mailbox;
 mod message;
@@ -17,6 +18,7 @@ pub use attestation::{Attestation, AttestationId, Claim, SignedAttestation};
 pub use codec::DecodeError;
 pub use crypto::{ContentKey, CryptoError};
 pub use dag::{ConversationDag, DagError, InsertOutcome};
+pub use fanout::distinct_relays;
 pub use keys::{DeviceKey, PublicKey, Signature, VerifyError};
 pub use mailbox::{
     MAILBOX_ALPN, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MailboxErrorCode, MailboxItem, MailboxOp,

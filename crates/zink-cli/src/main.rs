@@ -1,12 +1,18 @@
-//! Native dev/test client (not shipped): drives a relay end-to-end.
+//! Native dev/test client (not shipped): drives relays end-to-end.
 //!
 //! ```text
-//! zink-cli keygen <key-file>                                  # new key, prints public key
-//! zink-cli pubkey <key-file>                                  # prints public key
-//! zink-cli send --key <file> --relay <id@ip:port> --to <pubkey-hex> <text>
-//! zink-cli recv --key <file> --relay <id@ip:port>             # register + drain + ack
+//! zink-cli keygen <key-file>                 # new key, prints public key
+//! zink-cli pubkey <key-file>                 # prints public key
+//! zink-cli send --key <file> --to <pubkey>@<relay>[,<relay>…] [--to …] <text>
+//! zink-cli recv --key <file> --relay <relay> [--relay …]
 //! ```
+//!
+//! `<relay>` is a dial string `<endpoint-id>@<ip:port>` as printed by
+//! `zink-relay`. Send seals one envelope for all recipients and deposits it
+//! once per distinct relay; recv drains every given relay and dedups by
+//! message id.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::ExitCode;
@@ -18,7 +24,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use rand_core::OsRng;
 use zink_protocol::{
     DeviceKey, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MailboxOp, MailboxRequest, MailboxResponse,
-    MailboxResult, MessageDraft, MessageEnvelope, PublicKey,
+    MailboxResult, MessageDraft, MessageEnvelope, PublicKey, distinct_relays,
 };
 
 #[tokio::main]
@@ -43,8 +49,9 @@ async fn main() -> ExitCode {
 const USAGE: &str = "usage:
   zink-cli keygen <key-file>
   zink-cli pubkey <key-file>
-  zink-cli send --key <file> --relay <id@ip:port> --to <pubkey-hex> <text>
-  zink-cli recv --key <file> --relay <id@ip:port>";
+  zink-cli send --key <file> --to <pubkey>@<relay>[,<relay>...] [--to ...] <text>
+  zink-cli recv --key <file> --relay <relay> [--relay ...]
+(<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay)";
 
 fn keygen(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
@@ -62,16 +69,25 @@ fn pubkey(args: &[String]) -> Result<(), String> {
 }
 
 async fn send(args: &[String]) -> Result<(), String> {
-    let device = load_key(&flag(args, "--key")?)?;
-    let relay = parse_relay(&flag(args, "--relay")?)?;
-    let recipient = PublicKey(parse_hex32(&flag(args, "--to")?)?);
-    let text = args.last().filter(|_| args.len() % 2 == 1).ok_or(USAGE)?;
+    let (flags, positionals) = parse_flags(args)?;
+    let device = load_key(&single(&flags, "--key")?)?;
+    let contacts: Vec<Contact> = values(&flags, "--to")
+        .iter()
+        .map(|spec| parse_contact(spec))
+        .collect::<Result<_, _>>()?;
+    if contacts.is_empty() {
+        return Err(format!("at least one --to required\n{USAGE}"));
+    }
+    let [text] = positionals.as_slice() else {
+        return Err(format!("exactly one message text expected\n{USAGE}"));
+    };
 
-    // Until the DAG lands (slice B1) every message is a standalone genesis.
+    // Until the DAG lands in the client (slice B5) every message is a
+    // standalone genesis.
     let draft = MessageDraft {
         conversation: None,
         parents: vec![],
-        recipients: vec![recipient],
+        recipients: contacts.iter().map(|c| c.key).collect(),
         seq: 0,
         logical: 0,
         timestamp_ms: now_ms(),
@@ -81,69 +97,116 @@ async fn send(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("seal message: {e}"))?;
     let id = envelope.id();
 
-    let (_endpoint, connection) = connect(&device, relay).await?;
-    let result = request(
-        &connection,
-        MailboxOp::Deposit {
-            envelope: Box::new(envelope),
-        },
-    )
-    .await?;
-    match result {
-        MailboxResult::Deposited { .. } => {
-            println!("deposited {}", hex_encode(&id.0));
-            Ok(())
+    // One envelope, one deposit per distinct relay across all recipients.
+    let relays = distinct_relays(contacts.into_iter().map(|c| c.relays));
+    let endpoint = bind_endpoint(&device).await?;
+    for relay in &relays {
+        let connection = connect(&endpoint, relay).await?;
+        match request(
+            &connection,
+            MailboxOp::Deposit {
+                envelope: Box::new(envelope.clone()),
+            },
+        )
+        .await?
+        {
+            MailboxResult::Deposited { .. } => {}
+            other => return Err(format!("unexpected response from {relay}: {other:?}")),
         }
-        other => Err(format!("unexpected relay response: {other:?}")),
     }
-}
-
-async fn recv(args: &[String]) -> Result<(), String> {
-    let device = load_key(&flag(args, "--key")?)?;
-    let relay = parse_relay(&flag(args, "--relay")?)?;
-    let (_endpoint, connection) = connect(&device, relay).await?;
-
-    request(&connection, MailboxOp::Register).await?;
-    let items = match request(&connection, MailboxOp::Fetch { after: 0 }).await? {
-        MailboxResult::Envelopes { items } => items,
-        other => return Err(format!("unexpected relay response: {other:?}")),
-    };
-
-    if items.is_empty() {
-        println!("no new messages");
-        return Ok(());
-    }
-    let mut last_cursor = 0;
-    for item in &items {
-        match item.envelope.open(&device) {
-            Ok(plaintext) => println!(
-                "from {}: {}",
-                &hex_encode(&item.envelope.core.sender.0)[..8],
-                String::from_utf8_lossy(&plaintext)
-            ),
-            Err(e) => println!("undecryptable message ({e})"),
-        }
-        last_cursor = last_cursor.max(item.cursor);
-    }
-    request(&connection, MailboxOp::Ack { up_to: last_cursor }).await?;
+    println!(
+        "deposited {} to {} relay(s)",
+        hex_encode(&id.0),
+        relays.len()
+    );
     Ok(())
 }
 
-async fn connect(
-    device: &DeviceKey,
-    relay: EndpointAddr,
-) -> Result<(Endpoint, Connection), String> {
+async fn recv(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    if !positionals.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let device = load_key(&single(&flags, "--key")?)?;
+    let relays = values(&flags, "--relay");
+    if relays.is_empty() {
+        return Err(format!("at least one --relay required\n{USAGE}"));
+    }
+
+    let endpoint = bind_endpoint(&device).await?;
+    let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
+    let mut printed_any = false;
+    for relay in &relays {
+        let connection = connect(&endpoint, relay).await?;
+        request(&connection, MailboxOp::Register).await?;
+        let items = match request(&connection, MailboxOp::Fetch { after: 0 }).await? {
+            MailboxResult::Envelopes { items } => items,
+            other => return Err(format!("unexpected response from {relay}: {other:?}")),
+        };
+        // Cursors are relay-local: ack each relay at its own high-water mark.
+        let mut last_cursor = None;
+        for item in &items {
+            last_cursor = last_cursor.max(Some(item.cursor));
+            if !seen.insert(item.envelope.id().0) {
+                continue; // already drained via another relay
+            }
+            printed_any = true;
+            match item.envelope.open(&device) {
+                Ok(plaintext) => println!(
+                    "from {}: {}",
+                    &hex_encode(&item.envelope.core.sender.0)[..8],
+                    String::from_utf8_lossy(&plaintext)
+                ),
+                Err(e) => println!("undecryptable message ({e})"),
+            }
+        }
+        if let Some(up_to) = last_cursor {
+            request(&connection, MailboxOp::Ack { up_to }).await?;
+        }
+    }
+    if !printed_any {
+        println!("no new messages");
+    }
+    Ok(())
+}
+
+/// A recipient and the relays hosting their mailbox — the CLI stand-in for
+/// the ContactRecord (SPEC §3.6) until Stage C.
+struct Contact {
+    key: PublicKey,
+    relays: Vec<String>,
+}
+
+/// `<pubkey-hex>@<relay>[,<relay>…]` — hex contains no `@`, so the first
+/// `@` splits key from relay list.
+fn parse_contact(spec: &str) -> Result<Contact, String> {
+    let (key_hex, relay_list) = spec
+        .split_once('@')
+        .ok_or("--to must be <pubkey>@<relay>[,<relay>...]")?;
+    let relays: Vec<String> = relay_list.split(',').map(str::to_string).collect();
+    for relay in &relays {
+        parse_relay(relay)?; // validate early, before any network work
+    }
+    Ok(Contact {
+        key: PublicKey(parse_hex32(key_hex)?),
+        relays,
+    })
+}
+
+async fn bind_endpoint(device: &DeviceKey) -> Result<Endpoint, String> {
     // The endpoint key IS the device key: mailbox auth is the connection.
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(SecretKey::from_bytes(&device_seed(device)))
+    Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::from_bytes(&device.seed()))
         .bind()
         .await
-        .map_err(|e| format!("bind endpoint: {e}"))?;
-    let connection = endpoint
-        .connect(relay, MAILBOX_ALPN)
+        .map_err(|e| format!("bind endpoint: {e}"))
+}
+
+async fn connect(endpoint: &Endpoint, relay: &str) -> Result<Connection, String> {
+    endpoint
+        .connect(parse_relay(relay)?, MAILBOX_ALPN)
         .await
-        .map_err(|e| format!("connect to relay: {e}"))?;
-    Ok((endpoint, connection))
+        .map_err(|e| format!("connect to relay {relay}: {e}"))
 }
 
 async fn request(connection: &Connection, op: MailboxOp) -> Result<MailboxResult, String> {
@@ -170,12 +233,6 @@ fn load_key(path: &str) -> Result<DeviceKey, String> {
     Ok(DeviceKey::from_seed(parse_hex32(hex.trim())?))
 }
 
-/// The CLI stores the raw seed, so the device key can double as the iroh
-/// endpoint key (same Ed25519 seed derivation on both sides).
-fn device_seed(device: &DeviceKey) -> [u8; 32] {
-    device.seed()
-}
-
 fn parse_relay(spec: &str) -> Result<EndpointAddr, String> {
     let (id, sock) = spec
         .split_once('@')
@@ -185,11 +242,39 @@ fn parse_relay(spec: &str) -> Result<EndpointAddr, String> {
     Ok(EndpointAddr::new(id).with_ip_addr(sock))
 }
 
-fn flag(args: &[String], name: &str) -> Result<String, String> {
-    args.windows(2)
-        .find(|pair| pair[0] == name)
-        .map(|pair| pair[1].clone())
-        .ok_or_else(|| format!("missing {name}\n{USAGE}"))
+/// `--flag value` pairs in order, plus positional args.
+type ParsedArgs = (Vec<(String, String)>, Vec<String>);
+
+/// Split args into `--flag value` pairs (repeatable) and positionals.
+fn parse_flags(args: &[String]) -> Result<ParsedArgs, String> {
+    let mut flags = Vec::new();
+    let mut positionals = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(name) = arg.strip_prefix("--") {
+            let value = iter.next().ok_or(format!("missing value for --{name}"))?;
+            flags.push((format!("--{name}"), value.clone()));
+        } else {
+            positionals.push(arg.clone());
+        }
+    }
+    Ok((flags, positionals))
+}
+
+fn values(flags: &[(String, String)], name: &str) -> Vec<String> {
+    flags
+        .iter()
+        .filter(|(flag, _)| flag == name)
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+fn single(flags: &[(String, String)], name: &str) -> Result<String, String> {
+    match values(flags, name).as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(format!("missing {name}\n{USAGE}")),
+        _ => Err(format!("{name} given more than once\n{USAGE}")),
+    }
 }
 
 fn now_ms() -> u64 {
