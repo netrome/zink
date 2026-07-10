@@ -1,0 +1,103 @@
+# MVP Build Plan
+
+The slice checklist and shared task tracker for reaching a working MVP. Downstream of
+[SPEC.md](../SPEC.md); governed by [../../AGENTS.md](../../AGENTS.md).
+
+**How to use this doc.** We build in small vertical slices, native-first, walking-
+skeleton first. Each slice ends in something *runnable* with focused tests. Check items
+off as they land; add follow-ups inline. Write a short `docs/design/<name>.md` only for
+a slice with genuine unresolved design (flagged 🎯 below).
+
+**Definition of done (every slice):** runnable / tests pass · `cargo fmt` + `clippy`
+clean · `mvp-build-plan.md` updated · docs updated if behavior changed.
+
+**Workspace shape (target):**
+```
+crates/zink-protocol   # pure core: types, BORSH, hashing, DAG, crypto. No I/O.
+crates/zink-relay      # bin: iroh relay + mailbox ALPN + push + blob cache. Ports+adapters.
+crates/zink-cli        # bin: native dev/test client (not shipped) — drives the relay.
+crates/zink-client     # (Stage C) lib compiled to WASM for the PWA
+web/                   # (Stage C) PWA assets + service worker
+```
+
+---
+
+## Stage A — Foundation & walking skeleton (native)
+
+- [ ] **A1 · Workspace scaffold.** Cargo workspace with `zink-protocol`, `zink-relay`,
+  `zink-cli` (empty-ish). *Done when:* `cargo build`, `cargo test`, `clippy` all pass.
+- [ ] **A2 · Protocol core: keys, types, hashing.** Ed25519 keypair; `MessageCore` /
+  `MessageEnvelope` + `Attestation` types; canonical BORSH encode/decode; message id =
+  `BLAKE3(borsh(core))`; sign/verify. *Done when:* round-trip, **determinism** (same
+  value → same bytes → same id), and signature-verify tests pass. Pure, no I/O.
+- [ ] **A3 · Envelope encryption.** Random per-message content-key (AEAD) encrypts the
+  body once; seal the content-key per recipient (X25519 via Ed25519→X25519); open.
+  *Done when:* encrypt→seal→open→decrypt round-trips for N recipients; wrong key fails;
+  malformed input returns an error (never panics).
+- [ ] **A4 · Relay mailbox + ALPN (in-memory).** 🎯 iroh endpoint with a custom ALPN;
+  `register` / `deposit` / `fetch` / `ack` over the authenticated connection (auth =
+  connection key). In-memory store. *Done when:* an integration test deposits from one
+  endpoint and fetches from another. *(Risk spike: custom-ALPN handling in iroh 1.0.)*
+- [ ] **A5 · 🚩 WALKING SKELETON.** `zink-cli` send/recv through the relay: A encrypts +
+  deposits an envelope for B's key; B fetches + opens + prints plaintext. *Done when:* a
+  manual run works **and** an automated test spins up relay + two clients end-to-end.
+  **This is the milestone — the spine works.**
+
+## Stage B — Phase 0 completeness (native, via CLI)
+
+- [ ] **B1 · Message DAG & ordering.** 🎯 Genesis rules; parents/heads; conversation id;
+  a client-side DAG store; `logical`/`seq`; linearization. *Done when:* ordering tests
+  pass — concurrent → deterministic order, partial-view linearization, `seq` gap detection.
+- [ ] **B2 · Fan-out & multi-relay.** Resolve recipients → distinct relays → deposit the
+  envelope once per relay; relay indexes per recipient device-key; receiver dedups by id.
+  *Done when:* 1→N delivery test and cross-relay dedup test pass.
+- [ ] **B3 · Blobs / images.** iroh-blobs; encrypt-once blob + sealed content-key in the
+  envelope; thumbnail + full-res; relay blob cache (TTL/size). *Done when:* CLI sends an
+  image, recipient fetches + decrypts both blobs; refetch deduped by hash.
+- [ ] **B4 · Reliability.** Deposit ack + idempotent retry (by id); fetch cursor; ack/
+  delete + TTL retention backstop. *Done when:* retry-idempotency and retention/expiry
+  tests pass.
+- [ ] **B5 · Persistence.** Relay mailbox + blob cache on-disk (behind a port); client
+  DAG + keystore persisted. *Done when:* messages/keys survive a restart.
+
+## Stage C — PWA client (WASM)
+
+- [ ] **C1 · WASM + browser→relay.** 🎯 Build `zink-protocol`/`zink-client` to WASM
+  (`iroh` `default-features = false`); connect browser→relay over WebSocket; fetch a
+  message. *Done when:* a browser fetches a message **deposited by `zink-cli`** — proving
+  cross-implementation interop. *(Risk spike: iroh-in-WASM.)*
+- [ ] **C2 · Client core in-browser.** Keystore (IndexedDB); ContactRecord generate +
+  QR scan; DAG store (IndexedDB); fan-out send + mailbox drain. *Done when:* two browser
+  instances hold a 1:1 conversation via the relay.
+- [ ] **C3 · Minimal UI.** Conversation list; message view; send text; send image
+  (thumbnail preview → full). *Done when:* usable text + image chat between two browsers.
+- [ ] **C4 · 🎯🚩 Push (isolated).** Service worker + Web Push subscription; relay VAPID
+  sender; content-free push → SW wakes → fetch → generic notification. *Done when:* a
+  backgrounded PWA on **Android** receives a push showing "New message"; opening shows
+  content. *(Risk spike: PWA Web Push — quarantine this slice.)*
+
+**🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android,
+online and offline, with notifications.
+
+## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
+
+- [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
+  petnames; `who-is-this` pull; client-side trust ranking.
+- [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
+  resolution; history backfill via content-key re-wrap.
+- [ ] **D3 · Groups.** Multi-recipient conversations in the UI (delivery is already
+  fan-out; this is mostly membership *presentation* — client UX).
+- [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?" answers
+  from contacts; concurrency-aware message views.
+
+---
+
+## Notes
+
+- **Risk spikes** (🎯 with *Risk spike*) are integration unknowns paper can't resolve —
+  A4 (custom ALPN), C1 (iroh WASM), C4 (push). Expect to learn by building; keep them
+  small and isolated.
+- **Just-in-time design docs** (🎯): A4 mailbox wire messages, B1 DAG store, C1 WASM
+  integration, C4 push. Write these as short `docs/design/<name>.md` when we reach them.
+- Stage D maps to SPEC §12 phases 1–3 and is intentionally coarse; we'll slice it
+  finer when Stage C lands.
