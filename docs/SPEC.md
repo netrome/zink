@@ -59,24 +59,37 @@ Everything below elaborates that paragraph.
 A signed statement, shared with contacts on request, treated as *advisory input*:
 
 ```
-Attestation {
-  subject:  key
-  claim:    same-person-as <key> | name <label> | avatar <blob-ref> | negative | revoke <attestation-hash>
-  attester: key
-  version:  monotonic (per attester+subject)
+Attestation {                          // id = BLAKE3(borsh(...)); sig is Ed25519 over the id
+  version:   format tag                // §10 protocol/format version (like every hashed object)
+  attester:  key
+  subject:   key
+  claim:     name <label> | avatar <blob-ref> | same-person-as <key> | negative
+  revision:  u64                        // supersession counter — see below
   sig
 }
 ```
 
 Uses, all the same primitive:
 
-- **Add my own device** — sign `same-person-as` linking a new key to an existing key of mine ("this key is also me").
+- **Add my own device** — sign `same-person-as` linking a new key to an existing key
+  of mine ("this key is also me"). A link is **strongest when mutual** (both keys sign
+  each other); the pairing handshake (§3.6) produces exactly that, and clients should
+  weight mutual links above unilateral ones — a lone key asserting "your key is also
+  me" is structurally just a claim, trusted only as much as its attester.
 - **Vouch for a contact** — sign that some key is the person I call Alice.
-- **Repudiate** — a `negative` claim ("I don't recognize this key") or a `revoke`.
+- **Repudiate** — a `negative` claim: an *active* disavowal ("I do not / no longer
+  recognise this key") that propagates so others can act on it (§3.4 relies on this).
 - **Profiles / third-party profiles** — `name` / `avatar` claims, self-asserted or
   about others. This is what makes "everyone can set profile pictures for other
   people" work: clients aggregate contacts' claims, weighted by trust, and show
   *"your friends call them …"*.
+
+**Supersession — one mechanism.** The highest `revision` wins, scoped per
+`(attester, subject, claim-kind, + the linked key for same-person-as)`. So bumping
+your avatar never disturbs your name, and linking a second device never unlinks the
+first. There is **no separate `revoke`**: to withdraw a claim you supersede it with a
+higher-`revision` `negative` — active disavowal that travels, rather than silence that
+doesn't.
 
 On the wire, attestations link **key → key**. A human label enters the protocol
 *only* as a broadcast `name` attestation. The label you assign but keep to yourself —
@@ -116,14 +129,39 @@ protocol stays tiny.
 Because there is no broadcast channel, **default privacy is structural**: an outsider
 has no path to your attestations unless someone in your circle chooses to relay one.
 
+### 3.6 Onboarding: the contact / pairing record (QR)
+
+Adding a contact and pairing your own next device use the **same artifact**: a client
+renders a QR / link encoding your **rendezvous record** —
+
+```
+ContactRecord {
+  keys:          [key]              // current device keys
+  attestations:  [Attestation]      // self-attestations (name, avatar, same-person-as links)
+  relays:        [relay endpoint]   // where my mailbox(es) live
+}
+```
+
+Scanning it gives the other side everything needed to reach and render you: whom to
+fan out to, how to display you, and — crucially — **which relay(s) hold your mailbox**
+when you're offline. This is the rendezvous answer: iroh discovery resolves
+key→address for *online* nodes, while `relays` is how a sender finds your inbox when
+you're not. Pairing is the same exchange between two of your own devices and yields a
+**mutual** `same-person-as` link. It's also the natural place to later hand over an
+initial `authorization` grant (§8) so a new contact can message you from the start.
+
 ---
 
 ## 4. Conversations & messages
 
 ### 4.1 Conversation = genesis-rooted message DAG
 
-- Identified by the hash of its **genesis message**. Distinct geneses are distinct
-  conversations automatically (no separate group id / nonce needed).
+- Identified by the hash of its **genesis message**. The genesis's own content is its
+  de-facto identifier — no separate group id or nonce field. Byte-identical geneses
+  (same sender, recipients, body, tick) are *by definition the same conversation*: a
+  harmless idempotent merge, not a collision to defend against. A client wanting two
+  identically-framed but distinct conversations just varies the body (e.g. a title) or
+  drops in its own nonce there — at the client layer.
 - A **message** is content-addressed; its BLAKE3 hash is its id.
 - Every message points to its **parents** — the sender's current known *heads*
   (messages with no known successor). This forms the causal DAG.
@@ -131,32 +169,41 @@ has no path to your attestations unless someone in your circle chooses to relay 
 The signed, hashed **core** (identical bytes for every recipient → one shared id):
 
 ```
-MessageCore {                          // id = BLAKE3(borsh(MessageCore))
-  version
-  conversation:  genesis hash
-  parents:       [message hash]        // current heads at send time
+MessageCore {                          // id = BLAKE3(borsh(MessageCore)); sender signs those 32 bytes
+  version:       format tag            // §10 protocol/format version
+  conversation:  genesis id | null     // null in the genesis itself; else the genesis's id
+  parents:       [message hash]        // current heads at send time ([] in the genesis)
   recipients:    [key]                 // who this was fanned out to (advisory, but signed)
   sender:        key
-  seq:           u64                   // per (sender, conversation) sequence — completeness / gap detection
-  logical:       u64                   // Lamport clock = 1 + max(parents.logical); ordering
+  seq:           u64                   // per (sender, conversation); 0 in the genesis
+  logical:       u64                   // Lamport = 1 + max(parents.logical); 0 in the genesis
   timestamp:     wall-clock hint       // display only, never trusted for ordering
   body:          ciphertext            // encrypted ONCE with a random content-key
   blob-refs:     [ {hash, kind: thumb|full} ]   // §7
 }
 ```
 
+**Genesis message:** `conversation = null`, `parents = []`, `seq = 0`, `logical = 0`;
+its own id becomes the conversation id every later message carries. This breaks the
+circularity — the genesis cannot contain its own hash.
+
 Transport envelope (**not** part of the id; per-recipient parts live here):
 
 ```
 MessageEnvelope {
-  core:      MessageCore
-  sig:       sender's signature over the id
-  key-wraps: [ {recipient: key, sealed: content-key sealed to recipient} ]   // + blob content-keys
+  version:        format tag           // transport framing evolves independently of the core
+  core:           MessageCore
+  sig:            Ed25519 by `sender` over the id (= BLAKE3(borsh(core)))
+  key-wraps:      [ {recipient: key,
+                     sealed: [ {ref: "body" | blob-hash, sealed-key} ]} ]   // one wrap per encrypted object
+  authorization?: opaque               // reserved anti-spam hook — capability/token (deferred; §8, §11)
 }
 ```
 
-Because the per-recipient `key-wraps` are outside the hashed core, **everyone derives
-the same message id**, so `parents` and the DAG hold across all recipients.
+Because the per-recipient `key-wraps` (and `authorization`) sit outside the hashed
+core, **everyone derives the same message id**, so `parents` and the DAG hold across
+all recipients. `sealed` carries one wrapped content-key per encrypted object — the
+body plus each blob (a thumb+full image → three).
 
 ### 4.2 There is no "group" — only fan-out
 
@@ -165,6 +212,11 @@ keys. "Membership" is not a protocol object — it is each client's local
 reconstruction from the `recipients` lists it has seen, plus its own key→person
 clustering. `recipients` is a signed, durable record of who the sender actually sent
 to (hence who could see it), but it **enforces nothing**.
+
+Anyone can fan out to anyone, so unsolicited contact is possible by design: **the
+social graph is the spam boundary.** Delivery from non-contacts is surfaced or
+filtered by client policy (and by relay retention policy, §5.3); the optional
+`authorization` hook (§8) is reserved for stronger anti-spam later.
 
 ### 4.3 Ordering (tenet 7)
 
@@ -229,15 +281,22 @@ both need *someone holding a message's content-key* to **re-wrap** it to their k
 devices. In practice your own devices re-wrap for each other (trust + they hold your
 full history), but a friend who was in the conversation could re-wrap for your new
 device just as well. The only gate is **willingness to re-wrap**, i.e. the same
-serving discretion as everything else — no shared "family key" exists. (This is not a
-new leak: a recipient could always re-send plaintext; re-wrapping is just the
-efficient form of the same inherent capability.) Backfill is never guaranteed
-complete, and the DAG makes incompleteness visible.
+serving discretion as everything else — no shared "family key" exists.
+
+**Why this is safe:** re-wrapping is not a new leak — a recipient could always just
+re-send the plaintext; re-wrap is merely the efficient form of that same inherent
+capability. Backfill is never guaranteed complete, and the DAG makes incompleteness
+visible.
 
 ### 5.3 Offline delivery & notifications (foundational, not a late feature)
 
 - **Mailbox:** when a recipient key is offline, its envelope is parked in a
   relay-hosted mailbox until the device reconnects. Untrusted for content.
+- **Mailbox auth (protocol) vs. retention (policy).** Reading or deleting a mailbox is
+  authenticated by a **signed challenge from the owning key** — protocol, so it works
+  across clients and stops anyone draining or deleting another key's mailbox. *Who may
+  deposit*, retention windows, rate/size caps, and whether to keep messages from
+  non-contacts are **relay-operator policy**, not protocol.
 - **Web Push gateway:** on deposit, the relay sends a content-free push ("you have
   messages"); the device wakes, authenticates, pulls, decrypts. Requires VAPID +
   browser push services — an unavoidable non-p2p dependency for a PWA. Acknowledged.
@@ -302,6 +361,14 @@ complete, and the DAG makes incompleteness visible.
   they are interchangeable — a user configures which relay(s) they use. I'll run one
   or two to start.
 
+**Anti-spam (deferred).** The social graph is the boundary. MVP = client-side
+contact-gating + relay-operator rate/size caps; **no economics**. The `authorization`
+field on messages/deposits (§4.1) reserves room for a later ladder: signed
+**send-capabilities** (delegable friend-of-friend introductions, reusing attestation
+machinery) → optional **fungible personal tokens** (each person is the sole clearing
+authority for their own token, so no global consensus — Chaumian-style, not a
+blockchain). Neither is built now.
+
 ---
 
 ## 9. Protocol building blocks (summary)
@@ -345,7 +412,9 @@ custom conversation views — is **client policy/UX**.
 
 **Still to pin down (implementation-level):** exact AEAD choice (e.g.
 XChaCha20-Poly1305), Web Push payload/encryption specifics, the `who-is-this` query
-format and default hop limit, sync-time head/`seq` exchange, relay discovery/config UX.
+format and default hop limit, sync-time head/`seq` exchange, the mailbox
+challenge-response format, relay discovery/config UX, and the deferred `authorization`
+field semantics (capability/token ladder).
 
 ---
 
