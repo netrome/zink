@@ -8,6 +8,8 @@ use std::sync::Arc;
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh_blobs::BlobsProtocol;
+use iroh_blobs::provider::events::{EventMask, EventSender, RequestMode};
 use zink_protocol::{
     MAILBOX_ALPN, MAX_REQUEST_BYTES, MailboxErrorCode, MailboxRequest, MailboxResponse,
     MailboxResult, PublicKey,
@@ -16,14 +18,33 @@ use zink_protocol::{
 use crate::mailbox::MailboxService;
 use crate::store::MailboxStore;
 
-/// Spawn a router serving the mailbox protocol on `endpoint`.
-pub fn spawn_mailbox_router<S: MailboxStore + fmt::Debug>(
+/// Spawn a router serving the mailbox protocol and the encrypted blob cache
+/// (iroh-blobs, SPEC §7) on `endpoint`.
+pub fn spawn_relay_router<S: MailboxStore + fmt::Debug>(
     endpoint: Endpoint,
     service: MailboxService<S>,
+    blob_store: &iroh_blobs::api::Store,
 ) -> Router {
     Router::builder(endpoint)
         .accept(MAILBOX_ALPN, MailboxHandler(Arc::new(service)))
+        .accept(
+            iroh_blobs::ALPN,
+            BlobsProtocol::new(blob_store, Some(blob_cache_events())),
+        )
         .spawn()
+}
+
+/// Blob-cache event config: pushes are allowed (uploaders deposit encrypted
+/// blobs so recipients can fetch after the sender goes offline); no event
+/// interception. Rate/size policy is a later concern (B4).
+fn blob_cache_events() -> EventSender {
+    let mask = EventMask {
+        push: RequestMode::None,
+        ..EventMask::DEFAULT
+    };
+    // No mode intercepts or notifies, so nothing is ever sent on the channel.
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    EventSender::new(tx, mask)
 }
 
 #[derive(Debug)]

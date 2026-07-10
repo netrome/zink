@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use zink_relay::mailbox::MailboxService;
-use zink_relay::net::spawn_mailbox_router;
+use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
 
 pub fn cli(args: &[&str]) -> Output {
@@ -46,6 +46,11 @@ pub async fn spawn_relay() -> (iroh::protocol::Router, String) {
         .expect("bind relay endpoint");
     let sock = *endpoint.addr().ip_addrs().next().expect("relay ip addr");
     let dial = format!("{}@{}", endpoint.id(), sock);
-    let router = spawn_mailbox_router(endpoint, MailboxService::new(InMemoryStore::new()));
+    let blob_store = iroh_blobs::store::mem::MemStore::new();
+    let router = spawn_relay_router(
+        endpoint,
+        MailboxService::new(InMemoryStore::new()),
+        &blob_store,
+    );
     (router, dial)
 }

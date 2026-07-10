@@ -7,8 +7,9 @@
 
 use iroh::Endpoint;
 use iroh::endpoint::presets;
+use iroh_blobs::store::mem::MemStore;
 use zink_relay::mailbox::MailboxService;
-use zink_relay::net::spawn_mailbox_router;
+use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
 
 #[tokio::main]
@@ -20,7 +21,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  dial: {}@{}", endpoint.id(), sock);
     }
 
-    let router = spawn_mailbox_router(endpoint, MailboxService::new(InMemoryStore::new()));
+    let blob_store = MemStore::new();
+    let router = spawn_relay_router(
+        endpoint,
+        MailboxService::new(InMemoryStore::new()),
+        &blob_store,
+    );
 
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;

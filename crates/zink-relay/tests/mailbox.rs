@@ -8,7 +8,7 @@ use zink_protocol::{
     MailboxRequest, MailboxResponse, MailboxResult, MessageCore, MessageEnvelope,
 };
 use zink_relay::mailbox::MailboxService;
-use zink_relay::net::spawn_mailbox_router;
+use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
 
 async fn spawn_relay() -> (iroh::protocol::Router, EndpointAddr) {
@@ -17,7 +17,12 @@ async fn spawn_relay() -> (iroh::protocol::Router, EndpointAddr) {
         .await
         .expect("bind relay endpoint");
     let addr = endpoint.addr();
-    let router = spawn_mailbox_router(endpoint, MailboxService::new(InMemoryStore::new()));
+    let blob_store = iroh_blobs::store::mem::MemStore::new();
+    let router = spawn_relay_router(
+        endpoint,
+        MailboxService::new(InMemoryStore::new()),
+        &blob_store,
+    );
     (router, addr)
 }
 

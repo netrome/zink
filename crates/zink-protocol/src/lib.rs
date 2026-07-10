@@ -25,8 +25,8 @@ pub use mailbox::{
     MailboxRequest, MailboxResponse, MailboxResult,
 };
 pub use message::{
-    BlobHash, BlobKind, BlobRef, KeyCommitment, KeyWrap, MessageCore, MessageDraft,
-    MessageEnvelope, MessageId, OpenError, SealedKey, SealedRef,
+    BlobDraft, BlobHash, BlobKind, BlobRef, EncryptedBlob, KeyCommitment, KeyWrap, MessageCore,
+    MessageDraft, MessageEnvelope, MessageId, OpenError, SealedKey, SealedMessage, SealedRef,
 };
 
 /// Format tag every hashed/wire object starts with (SPEC §10).

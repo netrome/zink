@@ -6,9 +6,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, RelayUrl};
+use iroh_blobs::store::mem::MemStore;
 use iroh_relay::server::{RelayConfig, Server, ServerConfig};
 use zink_relay::mailbox::MailboxService;
-use zink_relay::net::spawn_mailbox_router;
+use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
 
 #[tokio::main]
@@ -31,7 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  relay url:   {relay_url}");
     println!("  endpoint id: {}", endpoint.id());
 
-    let router = spawn_mailbox_router(endpoint, MailboxService::new(InMemoryStore::new()));
+    let blob_store = MemStore::new();
+    let router = spawn_relay_router(
+        endpoint,
+        MailboxService::new(InMemoryStore::new()),
+        &blob_store,
+    );
 
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;

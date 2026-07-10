@@ -51,6 +51,29 @@ pub struct MessageDraft {
     pub logical: u64,
     pub timestamp_ms: u64,
     pub plaintext: Vec<u8>,
+    pub blobs: Vec<BlobDraft>,
+}
+
+/// A blob to attach: plaintext in, encrypted + content-addressed by `seal`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BlobDraft {
+    pub kind: BlobKind,
+    pub plaintext: Vec<u8>,
+}
+
+/// What `seal` produces: the envelope to deposit, plus the encrypted blobs
+/// to upload to each recipient-relay's blob cache (SPEC §7).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SealedMessage {
+    pub envelope: MessageEnvelope,
+    pub blobs: Vec<EncryptedBlob>,
+}
+
+/// An encrypted blob, addressed by the BLAKE3 hash of its ciphertext.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EncryptedBlob {
+    pub hash: BlobHash,
+    pub bytes: Vec<u8>,
 }
 
 /// The unit of delivery. Per-recipient parts live here, *outside* the hashed
@@ -65,24 +88,47 @@ pub struct MessageEnvelope {
 }
 
 impl MessageEnvelope {
-    /// Encrypt and package a draft: fresh content-key, body encrypted once,
-    /// key committed in the core, key sealed per recipient, core signed.
+    /// Encrypt and package a draft: body and each blob encrypted once with
+    /// their own fresh content-keys, every key committed in the core and
+    /// sealed per recipient, core signed.
     pub fn seal(
         draft: MessageDraft,
         sender: &DeviceKey,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<Self, CryptoError> {
-        let content_key = ContentKey::generate(rng);
+    ) -> Result<SealedMessage, CryptoError> {
+        let body_key = ContentKey::generate(rng);
+        let mut blob_refs = Vec::new();
+        let mut blobs = Vec::new();
+        let mut blob_keys = Vec::new();
+        for blob in &draft.blobs {
+            let key = ContentKey::generate(rng);
+            let bytes = key.encrypt(&blob.plaintext, rng);
+            let hash = BlobHash(*blake3::hash(&bytes).as_bytes());
+            blob_refs.push(BlobRef {
+                hash,
+                kind: blob.kind,
+                key_commit: key.commitment(),
+            });
+            blobs.push(EncryptedBlob { hash, bytes });
+            blob_keys.push((hash, key));
+        }
         let key_wraps = draft
             .recipients
             .iter()
             .map(|recipient| {
+                let mut sealed = vec![SealedKey {
+                    object: SealedRef::Body,
+                    sealed_key: body_key.seal_for(recipient, rng)?,
+                }];
+                for (hash, key) in &blob_keys {
+                    sealed.push(SealedKey {
+                        object: SealedRef::Blob(*hash),
+                        sealed_key: key.seal_for(recipient, rng)?,
+                    });
+                }
                 Ok(KeyWrap {
                     recipient: *recipient,
-                    sealed: vec![SealedKey {
-                        object: SealedRef::Body,
-                        sealed_key: content_key.seal_for(recipient, rng)?,
-                    }],
+                    sealed,
                 })
             })
             .collect::<Result<Vec<_>, CryptoError>>()?;
@@ -95,13 +141,13 @@ impl MessageEnvelope {
             seq: draft.seq,
             logical: draft.logical,
             timestamp_ms: draft.timestamp_ms,
-            body: content_key.encrypt(&draft.plaintext, rng),
-            key_commit: content_key.commitment(),
-            blob_refs: vec![],
+            body: body_key.encrypt(&draft.plaintext, rng),
+            key_commit: body_key.commitment(),
+            blob_refs,
         };
         let mut envelope = Self::new(core, sender);
         envelope.key_wraps = key_wraps;
-        Ok(envelope)
+        Ok(SealedMessage { envelope, blobs })
     }
 
     /// Verify the signature, unseal this device's content-key (checked
@@ -123,6 +169,40 @@ impl MessageEnvelope {
         content_key
             .decrypt(&self.core.body)
             .map_err(OpenError::Crypto)
+    }
+
+    /// Decrypt a fetched blob: verify the signature, check the ciphertext
+    /// against the hash the signed core references, unseal this device's
+    /// blob key (checked against the per-blob commitment), decrypt.
+    pub fn open_blob(
+        &self,
+        device: &DeviceKey,
+        hash: &BlobHash,
+        encrypted: &[u8],
+    ) -> Result<Vec<u8>, OpenError> {
+        self.verify().map_err(OpenError::Signature)?;
+        let blob_ref = self
+            .core
+            .blob_refs
+            .iter()
+            .find(|blob_ref| blob_ref.hash == *hash)
+            .ok_or(OpenError::UnknownBlob)?;
+        if blake3::hash(encrypted).as_bytes() != &hash.0 {
+            return Err(OpenError::WrongBlobHash);
+        }
+        let wrap = self
+            .key_wraps
+            .iter()
+            .find(|wrap| wrap.recipient == device.public())
+            .ok_or(OpenError::NotARecipient)?;
+        let sealed = wrap
+            .sealed
+            .iter()
+            .find(|sealed| sealed.object == SealedRef::Blob(*hash))
+            .ok_or(OpenError::MissingBlobKey)?;
+        let content_key = ContentKey::open(&sealed.sealed_key, device, &blob_ref.key_commit)
+            .map_err(OpenError::Crypto)?;
+        content_key.decrypt(encrypted).map_err(OpenError::Crypto)
     }
 
     /// Sign `core` and wrap it for transport. `seal` is the high-level
@@ -172,6 +252,12 @@ pub enum OpenError {
     NotARecipient,
     /// This device's wrap has no sealed key for the body.
     MissingBodyKey,
+    /// The signed core references no blob with this hash.
+    UnknownBlob,
+    /// The fetched bytes do not hash to the referenced blob hash.
+    WrongBlobHash,
+    /// This device's wrap has no sealed key for this blob.
+    MissingBlobKey,
     /// Unsealing, the commitment check, or decryption failed.
     Crypto(CryptoError),
 }
@@ -182,6 +268,9 @@ impl fmt::Display for OpenError {
             Self::Signature(e) => write!(f, "signature check failed: {e}"),
             Self::NotARecipient => write!(f, "no key-wrap for this device"),
             Self::MissingBodyKey => write!(f, "no sealed content-key for the body"),
+            Self::UnknownBlob => write!(f, "message references no such blob"),
+            Self::WrongBlobHash => write!(f, "blob bytes do not match the referenced hash"),
+            Self::MissingBlobKey => write!(f, "no sealed content-key for this blob"),
             Self::Crypto(e) => write!(f, "could not decrypt: {e}"),
         }
     }
@@ -258,7 +347,23 @@ mod tests {
             logical: 0,
             timestamp_ms: 1_700_000_000_000,
             plaintext: plaintext.to_vec(),
+            blobs: vec![],
         }
+    }
+
+    fn draft_with_blobs(recipient: PublicKey) -> MessageDraft {
+        let mut draft = draft_to(vec![recipient], b"see attached");
+        draft.blobs = vec![
+            BlobDraft {
+                kind: BlobKind::Thumbnail,
+                plaintext: b"tiny preview".to_vec(),
+            },
+            BlobDraft {
+                kind: BlobKind::Full,
+                plaintext: vec![0xAB; 4096],
+            },
+        ];
+        draft
     }
 
     fn sample_core(sender: &DeviceKey) -> MessageCore {
@@ -432,13 +537,120 @@ mod tests {
         let keys: Vec<PublicKey> = recipients.iter().map(|r| r.public()).collect();
 
         // When
-        let envelope =
+        let sealed =
             MessageEnvelope::seal(draft_to(keys, b"hello, spine"), &sender, &mut rng).unwrap();
 
         // Then
         for recipient in &recipients {
-            assert_eq!(envelope.open(recipient).unwrap(), b"hello, spine");
+            assert_eq!(sealed.envelope.open(recipient).unwrap(), b"hello, spine");
         }
+    }
+
+    #[test]
+    fn seal__should_produce_blobs_that_every_recipient_can_open() {
+        // Given
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+
+        // When
+        let sealed =
+            MessageEnvelope::seal(draft_with_blobs(recipient.public()), &sender, &mut rng).unwrap();
+
+        // Then: refs in the signed core match the encrypted blobs, and each
+        // decrypts back to its plaintext
+        assert_eq!(sealed.envelope.core.blob_refs.len(), 2);
+        assert_eq!(sealed.blobs.len(), 2);
+        let expected: [&[u8]; 2] = [b"tiny preview", &[0xAB; 4096]];
+        for (blob, expected) in sealed.blobs.iter().zip(expected) {
+            let plaintext = sealed
+                .envelope
+                .open_blob(&recipient, &blob.hash, &blob.bytes)
+                .unwrap();
+            assert_eq!(plaintext, expected);
+        }
+        assert_eq!(sealed.envelope.open(&recipient).unwrap(), b"see attached");
+    }
+
+    #[test]
+    fn open_blob__should_reject_tampered_blob_bytes() {
+        // Given
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+        let sealed =
+            MessageEnvelope::seal(draft_with_blobs(recipient.public()), &sender, &mut rng).unwrap();
+
+        // When: one flipped bit in the fetched ciphertext
+        let blob = &sealed.blobs[0];
+        let mut tampered = blob.bytes.clone();
+        tampered[0] ^= 0x01;
+
+        // Then
+        assert_eq!(
+            sealed
+                .envelope
+                .open_blob(&recipient, &blob.hash, &tampered)
+                .unwrap_err(),
+            OpenError::WrongBlobHash
+        );
+    }
+
+    #[test]
+    fn open_blob__should_reject_a_hash_the_core_does_not_reference() {
+        // Given
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+        let sealed =
+            MessageEnvelope::seal(draft_with_blobs(recipient.public()), &sender, &mut rng).unwrap();
+
+        // When: bytes that hash correctly but were never part of the message
+        let foreign = b"not attached to anything";
+        let foreign_hash = BlobHash(*blake3::hash(foreign).as_bytes());
+
+        // Then
+        assert_eq!(
+            sealed
+                .envelope
+                .open_blob(&recipient, &foreign_hash, foreign)
+                .unwrap_err(),
+            OpenError::UnknownBlob
+        );
+    }
+
+    #[test]
+    fn open_blob__should_reject_blob_keys_swapped_between_blobs() {
+        // Given: the sealed blob keys live outside the signed core…
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+        let mut sealed =
+            MessageEnvelope::seal(draft_with_blobs(recipient.public()), &sender, &mut rng).unwrap();
+        let (thumb_hash, full_hash) = (sealed.blobs[0].hash, sealed.blobs[1].hash);
+
+        // When: the two blobs' sealed keys are swapped inside the wrap
+        for sealed_key in &mut sealed.envelope.key_wraps[0].sealed {
+            match &sealed_key.object {
+                SealedRef::Blob(h) if *h == thumb_hash => {
+                    sealed_key.object = SealedRef::Blob(full_hash)
+                }
+                SealedRef::Blob(h) if *h == full_hash => {
+                    sealed_key.object = SealedRef::Blob(thumb_hash)
+                }
+                _ => {}
+            }
+        }
+
+        // Then: …and the per-blob commitment catches the swap.
+        let blob = &sealed.blobs[0];
+        assert_eq!(
+            sealed
+                .envelope
+                .open_blob(&recipient, &blob.hash, &blob.bytes)
+                .unwrap_err(),
+            OpenError::Crypto(CryptoError::CommitmentMismatch)
+        );
     }
 
     #[test]
@@ -449,11 +661,11 @@ mod tests {
         let draft = draft_to(vec![device_key(2).public()], b"private");
 
         // When
-        let envelope = MessageEnvelope::seal(draft, &sender, &mut rng).unwrap();
+        let sealed = MessageEnvelope::seal(draft, &sender, &mut rng).unwrap();
 
         // Then
         assert_eq!(
-            envelope.open(&device_key(3)).unwrap_err(),
+            sealed.envelope.open(&device_key(3)).unwrap_err(),
             OpenError::NotARecipient
         );
     }
@@ -465,7 +677,9 @@ mod tests {
         let sender = device_key(1);
         let recipient = device_key(2);
         let draft = draft_to(vec![recipient.public()], b"original");
-        let mut envelope = MessageEnvelope::seal(draft, &sender, &mut rng).unwrap();
+        let mut envelope = MessageEnvelope::seal(draft, &sender, &mut rng)
+            .unwrap()
+            .envelope;
 
         // When
         let last = envelope.core.body.len() - 1;
@@ -490,13 +704,15 @@ mod tests {
             &sender,
             &mut rng,
         )
-        .unwrap();
+        .unwrap()
+        .envelope;
         let second = MessageEnvelope::seal(
             draft_to(vec![recipient.public()], b"second"),
             &sender,
             &mut rng,
         )
-        .unwrap();
+        .unwrap()
+        .envelope;
 
         // When
         first.key_wraps = second.key_wraps.clone();

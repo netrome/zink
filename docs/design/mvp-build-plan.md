@@ -68,11 +68,14 @@ web/                   # (Stage C) PWA assets + service worker
 - [x] **B2 · Fan-out & multi-relay.** Resolve recipients → distinct relays → deposit the
   envelope once per relay; relay indexes per recipient device-key; receiver dedups by id.
   *Done when:* 1→N delivery test and cross-relay dedup test pass.
-- [ ] **B3 · Blobs / images.** iroh-blobs, or blobs over the mailbox ALPN per A6's
+- [x] **B3 · Blobs / images.** iroh-blobs, or blobs over the mailbox ALPN per A6's
   outcome; encrypt-once blob + sealed content-key + `key-commit` in
   the envelope; thumbnail + full-res; relay blob cache (TTL/size). *Done when:* CLI sends
   an image, recipient fetches + decrypts both blobs (commitment checked); refetch deduped
-  by hash.
+  by hash. *(Went with iroh-blobs (push enabled via event mask). Blob-cache TTL/size
+  eviction deferred to B4 retention. iroh-blobs 0.103 caveats: push completion has no
+  in-band ack — confirmed via an Observe round-trip, whose stream sends diffs that must
+  be accumulated; the provider's push/observe gating reads `mask.get` upstream.)*
 - [ ] **B4 · Reliability.** Deposit ack + idempotent retry (by id); fetch cursor; ack/
   delete + TTL retention backstop. *Done when:* retry-idempotency and retention/expiry
   tests pass.
