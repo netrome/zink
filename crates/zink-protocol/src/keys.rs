@@ -6,7 +6,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use ed25519_dalek::Signer;
 
 /// A device's public key. One key = one device (SPEC §2).
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(
+    BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+)]
 pub struct PublicKey(pub [u8; 32]);
 
 /// An Ed25519 signature over a 32-byte content id.

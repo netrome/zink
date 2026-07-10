@@ -61,9 +61,10 @@ web/                   # (Stage C) PWA assets + service worker
 
 ## Stage B — Phase 0 completeness (native, via CLI)
 
-- [ ] **B1 · Message DAG & ordering.** 🎯 Genesis rules; parents/heads; conversation id;
+- [x] **B1 · Message DAG & ordering.** 🎯 Genesis rules; parents/heads; conversation id;
   a client-side DAG store; `logical`/`seq`; linearization. *Done when:* ordering tests
   pass — concurrent → deterministic order, partial-view linearization, `seq` gap detection.
+  *(Design: [dag-store.md](./dag-store.md). CLI threading waits for persistence, B5.)*
 - [ ] **B2 · Fan-out & multi-relay.** Resolve recipients → distinct relays → deposit the
   envelope once per relay; relay indexes per recipient device-key; receiver dedups by id.
   *Done when:* 1→N delivery test and cross-relay dedup test pass.

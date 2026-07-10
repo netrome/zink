@@ -190,7 +190,9 @@ impl fmt::Display for OpenError {
 impl std::error::Error for OpenError {}
 
 /// A message id: `BLAKE3(borsh(MessageCore))`. Content address and DAG node id.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(
+    BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+)]
 pub struct MessageId(pub [u8; 32]);
 
 /// Commitment to a content-key, carried inside the hashed core so "same id ⇒
