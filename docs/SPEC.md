@@ -439,7 +439,9 @@ custom conversation views — is **client policy/UX**.
 | `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |
 
 **Still to pin down (implementation-level):** the exact AEAD + key-commitment
-construction (e.g. XChaCha20-Poly1305 + a BLAKE3 commitment), Web Push
+construction (e.g. XChaCha20-Poly1305 + a **domain-separated** BLAKE3 commitment —
+`derive_key` with a context string like `"zink v1 key-commit"`, not a bare hash of the
+key), Web Push
 payload/encryption specifics, the `who-is-this` query format and default hop limit,
 sync-time head/`seq` exchange, the mailbox auth/handshake, relay discovery/config UX,
 and the deferred capability/token gating mechanism (added as a versioned field when needed).

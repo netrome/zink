@@ -45,7 +45,7 @@ web/                   # (Stage C) PWA assets + service worker
   deposits an envelope for B's key; B fetches + opens + prints plaintext. *Done when:* a
   manual run works **and** an automated test spins up relay + two clients end-to-end.
   **This is the milestone — the spine works.**
-- [ ] **A6 · 🎯🚩 Browser→relay spike (pulled forward).** A near-empty WASM client that
+- [ ] **A6 · 🎯🚩 Browser→relay spike.** A near-empty WASM client that
   opens a browser→relay connection on the mailbox transport and round-trips one frame;
   also confirm **iroh-blobs compiles for WASM**. *Done when:* a browser round-trips a
   frame against the relay. **Converts the plan's biggest unknown into a known before
@@ -61,8 +61,8 @@ web/                   # (Stage C) PWA assets + service worker
 - [ ] **B2 · Fan-out & multi-relay.** Resolve recipients → distinct relays → deposit the
   envelope once per relay; relay indexes per recipient device-key; receiver dedups by id.
   *Done when:* 1→N delivery test and cross-relay dedup test pass.
-- [ ] **B3 · Blobs / images.** iroh-blobs (WASM viability confirmed in A6; else serve
-  blobs over the mailbox ALPN); encrypt-once blob + sealed content-key + `key-commit` in
+- [ ] **B3 · Blobs / images.** iroh-blobs, or blobs over the mailbox ALPN per A6's
+  outcome; encrypt-once blob + sealed content-key + `key-commit` in
   the envelope; thumbnail + full-res; relay blob cache (TTL/size). *Done when:* CLI sends
   an image, recipient fetches + decrypts both blobs (commitment checked); refetch deduped
   by hash.
@@ -80,7 +80,8 @@ web/                   # (Stage C) PWA assets + service worker
 - [ ] **C1 · WASM + browser→relay.** 🎯 Build `zink-protocol`/`zink-client` to WASM
   (`iroh` `default-features = false`); connect browser→relay over WebSocket; fetch a
   message. *Done when:* a browser fetches a message **deposited by `zink-cli`** — proving
-  cross-implementation interop. *(Risk spike: iroh-in-WASM.)*
+  cross-implementation interop. (The iroh-in-WASM unknown is retired in A6; this slice is
+  integration work.)
 - [ ] **C2 · Client core in-browser.** Keystore (IndexedDB); ContactRecord generate +
   QR scan; DAG store (IndexedDB); fan-out send + mailbox drain. *Done when:* two browser
   instances hold a 1:1 conversation via the relay.
@@ -110,7 +111,7 @@ online and offline, with notifications.
 ## Notes
 
 - **Risk spikes** (🎯 with *Risk spike*) are integration unknowns paper can't resolve —
-  A4 (custom ALPN), C1 (iroh WASM), C4 (push). Expect to learn by building; keep them
+  A4 (custom ALPN), A6 (iroh WASM), C4 (push). Expect to learn by building; keep them
   small and isolated.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages, B1 DAG store, C1 WASM
   integration, C4 push. Write these as short `docs/design/<name>.md` when we reach them.
