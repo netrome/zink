@@ -1,4 +1,9 @@
 //! Relay binary: iroh endpoint + mailbox ALPN (in-memory store for now).
+//!
+//! Runs self-sufficient: no external iroh relays or discovery services. A
+//! zink relay sits on a publicly reachable address and clients dial it by
+//! its full `EndpointAddr` (id + socket addrs), which the ContactRecord's
+//! `relays` field carries (SPEC §3.6).
 
 use iroh::Endpoint;
 use iroh::endpoint::presets;
@@ -8,9 +13,10 @@ use zink_relay::store::InMemoryStore;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = Endpoint::builder(presets::N0).bind().await?;
+    let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
     println!("zink-relay listening");
     println!("  endpoint id: {}", endpoint.id());
+    println!("  addr: {:?}", endpoint.addr());
 
     let router = spawn_mailbox_router(endpoint, MailboxService::new(InMemoryStore::new()));
 
