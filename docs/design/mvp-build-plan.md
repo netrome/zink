@@ -83,6 +83,11 @@ web/                   # (Stage C) PWA assets + service worker
   mailbox retention and blob TTL, hourly GC.)*
 - [ ] **B5 · Persistence.** Relay mailbox + blob cache on-disk (behind a port); client
   DAG + keystore persisted. *Done when:* messages/keys survive a restart.
+  *(Retention carry-over from B4: persisted timestamps must be wall-clock — `Instant`
+  doesn't serialize. Blob retention should move off the in-memory push-time registry
+  onto iroh-blobs' persisted **tags** (timestamped tag per push; evict = delete old
+  tags, GC collects) — else a restart leaves persisted blobs unprotected and the first
+  GC run wipes the cache.)*
 
 ## Stage C — PWA client (WASM)
 

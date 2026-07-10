@@ -13,7 +13,7 @@ use iroh_blobs::Hash;
 use iroh_blobs::store::mem::{MemStore, Options};
 use iroh_blobs::store::{GcConfig, ProtectCb, ProtectOutcome};
 
-use crate::store::Clock;
+use crate::clock::{Clock, SystemClock};
 
 /// How long a pushed blob is kept for recipients to fetch.
 pub const DEFAULT_BLOB_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -21,18 +21,20 @@ pub const DEFAULT_BLOB_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Tracks push times and answers "which blobs are still protected?".
-pub struct BlobRetention {
+pub struct BlobRetention<C: Clock = SystemClock> {
     pushed_at: Mutex<HashMap<Hash, Instant>>,
     ttl: Duration,
-    clock: Clock,
+    clock: C,
 }
 
 impl BlobRetention {
     pub fn new(ttl: Duration) -> Self {
-        Self::with_clock(ttl, Arc::new(Instant::now))
+        Self::with_clock(ttl, SystemClock)
     }
+}
 
-    pub fn with_clock(ttl: Duration, clock: Clock) -> Self {
+impl<C: Clock> BlobRetention<C> {
+    pub fn with_clock(ttl: Duration, clock: C) -> Self {
         Self {
             pushed_at: Mutex::new(HashMap::new()),
             ttl,
@@ -43,14 +45,14 @@ impl BlobRetention {
     /// Record (or refresh) a push. A re-push of an existing blob restarts
     /// its TTL — deliberate: someone still cares about it.
     pub fn record(&self, hash: Hash) {
-        let now = (self.clock)();
+        let now = self.clock.now();
         self.pushed_at.lock().unwrap().insert(hash, now);
     }
 
     /// Hashes still inside the TTL window. Expired entries are pruned from
     /// the registry as a side effect — GC deletes their blobs right after.
     pub fn protected(&self) -> HashSet<Hash> {
-        let now = (self.clock)();
+        let now = self.clock.now();
         let ttl = self.ttl;
         let mut pushed_at = self.pushed_at.lock().unwrap();
         pushed_at.retain(|_, at| now.duration_since(*at) < ttl);
@@ -58,7 +60,7 @@ impl BlobRetention {
     }
 }
 
-impl std::fmt::Debug for BlobRetention {
+impl<C: Clock> std::fmt::Debug for BlobRetention<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlobRetention")
             .field("ttl", &self.ttl)
@@ -68,7 +70,7 @@ impl std::fmt::Debug for BlobRetention {
 
 /// A blob store wired for cache semantics: GC runs every `gc_interval` and
 /// deletes everything `retention` no longer protects.
-pub fn blob_cache(retention: Arc<BlobRetention>, gc_interval: Duration) -> MemStore {
+pub fn blob_cache<C: Clock>(retention: Arc<BlobRetention<C>>, gc_interval: Duration) -> MemStore {
     let protect: ProtectCb = Arc::new(move |live| {
         let retention = retention.clone();
         Box::pin(async move {
@@ -88,12 +90,7 @@ pub fn blob_cache(retention: Arc<BlobRetention>, gc_interval: Duration) -> MemSt
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-
-    fn test_clock() -> (Arc<Mutex<Instant>>, Clock) {
-        let now = Arc::new(Mutex::new(Instant::now()));
-        let handle = now.clone();
-        (now, Arc::new(move || *handle.lock().unwrap()))
-    }
+    use crate::testutil::test_clock;
 
     #[test]
     fn protected__should_include_blobs_inside_the_ttl_window() {

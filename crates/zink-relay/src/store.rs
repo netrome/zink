@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use zink_protocol::{MessageEnvelope, PublicKey};
+
+use crate::clock::{Clock, SystemClock};
 
 /// Retention backstop: an envelope a device never acks is dropped after
 /// this long (mailbox design §8). Policy, not protocol.
@@ -37,16 +39,13 @@ pub trait MailboxStore: Send + Sync + 'static {
     fn ack(&self, mailbox: PublicKey, up_to: u64) -> impl Future<Output = ()> + Send;
 }
 
-/// The time source, injectable so retention tests need no sleeping.
-pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
-
-pub struct InMemoryStore {
+pub struct InMemoryStore<C: Clock = SystemClock> {
     mailboxes: Mutex<HashMap<PublicKey, Mailbox>>,
     retention: Duration,
-    clock: Clock,
+    clock: C,
 }
 
-impl std::fmt::Debug for InMemoryStore {
+impl<C: Clock> std::fmt::Debug for InMemoryStore<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InMemoryStore")
             .field("retention", &self.retention)
@@ -60,10 +59,12 @@ impl InMemoryStore {
     }
 
     pub fn with_retention(retention: Duration) -> Self {
-        Self::with_clock(retention, Arc::new(Instant::now))
+        Self::with_clock(retention, SystemClock)
     }
+}
 
-    pub fn with_clock(retention: Duration, clock: Clock) -> Self {
+impl<C: Clock> InMemoryStore<C> {
+    pub fn with_clock(retention: Duration, clock: C) -> Self {
         Self {
             mailboxes: Mutex::new(HashMap::new()),
             retention,
@@ -74,7 +75,7 @@ impl InMemoryStore {
     /// Drop expired items. Called lazily on every access — no background
     /// task needed at this scale.
     fn purge_expired(&self, mailbox: &mut Mailbox) {
-        let now = (self.clock)();
+        let now = self.clock.now();
         let retention = self.retention;
         mailbox
             .items
@@ -101,7 +102,7 @@ struct StoredItem {
     envelope: MessageEnvelope,
 }
 
-impl MailboxStore for InMemoryStore {
+impl<C: Clock> MailboxStore for InMemoryStore<C> {
     async fn register(&self, mailbox: PublicKey) {
         self.mailboxes.lock().unwrap().entry(mailbox).or_default();
     }
@@ -119,7 +120,7 @@ impl MailboxStore for InMemoryStore {
         state.last_cursor += 1;
         state.items.push(StoredItem {
             cursor: state.last_cursor,
-            deposited_at: (self.clock)(),
+            deposited_at: self.clock.now(),
             envelope,
         });
     }
@@ -151,13 +152,7 @@ mod tests {
     use zink_protocol::{DeviceKey, FORMAT_VERSION, KeyCommitment, MessageCore};
 
     use super::*;
-
-    /// A controllable clock: tests advance it explicitly, no sleeping.
-    fn test_clock() -> (Arc<Mutex<Instant>>, Clock) {
-        let now = Arc::new(Mutex::new(Instant::now()));
-        let handle = now.clone();
-        (now, Arc::new(move || *handle.lock().unwrap()))
-    }
+    use crate::testutil::test_clock;
 
     fn envelope_to(recipient: PublicKey, body: &[u8]) -> MessageEnvelope {
         let sender = DeviceKey::from_seed([1; 32]);

@@ -26,6 +26,9 @@ Ports & adapters, without the ceremony — we don't go all-in.
   `Mailbox`, `PushSender`, `BlobStore`, `Transport`. Domain code depends on the trait,
   never a concrete implementation. Ports are **async traits**; the pure core stays
   **synchronous** (no async runtime, no threads) so it ports cleanly to single-threaded WASM.
+  Consume ports via **generics** (monomorphized, `S: MailboxStore`), not `dyn` trait
+  objects or type-erased closures — even a tiny dependency like a clock gets a named
+  trait (`Clock`) with a real and a test implementation.
 - **Adapters** implement ports against the real world (iroh connections, a Web Push
   sender, on-disk storage) and are injected at the call site, so the domain can be
   driven by fakes in tests.

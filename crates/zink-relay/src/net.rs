@@ -16,6 +16,7 @@ use zink_protocol::{
 };
 
 use crate::blobs::BlobRetention;
+use crate::clock::Clock;
 use crate::mailbox::MailboxService;
 use crate::store::MailboxStore;
 
@@ -23,11 +24,11 @@ use crate::store::MailboxStore;
 /// (iroh-blobs, SPEC §7) on `endpoint`. Pushes are allowed (uploaders
 /// deposit encrypted blobs so recipients can fetch after the sender goes
 /// offline) and feed `retention`, which bounds each blob's lifetime.
-pub fn spawn_relay_router<S: MailboxStore + fmt::Debug>(
+pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, C: Clock>(
     endpoint: Endpoint,
     service: MailboxService<S>,
     blob_store: &iroh_blobs::api::Store,
-    retention: Arc<BlobRetention>,
+    retention: Arc<BlobRetention<C>>,
 ) -> Router {
     Router::builder(endpoint)
         .accept(MAILBOX_ALPN, MailboxHandler(Arc::new(service)))
@@ -42,7 +43,7 @@ pub fn spawn_relay_router<S: MailboxStore + fmt::Debug>(
 /// registry. iroh-blobs 0.103 gates *every* request type on `mask.get`
 /// (upstream quirk), so `get` carries the Notify mode that push needs;
 /// `push` is set to the same for when upstream fixes the dispatch.
-fn blob_cache_events(retention: Arc<BlobRetention>) -> EventSender {
+fn blob_cache_events<C: Clock>(retention: Arc<BlobRetention<C>>) -> EventSender {
     let mask = EventMask {
         get: RequestMode::Notify,
         push: RequestMode::Notify,

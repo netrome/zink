@@ -5,6 +5,9 @@
 //! in `net`.
 
 pub mod blobs;
+pub mod clock;
 pub mod mailbox;
 pub mod net;
 pub mod store;
+#[cfg(test)]
+mod testutil;
