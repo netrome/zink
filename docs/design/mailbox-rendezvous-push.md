@@ -190,8 +190,9 @@ mitigation; the protocol assumes the relay is untrusted regardless.
 - **Relay redundancy** — sender's choice; the receiver dedups by message id either way.
 - **Mailbox transport** — iroh ALPN (connection identity gives auth for free).
 
-**Still open (implementation-level):** exact deposit/fetch/ack wire messages and cursor
-semantics; push payload format & VAPID setup; blob-cache eviction policy.
+**Still open (implementation-level):** push payload format & VAPID setup; blob-cache
+eviction policy. *(The deposit/fetch/ack wire messages and cursor semantics are resolved
+in [mailbox-wire-protocol.md](./mailbox-wire-protocol.md).)*
 
 ---
 

@@ -35,7 +35,7 @@ web/                   # (Stage C) PWA assets + service worker
   conversion); open. *Done when:* encrypt→seal→open→decrypt round-trips for N recipients;
   **`key-commit` verified before trusting** (commitment mismatch rejects); wrong key
   fails; malformed input returns an error (never panics).
-- [ ] **A4 · Relay mailbox + ALPN (in-memory).** 🎯 iroh endpoint with a custom ALPN;
+- [x] **A4 · Relay mailbox + ALPN (in-memory).** 🎯 iroh endpoint with a custom ALPN;
   `register` / `deposit` / `fetch` / `ack` over the authenticated connection (auth =
   connection key). In-memory store. Define the mailbox ops **transport-agnostically** (so
   a WebSocket fallback doesn't ripple into Stage B) and the ports as **async traits**.

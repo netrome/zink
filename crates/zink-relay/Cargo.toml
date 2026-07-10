@@ -4,3 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+iroh = "1.0.2"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal"] }
+zink-protocol = { version = "0.1.0", path = "../zink-protocol" }
