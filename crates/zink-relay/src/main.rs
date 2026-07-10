@@ -5,9 +5,11 @@
 //! its full `EndpointAddr` (id + socket addrs), which the ContactRecord's
 //! `relays` field carries (SPEC §3.6).
 
+use std::sync::Arc;
+
 use iroh::Endpoint;
 use iroh::endpoint::presets;
-use iroh_blobs::store::mem::MemStore;
+use zink_relay::blobs::{BlobRetention, DEFAULT_BLOB_TTL, DEFAULT_GC_INTERVAL, blob_cache};
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
@@ -21,11 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  dial: {}@{}", endpoint.id(), sock);
     }
 
-    let blob_store = MemStore::new();
+    let retention = Arc::new(BlobRetention::new(DEFAULT_BLOB_TTL));
+    let blob_store = blob_cache(retention.clone(), DEFAULT_GC_INTERVAL);
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
+        retention,
     );
 
     tokio::signal::ctrl_c().await?;

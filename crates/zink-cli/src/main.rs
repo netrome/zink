@@ -117,18 +117,7 @@ async fn send(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("stage blob: {e}"))?;
     }
     for relay in &relays {
-        let connection = connect(&endpoint, relay, MAILBOX_ALPN).await?;
-        match request(
-            &connection,
-            MailboxOp::Deposit {
-                envelope: Box::new(sealed.envelope.clone()),
-            },
-        )
-        .await?
-        {
-            MailboxResult::Deposited { .. } => {}
-            other => return Err(format!("unexpected response from {relay}: {other:?}")),
-        }
+        deposit_with_retry(&endpoint, relay, &sealed.envelope).await?;
         if !sealed.blobs.is_empty() {
             let blobs_conn = connect(&endpoint, relay, iroh_blobs::ALPN).await?;
             for blob in &sealed.blobs {
@@ -151,6 +140,40 @@ async fn send(args: &[String]) -> Result<(), String> {
         relays.len()
     );
     Ok(())
+}
+
+/// Deposit with a fresh connection per attempt. Deposits dedup by message
+/// id on the relay, so retrying after a transport error is always safe.
+async fn deposit_with_retry(
+    endpoint: &Endpoint,
+    relay: &str,
+    envelope: &MessageEnvelope,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            eprintln!("deposit to {relay} failed ({last_error}); retrying");
+        }
+        let attempt_result = async {
+            let connection = connect(endpoint, relay, MAILBOX_ALPN).await?;
+            request(
+                &connection,
+                MailboxOp::Deposit {
+                    envelope: Box::new(envelope.clone()),
+                },
+            )
+            .await
+        }
+        .await;
+        match attempt_result {
+            Ok(MailboxResult::Deposited { .. }) => return Ok(()),
+            Ok(other) => return Err(format!("unexpected response from {relay}: {other:?}")),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(format!(
+        "deposit to {relay} failed after 3 attempts: {last_error}"
+    ))
 }
 
 /// Push completion is not acknowledged in-band (iroh-blobs 0.103), so

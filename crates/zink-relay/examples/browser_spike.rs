@@ -32,11 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  relay url:   {relay_url}");
     println!("  endpoint id: {}", endpoint.id());
 
+    let retention = std::sync::Arc::new(zink_relay::blobs::BlobRetention::new(
+        zink_relay::blobs::DEFAULT_BLOB_TTL,
+    ));
     let blob_store = MemStore::new();
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
+        retention,
     );
 
     tokio::signal::ctrl_c().await?;

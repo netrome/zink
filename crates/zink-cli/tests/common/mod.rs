@@ -46,11 +46,15 @@ pub async fn spawn_relay() -> (iroh::protocol::Router, String) {
         .expect("bind relay endpoint");
     let sock = *endpoint.addr().ip_addrs().next().expect("relay ip addr");
     let dial = format!("{}@{}", endpoint.id(), sock);
+    let retention = std::sync::Arc::new(zink_relay::blobs::BlobRetention::new(
+        zink_relay::blobs::DEFAULT_BLOB_TTL,
+    ));
     let blob_store = iroh_blobs::store::mem::MemStore::new();
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
+        retention,
     );
     (router, dial)
 }

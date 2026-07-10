@@ -17,11 +17,15 @@ async fn spawn_relay() -> (iroh::protocol::Router, EndpointAddr) {
         .await
         .expect("bind relay endpoint");
     let addr = endpoint.addr();
+    let retention = std::sync::Arc::new(zink_relay::blobs::BlobRetention::new(
+        zink_relay::blobs::DEFAULT_BLOB_TTL,
+    ));
     let blob_store = iroh_blobs::store::mem::MemStore::new();
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
+        retention,
     );
     (router, addr)
 }
@@ -118,6 +122,36 @@ async fn mailbox__should_deliver_a_deposit_from_one_endpoint_to_another() {
         panic!("expected Envelopes");
     };
     assert!(items.is_empty());
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn mailbox__should_dedup_a_retried_deposit_over_the_wire() {
+    // Given: a relay with B registered
+    let (_router, relay_addr) = spawn_relay().await;
+    let (_b_endpoint, b) = client(2, &relay_addr).await;
+    request(&b, MailboxOp::Register).await;
+
+    // When: the sender retries the same deposit (e.g. after a lost ack)
+    let (_a_endpoint, a) = client(1, &relay_addr).await;
+    let envelope = envelope_from_1_to_2();
+    for _ in 0..3 {
+        let result = request(
+            &a,
+            MailboxOp::Deposit {
+                envelope: Box::new(envelope.clone()),
+            },
+        )
+        .await;
+        assert_eq!(result, MailboxResult::Deposited { id: envelope.id() });
+    }
+
+    // Then: the mailbox holds it exactly once
+    let MailboxResult::Envelopes { items } = request(&b, MailboxOp::Fetch { after: 0 }).await
+    else {
+        panic!("expected Envelopes");
+    };
+    assert_eq!(items.len(), 1);
 }
 
 #[tokio::test]

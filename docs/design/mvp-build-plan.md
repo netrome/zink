@@ -76,9 +76,11 @@ web/                   # (Stage C) PWA assets + service worker
   eviction deferred to B4 retention. iroh-blobs 0.103 caveats: push completion has no
   in-band ack — confirmed via an Observe round-trip, whose stream sends diffs that must
   be accumulated; the provider's push/observe gating reads `mask.get` upstream.)*
-- [ ] **B4 · Reliability.** Deposit ack + idempotent retry (by id); fetch cursor; ack/
+- [x] **B4 · Reliability.** Deposit ack + idempotent retry (by id); fetch cursor; ack/
   delete + TTL retention backstop. *Done when:* retry-idempotency and retention/expiry
-  tests pass.
+  tests pass. *(Also the blob-cache TTL eviction deferred from B3: pushed blobs are
+  tracked and protected for a TTL; iroh-blobs GC collects the rest. Defaults: 30-day
+  mailbox retention and blob TTL, hourly GC.)*
 - [ ] **B5 · Persistence.** Relay mailbox + blob cache on-disk (behind a port); client
   DAG + keystore persisted. *Done when:* messages/keys survive a restart.
 
