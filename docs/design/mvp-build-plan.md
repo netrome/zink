@@ -26,7 +26,7 @@ web/                   # (Stage C) PWA assets + service worker
 
 - [x] **A1 · Workspace scaffold.** Cargo workspace with `zink-protocol`, `zink-relay`,
   `zink-cli` (empty-ish). *Done when:* `cargo build`, `cargo test`, `clippy` all pass.
-- [ ] **A2 · Protocol core: keys, types, hashing.** Ed25519 keypair; `MessageCore` /
+- [x] **A2 · Protocol core: keys, types, hashing.** Ed25519 keypair; `MessageCore` /
   `MessageEnvelope` + `Attestation` types; canonical BORSH encode/decode; message id =
   `BLAKE3(borsh(core))`; sign/verify. *Done when:* round-trip, **determinism** (same
   value → same bytes → same id), and signature-verify tests pass. Pure, no I/O.
