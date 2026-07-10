@@ -150,6 +150,11 @@ you're not. Pairing is the same exchange between two of your own devices and yie
 **mutual** `same-person-as` link. It's also the natural place to later hand over an
 initial capability grant (§8) so a new contact can message you from the start.
 
+**Freshness.** `relays` is the rendezvous anchor for offline delivery, so it must stay
+reasonably current. It propagates lazily — via the QR at add-time, `who-is-this`, and a
+version hint piggybacked on messages — and a device keeps an abandoned relay alive for a
+grace period. Brief mis-delivery windows are tolerated (best-effort, tenet 6).
+
 ---
 
 ## 4. Conversations & messages
@@ -201,7 +206,9 @@ MessageEnvelope {
 
 Because the per-recipient `key-wraps` sit outside the hashed core, **everyone derives
 the same message id**, so `parents` and the DAG hold across all recipients. `sealed` carries one wrapped content-key per encrypted object — the
-body plus each blob (a thumb+full image → three).
+body plus each blob (a thumb+full image → three). The **envelope is the unit of
+delivery**: a sender deposits it once per distinct recipient-relay, and a relay indexes
+it under each recipient device-key it hosts (see `docs/design/mailbox-rendezvous-push.md`).
 
 ### 4.2 There is no "group" — only fan-out
 
@@ -290,9 +297,11 @@ visible.
 
 - **Mailbox:** when a recipient key is offline, its envelope is parked in a
   relay-hosted mailbox until the device reconnects. Untrusted for content.
-- **Mailbox auth (protocol) vs. retention (policy).** Reading or deleting a mailbox is
-  authenticated by a **signed challenge from the owning key** — protocol, so it works
-  across clients and stops anyone draining or deleting another key's mailbox. *Who may
+- **Mailbox auth (protocol) vs. retention (policy).** Mailbox ops run over an
+  **authenticated iroh connection**, so the relay already knows the connected peer's
+  key: reading/deleting your mailbox just requires the connection key to match the
+  mailbox key — no separate challenge (a signed challenge is only the stateless/HTTP
+  fallback). This stops anyone draining or deleting another key's mailbox. *Who may
   deposit*, retention windows, rate/size caps, and whether to keep messages from
   non-contacts are **relay-operator policy**, not protocol.
 - **Web Push gateway:** on deposit, the relay sends a content-free push ("you have
