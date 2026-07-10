@@ -16,7 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
     println!("zink-relay listening");
     println!("  endpoint id: {}", endpoint.id());
-    println!("  addr: {:?}", endpoint.addr());
+    for sock in endpoint.addr().ip_addrs() {
+        println!("  dial: {}@{}", endpoint.id(), sock);
+    }
 
     let router = spawn_mailbox_router(endpoint, MailboxService::new(InMemoryStore::new()));
 

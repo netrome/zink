@@ -28,6 +28,13 @@ impl DeviceKey {
         PublicKey(self.0.verifying_key().to_bytes())
     }
 
+    /// The seed this key was constructed from. For keystore persistence and
+    /// for reusing the device key as the transport (iroh) key — handle with
+    /// care; never send it anywhere.
+    pub fn seed(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
     pub(crate) fn sign_hash(&self, hash: &[u8; 32]) -> Signature {
         Signature(self.0.sign(hash).to_bytes())
     }

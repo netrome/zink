@@ -41,10 +41,11 @@ web/                   # (Stage C) PWA assets + service worker
   a WebSocket fallback doesn't ripple into Stage B) and the ports as **async traits**.
   *Done when:* an integration test deposits from one endpoint and fetches from another.
   *(Risk spike: custom-ALPN handling in iroh 1.0.)*
-- [ ] **A5 · 🚩 WALKING SKELETON.** `zink-cli` send/recv through the relay: A encrypts +
+- [x] **A5 · 🚩 WALKING SKELETON.** `zink-cli` send/recv through the relay: A encrypts +
   deposits an envelope for B's key; B fetches + opens + prints plaintext. *Done when:* a
   manual run works **and** an automated test spins up relay + two clients end-to-end.
-  **This is the milestone — the spine works.**
+  **This is the milestone — the spine works.** ✅ *(2026-07-10: manual run + automated
+  `walking_skeleton` test both green.)*
 - [ ] **A6 · 🎯🚩 Browser→relay spike.** A near-empty WASM client that
   opens a browser→relay connection on the mailbox transport and round-trips one frame;
   also confirm **iroh-blobs compiles for WASM**. *Done when:* a browser round-trips a

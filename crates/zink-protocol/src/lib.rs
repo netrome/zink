@@ -9,6 +9,8 @@ mod crypto;
 mod keys;
 mod mailbox;
 mod message;
+#[cfg(test)]
+mod testutil;
 
 pub use attestation::{Attestation, AttestationId, Claim, SignedAttestation};
 pub use codec::DecodeError;
@@ -19,8 +21,8 @@ pub use mailbox::{
     MailboxRequest, MailboxResponse, MailboxResult,
 };
 pub use message::{
-    BlobHash, BlobKind, BlobRef, KeyCommitment, KeyWrap, MessageCore, MessageEnvelope, MessageId,
-    SealedKey, SealedRef,
+    BlobHash, BlobKind, BlobRef, KeyCommitment, KeyWrap, MessageCore, MessageDraft,
+    MessageEnvelope, MessageId, OpenError, SealedKey, SealedRef,
 };
 
 /// Format tag every hashed/wire object starts with (SPEC §10).

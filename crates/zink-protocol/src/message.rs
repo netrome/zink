@@ -1,9 +1,13 @@
 //! Messages: the signed, hashed core and its transport envelope (SPEC §4.1).
 
+use std::fmt;
+
 use borsh::{BorshDeserialize, BorshSerialize};
+use rand_core::CryptoRngCore;
 
 use crate::FORMAT_VERSION;
 use crate::codec::{self, DecodeError};
+use crate::crypto::{ContentKey, CryptoError};
 use crate::keys::{self, DeviceKey, PublicKey, Signature, VerifyError};
 
 /// The signed, hashed core — identical bytes for every recipient, so everyone
@@ -36,6 +40,19 @@ impl MessageCore {
     }
 }
 
+/// The plaintext precursor of a message: everything the sender chooses,
+/// before encryption. `seal` turns it into a deliverable envelope.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MessageDraft {
+    pub conversation: Option<MessageId>,
+    pub parents: Vec<MessageId>,
+    pub recipients: Vec<PublicKey>,
+    pub seq: u64,
+    pub logical: u64,
+    pub timestamp_ms: u64,
+    pub plaintext: Vec<u8>,
+}
+
 /// The unit of delivery. Per-recipient parts live here, *outside* the hashed
 /// core, so all recipients share one message id.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -48,8 +65,68 @@ pub struct MessageEnvelope {
 }
 
 impl MessageEnvelope {
-    /// Sign `core` and wrap it for transport. Key-wraps are filled by the
-    /// encryption layer (slice A3).
+    /// Encrypt and package a draft: fresh content-key, body encrypted once,
+    /// key committed in the core, key sealed per recipient, core signed.
+    pub fn seal(
+        draft: MessageDraft,
+        sender: &DeviceKey,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, CryptoError> {
+        let content_key = ContentKey::generate(rng);
+        let key_wraps = draft
+            .recipients
+            .iter()
+            .map(|recipient| {
+                Ok(KeyWrap {
+                    recipient: *recipient,
+                    sealed: vec![SealedKey {
+                        object: SealedRef::Body,
+                        sealed_key: content_key.seal_for(recipient, rng)?,
+                    }],
+                })
+            })
+            .collect::<Result<Vec<_>, CryptoError>>()?;
+        let core = MessageCore {
+            version: FORMAT_VERSION,
+            conversation: draft.conversation,
+            parents: draft.parents,
+            recipients: draft.recipients,
+            sender: sender.public(),
+            seq: draft.seq,
+            logical: draft.logical,
+            timestamp_ms: draft.timestamp_ms,
+            body: content_key.encrypt(&draft.plaintext, rng),
+            key_commit: content_key.commitment(),
+            blob_refs: vec![],
+        };
+        let mut envelope = Self::new(core, sender);
+        envelope.key_wraps = key_wraps;
+        Ok(envelope)
+    }
+
+    /// Verify the signature, unseal this device's content-key (checked
+    /// against the core's commitment), decrypt the body.
+    pub fn open(&self, device: &DeviceKey) -> Result<Vec<u8>, OpenError> {
+        self.verify().map_err(OpenError::Signature)?;
+        let wrap = self
+            .key_wraps
+            .iter()
+            .find(|wrap| wrap.recipient == device.public())
+            .ok_or(OpenError::NotARecipient)?;
+        let sealed = wrap
+            .sealed
+            .iter()
+            .find(|sealed| sealed.object == SealedRef::Body)
+            .ok_or(OpenError::MissingBodyKey)?;
+        let content_key = ContentKey::open(&sealed.sealed_key, device, &self.core.key_commit)
+            .map_err(OpenError::Crypto)?;
+        content_key
+            .decrypt(&self.core.body)
+            .map_err(OpenError::Crypto)
+    }
+
+    /// Sign `core` and wrap it for transport. `seal` is the high-level
+    /// entry; this is the building block beneath it.
     pub fn new(core: MessageCore, sender_key: &DeviceKey) -> Self {
         let sig = sender_key.sign_hash(&core.id().0);
         Self {
@@ -85,6 +162,32 @@ impl MessageEnvelope {
         Ok(envelope)
     }
 }
+
+/// Why an envelope could not be opened. Never a panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenError {
+    /// The sender's signature over the id does not verify.
+    Signature(VerifyError),
+    /// No key-wrap addressed to this device.
+    NotARecipient,
+    /// This device's wrap has no sealed key for the body.
+    MissingBodyKey,
+    /// Unsealing, the commitment check, or decryption failed.
+    Crypto(CryptoError),
+}
+
+impl fmt::Display for OpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Signature(e) => write!(f, "signature check failed: {e}"),
+            Self::NotARecipient => write!(f, "no key-wrap for this device"),
+            Self::MissingBodyKey => write!(f, "no sealed content-key for the body"),
+            Self::Crypto(e) => write!(f, "could not decrypt: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
 
 /// A message id: `BLAKE3(borsh(MessageCore))`. Content address and DAG node id.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -138,9 +241,22 @@ pub enum SealedRef {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use crate::testutil::rng;
 
     fn device_key(n: u8) -> DeviceKey {
         DeviceKey::from_seed([n; 32])
+    }
+
+    fn draft_to(recipients: Vec<PublicKey>, plaintext: &[u8]) -> MessageDraft {
+        MessageDraft {
+            conversation: None,
+            parents: vec![],
+            recipients,
+            seq: 0,
+            logical: 0,
+            timestamp_ms: 1_700_000_000_000,
+            plaintext: plaintext.to_vec(),
+        }
     }
 
     fn sample_core(sender: &DeviceKey) -> MessageCore {
@@ -302,6 +418,91 @@ mod tests {
         assert_eq!(
             MessageEnvelope::try_from_bytes(&bytes),
             Err(DecodeError::Malformed)
+        );
+    }
+
+    #[test]
+    fn seal_open__should_roundtrip_for_every_recipient() {
+        // Given
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipients: Vec<DeviceKey> = (2..=4).map(device_key).collect();
+        let keys: Vec<PublicKey> = recipients.iter().map(|r| r.public()).collect();
+
+        // When
+        let envelope =
+            MessageEnvelope::seal(draft_to(keys, b"hello, spine"), &sender, &mut rng).unwrap();
+
+        // Then
+        for recipient in &recipients {
+            assert_eq!(envelope.open(recipient).unwrap(), b"hello, spine");
+        }
+    }
+
+    #[test]
+    fn open__should_fail_for_a_device_that_was_not_a_recipient() {
+        // Given
+        let mut rng = rng();
+        let sender = device_key(1);
+        let draft = draft_to(vec![device_key(2).public()], b"private");
+
+        // When
+        let envelope = MessageEnvelope::seal(draft, &sender, &mut rng).unwrap();
+
+        // Then
+        assert_eq!(
+            envelope.open(&device_key(3)).unwrap_err(),
+            OpenError::NotARecipient
+        );
+    }
+
+    #[test]
+    fn open__should_reject_a_tampered_body_via_the_signature() {
+        // Given
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+        let draft = draft_to(vec![recipient.public()], b"original");
+        let mut envelope = MessageEnvelope::seal(draft, &sender, &mut rng).unwrap();
+
+        // When
+        let last = envelope.core.body.len() - 1;
+        envelope.core.body[last] ^= 0x01;
+
+        // Then
+        assert!(matches!(
+            envelope.open(&recipient).unwrap_err(),
+            OpenError::Signature(_)
+        ));
+    }
+
+    #[test]
+    fn open__should_reject_a_key_wrap_swapped_in_from_another_message() {
+        // Given: two messages to the same recipient — wraps live outside the
+        // signed core, so a swap passes the signature check…
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+        let mut first = MessageEnvelope::seal(
+            draft_to(vec![recipient.public()], b"first"),
+            &sender,
+            &mut rng,
+        )
+        .unwrap();
+        let second = MessageEnvelope::seal(
+            draft_to(vec![recipient.public()], b"second"),
+            &sender,
+            &mut rng,
+        )
+        .unwrap();
+
+        // When
+        first.key_wraps = second.key_wraps.clone();
+
+        // Then: …and is caught by the key commitment instead.
+        assert_eq!(
+            first.open(&recipient).unwrap_err(),
+            OpenError::Crypto(CryptoError::CommitmentMismatch)
         );
     }
 

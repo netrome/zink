@@ -4304,6 +4304,13 @@ dependencies = [
 [[package]]
 name = "zink-cli"
 version = "0.1.0"
+dependencies = [
+ "iroh",
+ "rand_core 0.6.4",
+ "tokio",
+ "zink-protocol",
+ "zink-relay",
+]
 
 [[package]]
 name = "zink-protocol"
