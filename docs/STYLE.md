@@ -12,6 +12,7 @@ follow them for all new code and refactors.
 - Business logic is **pure and testable**; I/O lives at the **edges**.
 - Keep functions and modules small and single-purpose.
 - Comments explain *why* when it isn't obvious — never restate *what* the code says.
+- Never hand-roll cryptography or curve conversions — use vetted, audited crates.
 
 ## Architecture: hexagonal-lite
 
@@ -23,7 +24,8 @@ Ports & adapters, without the ceremony — we don't go all-in.
   live here. Both the relay and the (WASM) client depend on it.
 - **Ports** are traits describing what the domain needs from the outside — e.g.
   `Mailbox`, `PushSender`, `BlobStore`, `Transport`. Domain code depends on the trait,
-  never a concrete implementation.
+  never a concrete implementation. Ports are **async traits**; the pure core stays
+  **synchronous** (no async runtime, no threads) so it ports cleanly to single-threaded WASM.
 - **Adapters** implement ports against the real world (iroh connections, a Web Push
   sender, on-disk storage) and are injected at the call site, so the domain can be
   driven by fakes in tests.

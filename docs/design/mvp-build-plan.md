@@ -31,17 +31,27 @@ web/                   # (Stage C) PWA assets + service worker
   `BLAKE3(borsh(core))`; sign/verify. *Done when:* round-trip, **determinism** (same
   value → same bytes → same id), and signature-verify tests pass. Pure, no I/O.
 - [ ] **A3 · Envelope encryption.** Random per-message content-key (AEAD) encrypts the
-  body once; seal the content-key per recipient (X25519 via Ed25519→X25519); open.
-  *Done when:* encrypt→seal→open→decrypt round-trips for N recipients; wrong key fails;
-  malformed input returns an error (never panics).
+  body once; seal the content-key per recipient (X25519 via a **vetted** Ed25519→X25519
+  conversion); open. *Done when:* encrypt→seal→open→decrypt round-trips for N recipients;
+  **`key-commit` verified before trusting** (commitment mismatch rejects); wrong key
+  fails; malformed input returns an error (never panics).
 - [ ] **A4 · Relay mailbox + ALPN (in-memory).** 🎯 iroh endpoint with a custom ALPN;
   `register` / `deposit` / `fetch` / `ack` over the authenticated connection (auth =
-  connection key). In-memory store. *Done when:* an integration test deposits from one
-  endpoint and fetches from another. *(Risk spike: custom-ALPN handling in iroh 1.0.)*
+  connection key). In-memory store. Define the mailbox ops **transport-agnostically** (so
+  a WebSocket fallback doesn't ripple into Stage B) and the ports as **async traits**.
+  *Done when:* an integration test deposits from one endpoint and fetches from another.
+  *(Risk spike: custom-ALPN handling in iroh 1.0.)*
 - [ ] **A5 · 🚩 WALKING SKELETON.** `zink-cli` send/recv through the relay: A encrypts +
   deposits an envelope for B's key; B fetches + opens + prints plaintext. *Done when:* a
   manual run works **and** an automated test spins up relay + two clients end-to-end.
   **This is the milestone — the spine works.**
+- [ ] **A6 · 🎯🚩 Browser→relay spike (pulled forward).** A near-empty WASM client that
+  opens a browser→relay connection on the mailbox transport and round-trips one frame;
+  also confirm **iroh-blobs compiles for WASM**. *Done when:* a browser round-trips a
+  frame against the relay. **Converts the plan's biggest unknown into a known before
+  Stage B commits to the transport/blob shape.** If iroh-in-WASM/ALPN doesn't hold, fall
+  back to WebSocket + signed-challenge auth (already spec'd, SPEC §5.3) and serve blobs
+  over the mailbox ALPN. *(Risk spike: iroh-in-WASM.)*
 
 ## Stage B — Phase 0 completeness (native, via CLI)
 
@@ -51,9 +61,11 @@ web/                   # (Stage C) PWA assets + service worker
 - [ ] **B2 · Fan-out & multi-relay.** Resolve recipients → distinct relays → deposit the
   envelope once per relay; relay indexes per recipient device-key; receiver dedups by id.
   *Done when:* 1→N delivery test and cross-relay dedup test pass.
-- [ ] **B3 · Blobs / images.** iroh-blobs; encrypt-once blob + sealed content-key in the
-  envelope; thumbnail + full-res; relay blob cache (TTL/size). *Done when:* CLI sends an
-  image, recipient fetches + decrypts both blobs; refetch deduped by hash.
+- [ ] **B3 · Blobs / images.** iroh-blobs (WASM viability confirmed in A6; else serve
+  blobs over the mailbox ALPN); encrypt-once blob + sealed content-key + `key-commit` in
+  the envelope; thumbnail + full-res; relay blob cache (TTL/size). *Done when:* CLI sends
+  an image, recipient fetches + decrypts both blobs (commitment checked); refetch deduped
+  by hash.
 - [ ] **B4 · Reliability.** Deposit ack + idempotent retry (by id); fetch cursor; ack/
   delete + TTL retention backstop. *Done when:* retry-idempotency and retention/expiry
   tests pass.
@@ -62,6 +74,9 @@ web/                   # (Stage C) PWA assets + service worker
 
 ## Stage C — PWA client (WASM)
 
+- [ ] **C0 · Ops prerequisites.** Public relay with a domain + TLS; a VAPID keypair;
+  relay outbound HTTPS to browser push services. *Done when:* the relay is reachable from
+  a browser over TLS and can send a test Web Push. (Needed before C1/C4 can be tested at all.)
 - [ ] **C1 · WASM + browser→relay.** 🎯 Build `zink-protocol`/`zink-client` to WASM
   (`iroh` `default-features = false`); connect browser→relay over WebSocket; fetch a
   message. *Done when:* a browser fetches a message **deposited by `zink-cli`** — proving
@@ -99,5 +114,8 @@ online and offline, with notifications.
   small and isolated.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages, B1 DAG store, C1 WASM
   integration, C4 push. Write these as short `docs/design/<name>.md` when we reach them.
+- **Async ports, sync core.** Ports are async traits from A4 onward; the pure
+  `zink-protocol` core stays synchronous (no async runtime, no threads) so it ports to
+  single-threaded WASM cleanly. This keeps Stage C a re-plumbing, not a rewrite.
 - Stage D maps to SPEC §12 phases 1–3 and is intentionally coarse; we'll slice it
   finer when Stage C lands.

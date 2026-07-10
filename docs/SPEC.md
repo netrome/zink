@@ -180,11 +180,12 @@ MessageCore {                          // id = BLAKE3(borsh(MessageCore)); sende
   parents:       [message hash]        // current heads at send time ([] in the genesis)
   recipients:    [key]                 // who this was fanned out to (advisory, but signed)
   sender:        key
-  seq:           u64                   // per (sender, conversation); 0 in the genesis
+  seq:           u64                   // per (sender, conversation), 0-based (sender's first msg = 0)
   logical:       u64                   // Lamport = 1 + max(parents.logical); 0 in the genesis
   timestamp:     wall-clock hint       // display only, never trusted for ordering
   body:          ciphertext            // encrypted ONCE with a random content-key
-  blob-refs:     [ {hash, kind: thumb|full} ]   // §7
+  key-commit:    BLAKE3(content-key)   // binds the id to the key → "same id ⇒ same content" (§6)
+  blob-refs:     [ {hash, kind: thumb|full, key-commit: BLAKE3(blob content-key)} ]   // §7
 }
 ```
 
@@ -319,8 +320,18 @@ visible.
   message body. The body ciphertext is identical for all recipients → stable content
   hash → working DAG. Same scheme for blobs (§7).
 - **Content-key, sealed per recipient:** static **sealed-box** to each recipient key.
-  iroh keys are Ed25519; sealing uses the standard **Ed25519→X25519** conversion, and
+  iroh keys are Ed25519; sealing uses the standard **Ed25519→X25519** conversion (use a
+  vetted implementation — clamping / low-order-point footguns; never hand-rolled), and
   the message id is signed with the Ed25519 key. One key per device, two uses.
+- **Key commitment (non-committing-AEAD fix):** common AEADs (XChaCha20-Poly1305,
+  AES-GCM) are **not** key-committing — a malicious sender could craft one ciphertext
+  that decrypts to *different* valid plaintexts under two content-keys, seal a different
+  key to each recipient, and yield conflicting messages **sharing one id**, silently
+  breaking "same id ⇒ same content" (the invariant the DAG rests on). We commit the
+  content-key in the hashed core (`key-commit`, and per-blob in `blob-refs`). A
+  recipient unseals its key and **checks it against the commitment before trusting the
+  message**; since the commitment is inside the id, only one content-key is valid, so
+  all recipients decrypt identical content or reject.
 - **Conscious tradeoff:** static sealing means **no forward secrecy** (harvest-now/
   decrypt-later exposure, as with any EC scheme). Accepted for a friends app that
   retains history anyway; still categorically better than a third-party service that
@@ -424,12 +435,14 @@ custom conversation views — is **client policy/UX**.
 | Device history sync | **Peer sync + content-key re-wrap** | No shared family key; device sync = peer sync. |
 | Relays | **Anyone can run one; interchangeable** | Minimal, replaceable infrastructure. |
 | Ordering | **Lamport (`logical`) + per-sender `seq` + DAG** | Partial-view ordering, gap detection, honest concurrency. |
+| Message integrity | **Commit the content-key in the core** (`key-commit`) | AEADs aren't key-committing; without it "same id ⇒ same content" breaks. |
+| `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |
 
-**Still to pin down (implementation-level):** exact AEAD choice (e.g.
-XChaCha20-Poly1305), Web Push payload/encryption specifics, the `who-is-this` query
-format and default hop limit, sync-time head/`seq` exchange, the mailbox
-auth/handshake, relay discovery/config UX, and the deferred capability/token gating
-mechanism (added as a versioned field when needed).
+**Still to pin down (implementation-level):** the exact AEAD + key-commitment
+construction (e.g. XChaCha20-Poly1305 + a BLAKE3 commitment), Web Push
+payload/encryption specifics, the `who-is-this` query format and default hop limit,
+sync-time head/`seq` exchange, the mailbox auth/handshake, relay discovery/config UX,
+and the deferred capability/token gating mechanism (added as a versioned field when needed).
 
 ---
 
