@@ -127,18 +127,18 @@ The fiddly part. Standard Web Push, used privacy-preservingly:
 4. **Lifecycle:** subscriptions rotate; the SW handles `pushsubscriptionchange` and
    re-`register`s the new sub with all relays.
 
-**Decryption fidelity ⚠️:**
-- *Simple (MVP default):* push shows a generic "New message"; fetch/decrypt happens
-  when the app is opened. No private keys in the service worker.
-- *Rich:* the SW decrypts to show sender + preview immediately — requires the device
-  private key be reachable from the SW (IndexedDB keystore). Better UX, more surface.
-- **Lean: generic first, rich later.**
+**Decryption fidelity — resolved: generic first.** This is a **client-only** concern:
+the relay always sends a content-free push (it holds only ciphertext), so whether a
+client later enriches the notification changes nothing in the protocol or the relay.
+- *MVP:* push shows a generic "New message"; fetch/decrypt on app open. No private
+  keys in the service worker.
+- *Later (any client, no protocol change):* the SW decrypts to show sender + preview,
+  reaching the device key via an IndexedDB keystore.
 
-**iOS caveat ⚠️ (biggest practical risk):** iOS Web Push works only for a PWA
-**installed to the home screen** (iOS 16.4+), not in a Safari tab, with some
-reliability quirks. Viable for a daily-use installed app, but may justify a thin native
-wrapper (Capacitor/Tauri) for iOS push specifically. Relevant since the primary users
-are likely on iPhones.
+**Platform — resolved: Android-first.** Primary users are on Android, where PWA push is
+reliable (FCM-backed, wakes in the background). iOS is **not optimised for**: Web Push
+there needs a home-screen-installed PWA (iOS 16.4+) with some quirks — fine if it
+works, but no native wrapper is planned for the MVP.
 
 ---
 
@@ -178,18 +178,20 @@ mitigation; the protocol assumes the relay is untrusted regardless.
 
 ---
 
-## 10. Open decisions
+## 10. Decisions
 
-1. **Deposit gating** — none (caps + client filter) vs. relay-side gating (blocks
-   push/storage spam). Not a privacy fork — the relay reads sender/recipients from the
-   plaintext core regardless. *Lean: none for MVP; capability-gating when spam is real.*
-2. **Push fidelity** — generic wake vs. SW-decrypts-rich-notification. *Lean: generic first.*
-3. **iOS strategy** — accept installed-PWA push limits, or plan a thin native wrapper
-   for iOS. *Needs your call.*
-4. **Relay redundancy** — deposit to one relay (cheap) or all listed (robust)? *Lean:
-   sender's choice; receiver dedups either way.*
-5. **Mailbox transport** — mailbox ops as an iroh ALPN (auth for free) vs. HTTP
-   (needs explicit signed requests). *Lean: iroh ALPN.*
+**Resolved:**
+- **Deposit gating** — none for MVP (rate/size caps + client filtering); capability-
+  gating when spam is real. Not a privacy fork — the relay reads the plaintext core
+  regardless.
+- **Push fidelity** — generic "New message" for MVP; SW-decrypt is a client-only
+  enhancement with no protocol tie.
+- **Platform** — Android-first; iOS best-effort (installed PWA), no native wrapper for MVP.
+- **Relay redundancy** — sender's choice; the receiver dedups by message id either way.
+- **Mailbox transport** — iroh ALPN (connection identity gives auth for free).
+
+**Still open (implementation-level):** exact deposit/fetch/ack wire messages and cursor
+semantics; push payload format & VAPID setup; blob-cache eviction policy.
 
 ---
 
