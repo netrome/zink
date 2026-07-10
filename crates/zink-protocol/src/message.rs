@@ -6,33 +6,6 @@ use crate::FORMAT_VERSION;
 use crate::codec::{self, DecodeError};
 use crate::keys::{self, DeviceKey, PublicKey, Signature, VerifyError};
 
-/// A message id: `BLAKE3(borsh(MessageCore))`. Content address and DAG node id.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct MessageId(pub [u8; 32]);
-
-/// BLAKE3 hash of an encrypted blob (SPEC §7).
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct BlobHash(pub [u8; 32]);
-
-/// Commitment to a content-key, carried inside the hashed core so "same id ⇒
-/// same content" holds even though AEADs are not key-committing (SPEC §6).
-/// Computed and verified in the encryption layer (slice A3).
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct KeyCommitment(pub [u8; 32]);
-
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BlobKind {
-    Thumbnail,
-    Full,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BlobRef {
-    pub hash: BlobHash,
-    pub kind: BlobKind,
-    pub key_commit: KeyCommitment,
-}
-
 /// The signed, hashed core — identical bytes for every recipient, so everyone
 /// derives the same id and the DAG holds across recipients.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -61,27 +34,6 @@ impl MessageCore {
     pub fn id(&self) -> MessageId {
         MessageId(codec::content_hash(self))
     }
-}
-
-/// What a sealed content-key decrypts: the body, or one of the blobs.
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub enum SealedRef {
-    Body,
-    Blob(BlobHash),
-}
-
-/// One wrapped content-key for one encrypted object.
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub struct SealedKey {
-    pub object: SealedRef,
-    pub sealed_key: Vec<u8>,
-}
-
-/// All sealed content-keys for one recipient.
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub struct KeyWrap {
-    pub recipient: PublicKey,
-    pub sealed: Vec<SealedKey>,
 }
 
 /// The unit of delivery. Per-recipient parts live here, *outside* the hashed
@@ -132,6 +84,54 @@ impl MessageEnvelope {
         }
         Ok(envelope)
     }
+}
+
+/// A message id: `BLAKE3(borsh(MessageCore))`. Content address and DAG node id.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct MessageId(pub [u8; 32]);
+
+/// Commitment to a content-key, carried inside the hashed core so "same id ⇒
+/// same content" holds even though AEADs are not key-committing (SPEC §6).
+/// Computed and verified in the encryption layer (slice A3).
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct KeyCommitment(pub [u8; 32]);
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BlobRef {
+    pub hash: BlobHash,
+    pub kind: BlobKind,
+    pub key_commit: KeyCommitment,
+}
+
+/// BLAKE3 hash of an encrypted blob (SPEC §7).
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BlobHash(pub [u8; 32]);
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlobKind {
+    Thumbnail,
+    Full,
+}
+
+/// All sealed content-keys for one recipient.
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub struct KeyWrap {
+    pub recipient: PublicKey,
+    pub sealed: Vec<SealedKey>,
+}
+
+/// One wrapped content-key for one encrypted object.
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SealedKey {
+    pub object: SealedRef,
+    pub sealed_key: Vec<u8>,
+}
+
+/// What a sealed content-key decrypts: the body, or one of the blobs.
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub enum SealedRef {
+    Body,
+    Blob(BlobHash),
 }
 
 #[cfg(test)]

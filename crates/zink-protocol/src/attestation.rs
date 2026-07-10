@@ -6,21 +6,6 @@ use crate::codec::{self, DecodeError};
 use crate::keys::{self, DeviceKey, PublicKey, Signature, VerifyError};
 use crate::message::BlobHash;
 
-/// An attestation id: `BLAKE3(borsh(Attestation))`.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct AttestationId(pub [u8; 32]);
-
-/// The claim an attester makes about a subject key. One primitive, several
-/// uses: profiles, device linking, vouching, repudiation.
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub enum Claim {
-    Name(String),
-    Avatar(BlobHash),
-    SamePersonAs(PublicKey),
-    /// Active disavowal: "I do not / no longer recognise this key."
-    Negative,
-}
-
 /// The hashed, signed content of an attestation. Advisory input, never a
 /// global fact — clients weigh it by their trust in the attester.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -73,6 +58,21 @@ impl SignedAttestation {
         codec::decode_versioned(bytes)
     }
 }
+
+/// The claim an attester makes about a subject key. One primitive, several
+/// uses: profiles, device linking, vouching, repudiation.
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub enum Claim {
+    Name(String),
+    Avatar(BlobHash),
+    SamePersonAs(PublicKey),
+    /// Active disavowal: "I do not / no longer recognise this key."
+    Negative,
+}
+
+/// An attestation id: `BLAKE3(borsh(Attestation))`.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct AttestationId(pub [u8; 32]);
 
 #[cfg(test)]
 #[allow(non_snake_case)]

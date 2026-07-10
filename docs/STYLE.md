@@ -58,6 +58,16 @@ pub fn resolve_identity(…) -> ResolvedIdentity { … }
 fn walk_attestations(…) { … }   // private helper, below its caller
 ```
 
+### Significant types first
+
+The same top-down rule applies to types: a module opens with its central type(s),
+then the supporting types they reference, in order of occurrence — if struct A
+references struct B, A comes before B (Rust needs no forward declarations). So
+`message.rs` defines `MessageCore` and `MessageEnvelope` first; the field types
+(`MessageId`, `BlobRef`, `KeyWrap`, …) follow. Where reference order and significance
+conflict (the envelope references the core, but the core is the module's heart),
+significance wins.
+
 ### Separation of concerns
 
 Domain code (the protocol core) never depends on transport or framework types — iroh
