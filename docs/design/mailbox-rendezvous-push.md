@@ -99,11 +99,14 @@ is the stateless/HTTP fallback.)
 - **Cursor:** a relay-local monotonic deposit index per mailbox. Purely a "what have I
   drained" marker; real ordering is the DAG, client-side.
 - **Idempotency:** deposits dedup by message id, so sender retries are safe.
-- **Deposit auth ⚠️:** signing the deposit (connection = sender key) lets the relay
-  enforce the recipient's **contact-allowlist** and per-sender rate limits — strong
-  spam control — at the cost of revealing the sender→recipient edge to the relay.
-  Anonymous deposits improve metadata privacy but leave only rate/size caps + client
-  filtering. **Lean: signed**, since the operator is trusted here.
+- **Deposit gating ⚠️:** this is *not* a privacy fork. The relay already reads
+  `sender` and `recipients` from the **plaintext core** (it needs `recipients` to
+  route), so relay-side gating leaks ~nothing extra — "authenticate the sender" and
+  "know the graph" are the same coin, already spent. So the choice is just: **no
+  gating** (simplest; fine at friends-scale — only contacts hold your key) vs.
+  **relay-side gating** (rejects non-contacts before storage/push — worth it mainly to
+  stop *push/storage* spam). *Lean: no gating for MVP;* add **capability-gating** (a
+  token you issued, checked without a relay-held allowlist) when spam is real.
 
 ---
 
@@ -166,8 +169,8 @@ are likely on iPhones.
 ## 9. What the relay learns (metadata)
 
 - Which device keys have mailboxes (`register`).
-- Per deposit: the recipient set (from the envelope), the sender key (if signed
-  deposits), sizes, timing.
+- Per deposit: `sender` and `recipients` (both plaintext in the message core), sizes,
+  timing — independent of how the deposit is authenticated.
 - Via the push service: that a device was woken, and when.
 
 Never: message content, identity clustering, or ordering. Running your own relay is the
@@ -177,8 +180,9 @@ mitigation; the protocol assumes the relay is untrusted regardless.
 
 ## 10. Open decisions
 
-1. **Deposit auth** — signed (relay-side contact-gating, leaks sender→recipient edge)
-   vs. anonymous (better privacy, caps-only abuse control). *Lean: signed.*
+1. **Deposit gating** — none (caps + client filter) vs. relay-side gating (blocks
+   push/storage spam). Not a privacy fork — the relay reads sender/recipients from the
+   plaintext core regardless. *Lean: none for MVP; capability-gating when spam is real.*
 2. **Push fidelity** — generic wake vs. SW-decrypts-rich-notification. *Lean: generic first.*
 3. **iOS strategy** — accept installed-PWA push limits, or plan a thin native wrapper
    for iOS. *Needs your call.*

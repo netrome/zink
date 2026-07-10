@@ -148,7 +148,7 @@ when you're offline. This is the rendezvous answer: iroh discovery resolves
 key→address for *online* nodes, while `relays` is how a sender finds your inbox when
 you're not. Pairing is the same exchange between two of your own devices and yields a
 **mutual** `same-person-as` link. It's also the natural place to later hand over an
-initial `authorization` grant (§8) so a new contact can message you from the start.
+initial capability grant (§8) so a new contact can message you from the start.
 
 ---
 
@@ -196,13 +196,11 @@ MessageEnvelope {
   sig:            Ed25519 by `sender` over the id (= BLAKE3(borsh(core)))
   key-wraps:      [ {recipient: key,
                      sealed: [ {ref: "body" | blob-hash, sealed-key} ]} ]   // one wrap per encrypted object
-  authorization?: opaque               // reserved anti-spam hook — capability/token (deferred; §8, §11)
 }
 ```
 
-Because the per-recipient `key-wraps` (and `authorization`) sit outside the hashed
-core, **everyone derives the same message id**, so `parents` and the DAG hold across
-all recipients. `sealed` carries one wrapped content-key per encrypted object — the
+Because the per-recipient `key-wraps` sit outside the hashed core, **everyone derives
+the same message id**, so `parents` and the DAG hold across all recipients. `sealed` carries one wrapped content-key per encrypted object — the
 body plus each blob (a thumb+full image → three).
 
 ### 4.2 There is no "group" — only fan-out
@@ -215,8 +213,8 @@ to (hence who could see it), but it **enforces nothing**.
 
 Anyone can fan out to anyone, so unsolicited contact is possible by design: **the
 social graph is the spam boundary.** Delivery from non-contacts is surfaced or
-filtered by client policy (and by relay retention policy, §5.3); the optional
-`authorization` hook (§8) is reserved for stronger anti-spam later.
+filtered by client policy (and by relay policy, §5.3); capability-based gating (§8)
+can be added later — introduced then as a versioned envelope field, not reserved now.
 
 ### 4.3 Ordering (tenet 7)
 
@@ -319,7 +317,9 @@ visible.
   retains history anyway; still categorically better than a third-party service that
   may hold your plaintext or a backdoor. Ratcheting can replace the sealing layer
   later without touching the DAG or the envelope shape.
-- **Relays see ciphertext + metadata only** (envelope sizes, recipient keys, timing).
+- **Relays see ciphertext + metadata only** — the plaintext core (`sender`,
+  `recipients`), envelope sizes, and timing; never the body. `recipients` must be
+  visible to route; `sender` could later move into the body to reduce this.
 
 ---
 
@@ -361,13 +361,19 @@ visible.
   they are interchangeable — a user configures which relay(s) they use. I'll run one
   or two to start.
 
-**Anti-spam (deferred).** The social graph is the boundary. MVP = client-side
-contact-gating + relay-operator rate/size caps; **no economics**. The `authorization`
-field on messages/deposits (§4.1) reserves room for a later ladder: signed
-**send-capabilities** (delegable friend-of-friend introductions, reusing attestation
-machinery) → optional **fungible personal tokens** (each person is the sole clearing
-authority for their own token, so no global consensus — Chaumian-style, not a
-blockchain). Neither is built now.
+**Anti-spam (deferred).** The social graph is the boundary, and at friends-scale it
+mostly self-enforces: only your contacts hold your device key (shared via QR). MVP =
+relay rate/size caps + client-side filtering; **no relay-side gating, no economics**.
+When spam becomes real, add **capability-based gating** (the sender presents an
+unforgeable token you issued; the relay checks it without maintaining an allowlist) —
+introduced then as a versioned envelope field, *not* reserved now. That is the first
+rung toward optional **fungible personal tokens** (each person the sole clearing
+authority for their own token — Chaumian-style, no global consensus). None built now.
+
+> Capability-gating does **not** by itself buy graph privacy: the relay already reads
+> `sender` and `recipients` from the plaintext message core (it needs `recipients` to
+> route). Minimising that core — e.g. moving `sender` into the encrypted body — is a
+> separate, later metadata-minimisation track.
 
 ---
 
@@ -413,8 +419,8 @@ custom conversation views — is **client policy/UX**.
 **Still to pin down (implementation-level):** exact AEAD choice (e.g.
 XChaCha20-Poly1305), Web Push payload/encryption specifics, the `who-is-this` query
 format and default hop limit, sync-time head/`seq` exchange, the mailbox
-challenge-response format, relay discovery/config UX, and the deferred `authorization`
-field semantics (capability/token ladder).
+auth/handshake, relay discovery/config UX, and the deferred capability/token gating
+mechanism (added as a versioned field when needed).
 
 ---
 
