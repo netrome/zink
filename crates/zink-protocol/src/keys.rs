@@ -20,6 +20,9 @@ pub struct Signature(pub [u8; 64]);
 pub struct DeviceKey(ed25519_dalek::SigningKey);
 
 impl DeviceKey {
+    /// Build the key from 32 bytes of high-entropy secret material — the
+    /// Ed25519 *seed* (RFC 8032 terminology): the signing scalar is derived
+    /// from it internally, the bytes are never used as the scalar directly.
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self(ed25519_dalek::SigningKey::from_bytes(&seed))
     }
