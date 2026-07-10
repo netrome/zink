@@ -1,0 +1,6 @@
+[package]
+name = "zink-relay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

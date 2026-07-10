@@ -1,0 +1,6 @@
+[package]
+name = "zink-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

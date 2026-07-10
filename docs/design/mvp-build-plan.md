@@ -24,7 +24,7 @@ web/                   # (Stage C) PWA assets + service worker
 
 ## Stage A — Foundation & walking skeleton (native)
 
-- [ ] **A1 · Workspace scaffold.** Cargo workspace with `zink-protocol`, `zink-relay`,
+- [x] **A1 · Workspace scaffold.** Cargo workspace with `zink-protocol`, `zink-relay`,
   `zink-cli` (empty-ish). *Done when:* `cargo build`, `cargo test`, `clippy` all pass.
 - [ ] **A2 · Protocol core: keys, types, hashing.** Ed25519 keypair; `MessageCore` /
   `MessageEnvelope` + `Attestation` types; canonical BORSH encode/decode; message id =
