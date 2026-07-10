@@ -31,6 +31,13 @@ impl DeviceKey {
     pub(crate) fn sign_hash(&self, hash: &[u8; 32]) -> Signature {
         Signature(self.0.sign(hash).to_bytes())
     }
+
+    /// The X25519 secret for this device: the clamped scalar half of the
+    /// expanded Ed25519 secret (standard conversion, one key / two uses —
+    /// SPEC §6). Vetted dalek code path, never hand-rolled.
+    pub(crate) fn x25519_secret_bytes(&self) -> [u8; 32] {
+        self.0.to_scalar_bytes()
+    }
 }
 
 /// Signature verification failure. Never a panic, even on hostile bytes.

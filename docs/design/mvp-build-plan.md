@@ -30,7 +30,7 @@ web/                   # (Stage C) PWA assets + service worker
   `MessageEnvelope` + `Attestation` types; canonical BORSH encode/decode; message id =
   `BLAKE3(borsh(core))`; sign/verify. *Done when:* round-trip, **determinism** (same
   value → same bytes → same id), and signature-verify tests pass. Pure, no I/O.
-- [ ] **A3 · Envelope encryption.** Random per-message content-key (AEAD) encrypts the
+- [x] **A3 · Envelope encryption.** Random per-message content-key (AEAD) encrypts the
   body once; seal the content-key per recipient (X25519 via a **vetted** Ed25519→X25519
   conversion); open. *Done when:* encrypt→seal→open→decrypt round-trips for N recipients;
   **`key-commit` verified before trusting** (commitment mismatch rejects); wrong key

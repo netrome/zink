@@ -436,12 +436,11 @@ custom conversation views — is **client policy/UX**.
 | Relays | **Anyone can run one; interchangeable** | Minimal, replaceable infrastructure. |
 | Ordering | **Lamport (`logical`) + per-sender `seq` + DAG** | Partial-view ordering, gap detection, honest concurrency. |
 | Message integrity | **Commit the content-key in the core** (`key-commit`) | AEADs aren't key-committing; without it "same id ⇒ same content" breaks. |
+| AEAD + commitment | **XChaCha20-Poly1305** (fresh random nonce, `nonce ‖ ct`); commitment = BLAKE3 `derive_key("zink v1 key-commit", content-key)` | Random-nonce-safe AEAD; domain-separated commitment, not a bare hash. |
+| Key sealing | **libsodium-style sealed box** (X25519 via the standard Ed25519 conversions) | Anonymous, per-recipient, vetted construction — nothing hand-rolled. |
 | `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |
 
-**Still to pin down (implementation-level):** the exact AEAD + key-commitment
-construction (e.g. XChaCha20-Poly1305 + a **domain-separated** BLAKE3 commitment —
-`derive_key` with a context string like `"zink v1 key-commit"`, not a bare hash of the
-key), Web Push
+**Still to pin down (implementation-level):** Web Push
 payload/encryption specifics, the `who-is-this` query format and default hop limit,
 sync-time head/`seq` exchange, the mailbox auth/handshake, relay discovery/config UX,
 and the deferred capability/token gating mechanism (added as a versioned field when needed).
