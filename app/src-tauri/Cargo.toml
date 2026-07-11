@@ -1,0 +1,26 @@
+[package]
+name = "zink-app"
+version = "0.1.0"
+edition = "2024"
+
+# Standalone crate (excluded from the workspace): desktop builds need system
+# webkit2gtk, and Android builds run through `cargo tauri android`.
+
+[lib]
+name = "zink_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+iroh = "1.0.2"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+zink-protocol = { path = "../../crates/zink-protocol" }
+
+# Debug APKs carry the native lib; without this it's ~350 MB of debuginfo.
+# Android debugging happens via logcat, not a native debugger.
+[profile.dev]
+debug = false
+strip = "debuginfo"

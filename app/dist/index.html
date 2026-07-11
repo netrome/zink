@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>zink · C-spike</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 2rem auto; padding: 0 1rem; }
+    input, button { width: 100%; font-size: 1rem; padding: .6rem; margin: .3rem 0 1rem; box-sizing: border-box; }
+    button { background: #222; color: #fff; border: none; border-radius: .4rem; }
+    #out { white-space: pre-wrap; word-break: break-all; margin-top: 1.5rem; }
+    .ok { color: green; } .err { color: crimson; }
+  </style>
+</head>
+<body>
+  <h2>zink · native spike</h2>
+  <p>Relay dial string (from <code>zink-relay</code> output):</p>
+  <label>relay <input id="relay" placeholder="endpoint-id@ip:port"></label>
+  <button id="go">register mailbox</button>
+  <div id="out"></div>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const out = document.getElementById("out");
+    document.getElementById("go").onclick = async () => {
+      out.textContent = "connecting…"; out.className = "";
+      try {
+        const result = await invoke("spike_register", {
+          relay: document.getElementById("relay").value.trim(),
+        });
+        out.textContent = "✅ " + result; out.className = "ok";
+      } catch (e) {
+        out.textContent = "❌ " + e; out.className = "err";
+      }
+    };
+  </script>
+</body>
+</html>

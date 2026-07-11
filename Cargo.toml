@@ -6,6 +6,10 @@ members = [
     "crates/zink-cli",
     "crates/zink-client",
 ]
+# The Tauri app builds standalone: its *desktop* target needs system
+# webkit2gtk libs that headless build machines lack, and Android builds go
+# through `cargo tauri android`, not the workspace.
+exclude = ["app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
