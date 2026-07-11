@@ -97,8 +97,11 @@ web/                   # (Stage C) PWA assets + service worker
 ## Stage C — PWA client (WASM)
 
 - [ ] **C0 · Ops prerequisites.** Public relay with a domain + TLS; a VAPID keypair;
-  relay outbound HTTPS to browser push services. *Done when:* the relay is reachable from
-  a browser over TLS and can send a test Web Push. (Needed before C1/C4 can be tested at all.)
+  relay outbound HTTPS to browser push services. **Minimal abuse caps** before public
+  exposure: max blob push size and a per-mailbox item cap — SPEC §8 claims "relay
+  rate/size caps" as the MVP anti-spam and today the blobs ALPN accepts unbounded
+  pushes. *Done when:* the relay is reachable from a browser over TLS, can send a test
+  Web Push, and rejects an oversized blob push. (Needed before C1/C4 can be tested at all.)
 - [ ] **C1 · WASM + browser→relay.** 🎯 Build `zink-protocol`/`zink-client` to WASM
   (`iroh` `default-features = false`); connect browser→relay over WebSocket; fetch a
   message. *Done when:* a browser fetches a message **deposited by `zink-cli`** — proving
@@ -119,6 +122,10 @@ online and offline, with notifications.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
+- [ ] **D0 · Sync primitives.** `get` / `get-successors` (SPEC §5.2) over a peer ALPN,
+  served at each peer's discretion. Fixes the known late-joiner hole (a client without a
+  conversation's genesis cannot reply — noted in B5); prerequisite for D2 backfill and
+  D4's backlog serving.
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
   petnames; `who-is-this` pull; client-side trust ranking.
 - [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
