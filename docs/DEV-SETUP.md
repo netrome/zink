@@ -131,3 +131,26 @@ over USB (or `adb pair` for wireless debugging). APK install: `adb install <apk>
 
 - **Node.js ≥ 20** — only for the browser/service-worker unit tests
   (`node --test`, see STYLE.md); no npm packages needed.
+
+## 5. Deploying the relay
+
+On any Linux server with a public IP — no domain, TLS, or root needed
+(one `sudo` for lingering aside):
+
+```sh
+cargo build --release -p zink-relay
+cp target/release/zink-relay ~/.local/bin/
+cp deploy/zink-relay.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now zink-relay
+sudo loginctl enable-linger $USER     # start on boot without a login session
+journalctl --user -u zink-relay | grep dial:   # the dial string for clients
+```
+
+- Data (mailboxes, blob cache, the relay's identity key) lives in
+  `~/zink-relay-data`; the endpoint id and `--port 4400` are stable, so the
+  dial string survives restarts and reboots.
+- Abuse caps are compiled-in defaults for now: 30-day mailbox retention,
+  1024 items per mailbox, 30-day blob TTL, 64 MiB max blob (oversized pushes
+  are *evicted on the next sweep* — iroh-blobs 0.103 cannot reject a push
+  mid-stream).

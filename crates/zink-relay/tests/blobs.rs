@@ -8,7 +8,7 @@ use iroh::{Endpoint, EndpointAddr};
 use iroh_blobs::protocol::{ChunkRanges, ChunkRangesSeq, ObserveRequest, PushRequest};
 use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
-use zink_relay::blobs::{DEFAULT_BLOB_TTL, mem_blob_cache};
+use zink_relay::blobs::{BlobCacheConfig, mem_blob_cache};
 use zink_relay::clock::SystemClock;
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
@@ -23,7 +23,14 @@ async fn spawn_relay_with(
         .await
         .expect("bind relay endpoint");
     let addr = endpoint.addr();
-    let blob_store = mem_blob_cache(ttl, gc_interval, SystemClock);
+    let blob_store = mem_blob_cache(
+        BlobCacheConfig {
+            ttl,
+            gc_interval,
+            ..BlobCacheConfig::default()
+        },
+        SystemClock,
+    );
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
@@ -34,7 +41,7 @@ async fn spawn_relay_with(
 }
 
 async fn spawn_relay() -> (iroh::protocol::Router, MemStore, EndpointAddr) {
-    spawn_relay_with(DEFAULT_BLOB_TTL, Duration::from_secs(3600)).await
+    spawn_relay_with(BlobCacheConfig::default().ttl, Duration::from_secs(3600)).await
 }
 
 async fn client() -> (Endpoint, MemStore) {
@@ -127,14 +134,10 @@ async fn fs_blob_cache__should_keep_blobs_and_their_retention_across_a_restart()
     let root = std::env::temp_dir().join(format!("zink-blobcache-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("create temp dir");
     let hash = {
-        let store = zink_relay::blobs::fs_blob_cache(
-            &root,
-            DEFAULT_BLOB_TTL,
-            Duration::from_secs(3600),
-            SystemClock,
-        )
-        .await
-        .expect("open fs cache");
+        let store =
+            zink_relay::blobs::fs_blob_cache(&root, BlobCacheConfig::default(), SystemClock)
+                .await
+                .expect("open fs cache");
         let tag = store
             .add_bytes(b"persistent".to_vec())
             .await
@@ -153,14 +156,9 @@ async fn fs_blob_cache__should_keep_blobs_and_their_retention_across_a_restart()
     };
 
     // When: a fresh store opens the same directory
-    let store = zink_relay::blobs::fs_blob_cache(
-        &root,
-        DEFAULT_BLOB_TTL,
-        Duration::from_secs(3600),
-        SystemClock,
-    )
-    .await
-    .expect("reopen fs cache");
+    let store = zink_relay::blobs::fs_blob_cache(&root, BlobCacheConfig::default(), SystemClock)
+        .await
+        .expect("reopen fs cache");
 
     // Then: blob and retention tag both survived
     let bytes = store.blobs().get_bytes(hash).await.expect("read blob");

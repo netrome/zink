@@ -14,6 +14,10 @@ use crate::clock::{Clock, SystemClock};
 /// this long (mailbox design §8). Policy, not protocol.
 pub const DEFAULT_MAILBOX_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Per-mailbox item cap (C0 abuse cap): deposits into a full mailbox are
+/// silently skipped — best-effort, bounded storage. Draining frees space.
+pub const DEFAULT_MAILBOX_MAX_ITEMS: usize = 1024;
+
 /// What the mailbox domain needs from storage. Async trait (per STYLE.md)
 /// so an on-disk adapter can implement it later without touching the domain.
 ///
@@ -47,6 +51,7 @@ pub trait MailboxStore: Send + Sync + 'static {
 pub struct InMemoryStore<C: Clock = SystemClock> {
     mailboxes: Mutex<HashMap<PublicKey, Mailbox>>,
     retention: Duration,
+    max_items: usize,
     clock: C,
 }
 
@@ -70,9 +75,14 @@ impl InMemoryStore {
 
 impl<C: Clock> InMemoryStore<C> {
     pub fn with_clock(retention: Duration, clock: C) -> Self {
+        Self::with_config(retention, DEFAULT_MAILBOX_MAX_ITEMS, clock)
+    }
+
+    pub fn with_config(retention: Duration, max_items: usize, clock: C) -> Self {
         Self {
             mailboxes: Mutex::new(HashMap::new()),
             retention,
+            max_items,
             clock,
         }
     }
@@ -122,6 +132,9 @@ impl<C: Clock> MailboxStore for InMemoryStore<C> {
         let id = envelope.id();
         if state.items.iter().any(|item| item.envelope.id() == id) {
             return Ok(());
+        }
+        if state.items.len() >= self.max_items {
+            return Ok(()); // full mailbox — best-effort skip, never an error
         }
         state.last_cursor += 1;
         state.items.push(StoredItem {
@@ -246,5 +259,32 @@ mod tests {
         let items = store.fetch(mailbox, 0).await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].1.core.body, b"second");
+    }
+
+    #[tokio::test]
+    async fn append__should_skip_deposits_into_a_full_mailbox() {
+        // Given: a mailbox capped at 2 items
+        let (_, clock) = test_clock();
+        let store = InMemoryStore::with_config(Duration::from_secs(100), 2, clock);
+        let mailbox = DeviceKey::from_seed([2; 32]).public();
+        store.register(mailbox).await.unwrap();
+        for body in [b"one".as_slice(), b"two", b"three"] {
+            store
+                .append(mailbox, envelope_to(mailbox, body))
+                .await
+                .unwrap();
+        }
+
+        // Then: the third deposit was skipped, not stored and not an error
+        let items = store.fetch(mailbox, 0).await.unwrap();
+        assert_eq!(items.len(), 2);
+
+        // And: draining frees space for new deposits
+        store.ack(mailbox, items[1].0).await.unwrap();
+        store
+            .append(mailbox, envelope_to(mailbox, b"four"))
+            .await
+            .unwrap();
+        assert_eq!(store.fetch(mailbox, 0).await.unwrap().len(), 1);
     }
 }

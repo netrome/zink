@@ -24,6 +24,7 @@ use crate::store::{DEFAULT_MAILBOX_RETENTION, MailboxStore};
 pub struct FsMailboxStore<W: WallClock = SystemClock> {
     root: PathBuf,
     retention: Duration,
+    max_items: usize,
     clock: W,
     /// Serializes mutations: concurrent deposits must not race the
     /// scan-then-write cursor/dedup logic (the in-memory store gets the
@@ -39,9 +40,24 @@ impl FsMailboxStore {
 
 impl<W: WallClock> FsMailboxStore<W> {
     pub fn with_clock(root: impl Into<PathBuf>, retention: Duration, clock: W) -> Self {
+        Self::with_config(
+            root,
+            retention,
+            crate::store::DEFAULT_MAILBOX_MAX_ITEMS,
+            clock,
+        )
+    }
+
+    pub fn with_config(
+        root: impl Into<PathBuf>,
+        retention: Duration,
+        max_items: usize,
+        clock: W,
+    ) -> Self {
         Self {
             root: root.into(),
             retention,
+            max_items,
             clock,
             lock: Mutex::new(()),
         }
@@ -99,6 +115,9 @@ impl<W: WallClock> MailboxStore for FsMailboxStore<W> {
         let id = hex(&envelope.id().0);
         if items.iter().any(|item| item.id_hex == id) {
             return Ok(()); // duplicate — idempotent retry
+        }
+        if items.len() >= self.max_items {
+            return Ok(()); // full mailbox — best-effort skip, never an error
         }
         let name = ItemName {
             cursor: items.last().map_or(1, |item| item.cursor + 1),
@@ -322,6 +341,27 @@ mod tests {
             .await
             .unwrap();
         assert!(store.fetch(mailbox, 0).await.unwrap().is_empty());
+        std::fs::remove_dir_all(&root).expect("clean up temp dir");
+    }
+
+    #[tokio::test]
+    async fn append__should_skip_deposits_into_a_full_mailbox() {
+        // Given: a mailbox capped at 2 items
+        let root = temp_root("cap");
+        let (_, clock) = test_wall_clock();
+        let store = FsMailboxStore::with_config(&root, Duration::from_secs(100), 2, clock);
+        let mailbox = DeviceKey::from_seed([2; 32]).public();
+        store.register(mailbox).await.unwrap();
+        for body in [b"one".as_slice(), b"two", b"three"] {
+            store
+                .append(mailbox, envelope(mailbox, body))
+                .await
+                .unwrap();
+        }
+
+        // Then: the third deposit was skipped
+        assert_eq!(store.fetch(mailbox, 0).await.unwrap().len(), 2);
+
         std::fs::remove_dir_all(&root).expect("clean up temp dir");
     }
 }

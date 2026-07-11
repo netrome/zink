@@ -3,14 +3,17 @@
 //! tag is pruned. Tags persist inside the blob store itself, so retention
 //! state survives restarts along with the blobs — no side registry to lose.
 //!
-//! Eviction = a pruner task deletes tags older than the TTL; the next GC
-//! run collects the now-unprotected blobs.
+//! Eviction = a sweeper task deletes tags that are past the TTL **or point
+//! at oversized blobs** (C0 cap — iroh-blobs 0.103 has no hook to reject a
+//! push mid-stream, so enforcement is eviction; a hostile push holds disk
+//! at most until the next sweep). The next GC run collects untagged blobs.
 
 use std::path::Path;
 use std::time::Duration;
 
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
+use iroh_blobs::api::proto::BlobStatus;
 use iroh_blobs::store::GcConfig;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::store::mem::MemStore;
@@ -18,10 +21,26 @@ use n0_future::StreamExt;
 
 use crate::clock::WallClock;
 
-/// How long a pushed blob is kept for recipients to fetch.
-pub const DEFAULT_BLOB_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-/// How often GC sweeps unprotected blobs (and the pruner sweeps old tags).
-pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Blob-cache policy knobs (relay-operator policy, not protocol).
+#[derive(Debug, Clone, Copy)]
+pub struct BlobCacheConfig {
+    /// How long a pushed blob is kept for recipients to fetch.
+    pub ttl: Duration,
+    /// How often GC sweeps unprotected blobs (and the sweeper prunes tags).
+    pub gc_interval: Duration,
+    /// Pushes larger than this are evicted on the next sweep.
+    pub max_blob_bytes: u64,
+}
+
+impl Default for BlobCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(30 * 24 * 60 * 60),
+            gc_interval: Duration::from_secs(60 * 60),
+            max_blob_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
 
 const PUSH_TAG_PREFIX: &str = "pushed-";
 
@@ -39,67 +58,75 @@ pub fn push_tag_timestamp_ms(tag: &[u8]) -> Option<u64> {
     timestamp.parse().ok()
 }
 
-/// In-memory blob cache with TTL semantics (dev / tests).
-pub fn mem_blob_cache<W: WallClock>(ttl: Duration, gc_interval: Duration, clock: W) -> MemStore {
+/// In-memory blob cache with TTL + size-cap semantics (dev / tests).
+pub fn mem_blob_cache<W: WallClock>(config: BlobCacheConfig, clock: W) -> MemStore {
     let store = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
         gc_config: Some(GcConfig {
-            interval: gc_interval,
+            interval: config.gc_interval,
             add_protected: None,
         }),
     });
-    spawn_tag_pruner((*store).clone(), ttl, gc_interval, clock);
+    spawn_tag_sweeper((*store).clone(), config, clock);
     store
 }
 
-/// On-disk blob cache with TTL semantics. Blobs *and* their retention tags
-/// live in `root` and survive restarts together.
+/// On-disk blob cache with TTL + size-cap semantics. Blobs *and* their
+/// retention tags live in `root` and survive restarts together.
 pub async fn fs_blob_cache<W: WallClock>(
     root: &Path,
-    ttl: Duration,
-    gc_interval: Duration,
+    config: BlobCacheConfig,
     clock: W,
 ) -> Result<FsStore, Box<dyn std::error::Error + Send + Sync>> {
     let mut options = iroh_blobs::store::fs::options::Options::new(root);
     options.gc = Some(GcConfig {
-        interval: gc_interval,
+        interval: config.gc_interval,
         add_protected: None,
     });
     let store = FsStore::load_with_opts(root.join("blobs.db"), options).await?;
-    spawn_tag_pruner((*store).clone(), ttl, gc_interval, clock);
+    spawn_tag_sweeper((*store).clone(), config, clock);
     Ok(store)
 }
 
-/// Periodically delete push tags older than `ttl`; GC then collects the
-/// blobs they were keeping alive.
-fn spawn_tag_pruner<W: WallClock>(store: Store, ttl: Duration, interval: Duration, clock: W) {
+/// Periodically delete push tags that expired or point at oversized blobs;
+/// GC then collects whatever those tags were keeping alive.
+fn spawn_tag_sweeper<W: WallClock>(store: Store, config: BlobCacheConfig, clock: W) {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
+        let mut ticker = tokio::time::interval(config.gc_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            prune_expired_tags(&store, ttl, clock.now_ms()).await;
+            sweep_tags(&store, config, clock.now_ms()).await;
         }
     });
 }
 
-async fn prune_expired_tags(store: &Store, ttl: Duration, now_ms: u64) {
-    let ttl_ms = ttl.as_millis() as u64;
+async fn sweep_tags(store: &Store, config: BlobCacheConfig, now_ms: u64) {
+    let ttl_ms = config.ttl.as_millis() as u64;
     let Ok(mut tags) = store.tags().list().await else {
         return;
     };
-    // Collect first, delete after — no mutation under the live list stream.
-    let mut expired = Vec::new();
+    // Collect first, judge and delete after — no mutation under the live
+    // list stream.
+    let mut push_tags = Vec::new();
     while let Some(tag) = tags.next().await {
         let Ok(tag) = tag else { continue };
-        let Some(pushed_ms) = push_tag_timestamp_ms(&tag.name.0) else {
-            continue; // not ours
-        };
-        if now_ms.saturating_sub(pushed_ms) >= ttl_ms {
-            expired.push(tag.name);
+        if push_tag_timestamp_ms(&tag.name.0).is_some() {
+            push_tags.push(tag);
         }
     }
-    for name in expired {
-        let _ = store.tags().delete(&name.0).await;
+    for tag in push_tags {
+        let expired = push_tag_timestamp_ms(&tag.name.0)
+            .is_some_and(|pushed_ms| now_ms.saturating_sub(pushed_ms) >= ttl_ms);
+        let oversized = matches!(
+            store.blobs().status(tag.hash).await,
+            Ok(BlobStatus::Complete { size }) if size > config.max_blob_bytes
+        ) || matches!(
+            store.blobs().status(tag.hash).await,
+            Ok(BlobStatus::Partial { size: Some(size) }) if size > config.max_blob_bytes
+        );
+        if expired || oversized {
+            let _ = store.tags().delete(&tag.name.0).await;
+        }
     }
 }
 
@@ -136,8 +163,29 @@ mod tests {
         }
     }
 
+    async fn remaining_push_tags(store: &MemStore) -> Vec<Hash> {
+        // Only *our* push tags count — `add_bytes` creates its own
+        // auto-tags, which are not this scheme's.
+        let mut tags = store.tags().list().await.expect("list");
+        let mut remaining = Vec::new();
+        while let Some(tag) = tags.next().await {
+            let tag = tag.expect("tag");
+            if push_tag_timestamp_ms(&tag.name.0).is_some() {
+                remaining.push(tag.hash);
+            }
+        }
+        remaining
+    }
+
+    fn test_config() -> BlobCacheConfig {
+        BlobCacheConfig {
+            ttl: Duration::from_secs(100),
+            ..BlobCacheConfig::default()
+        }
+    }
+
     #[tokio::test]
-    async fn prune_expired_tags__should_delete_only_tags_past_the_ttl() {
+    async fn sweep_tags__should_delete_only_tags_past_the_ttl() {
         // Given: two pushed blobs, one old, one fresh
         let store = MemStore::new();
         let old = store.add_bytes(b"old".to_vec()).await.expect("add old");
@@ -154,20 +202,35 @@ mod tests {
             .await
             .expect("tag fresh");
 
-        // When: pruning with a 100s TTL
-        prune_expired_tags(&store, Duration::from_secs(100), now_ms).await;
+        // When: sweeping with a 100s TTL
+        sweep_tags(&store, test_config(), now_ms).await;
 
-        // Then: of *our* push tags, only the fresh blob's remains
-        // (`add_bytes` creates its own auto-tags — not this scheme's).
-        let mut tags = store.tags().list().await.expect("list");
-        let mut remaining = Vec::new();
-        while let Some(tag) = tags.next().await {
-            let tag = tag.expect("tag");
-            if push_tag_timestamp_ms(&tag.name.0).is_some() {
-                remaining.push(tag);
-            }
+        // Then: only the fresh blob's push tag remains
+        assert_eq!(remaining_push_tags(&store).await, vec![fresh.hash]);
+    }
+
+    #[tokio::test]
+    async fn sweep_tags__should_evict_oversized_blobs_regardless_of_age() {
+        // Given: a fresh-but-huge blob and a fresh small one, 1 KiB cap
+        let store = MemStore::new();
+        let big = store.add_bytes(vec![0xAB; 4096]).await.expect("add big");
+        let small = store.add_bytes(b"ok".to_vec()).await.expect("add small");
+        let now_ms = 1_700_000_000_000u64;
+        for tag in [
+            (push_tag(now_ms, &big.hash), big.hash),
+            (push_tag(now_ms, &small.hash), small.hash),
+        ] {
+            store.tags().set(tag.0, tag.1).await.expect("tag");
         }
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].hash, fresh.hash);
+        let config = BlobCacheConfig {
+            max_blob_bytes: 1024,
+            ..test_config()
+        };
+
+        // When
+        sweep_tags(&store, config, now_ms).await;
+
+        // Then: the oversized blob lost its protection; the small one kept it
+        assert_eq!(remaining_push_tags(&store).await, vec![small.hash]);
     }
 }

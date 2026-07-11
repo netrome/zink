@@ -1,0 +1,11 @@
+[Unit]
+Description=zink relay (mailbox + blob cache)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/zink-relay %h/zink-relay-data --port 4400
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

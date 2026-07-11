@@ -7,14 +7,18 @@
 //! `relays` field carries (SPEC §3.6).
 //!
 //! ```text
-//! zink-relay [data-dir]     # default: ./zink-relay-data
+//! zink-relay [data-dir] [--port <udp-port>]  # defaults: ./zink-relay-data, ephemeral
 //! ```
+//!
+//! A deployed relay wants a fixed `--port` so its dial string survives
+//! restarts (the endpoint key already does, via `relay.key`).
 
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use iroh::endpoint::presets;
 use iroh::{Endpoint, SecretKey};
-use zink_relay::blobs::{DEFAULT_BLOB_TTL, DEFAULT_GC_INTERVAL, fs_blob_cache};
+use zink_relay::blobs::{BlobCacheConfig, fs_blob_cache};
 use zink_relay::clock::SystemClock;
 use zink_relay::fs::FsMailboxStore;
 use zink_relay::mailbox::MailboxService;
@@ -22,17 +26,17 @@ use zink_relay::net::spawn_relay_router;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let data_dir = std::env::args()
-        .nth(1)
-        .map_or_else(|| PathBuf::from("./zink-relay-data"), PathBuf::from);
+    let (data_dir, port) = parse_args()?;
     std::fs::create_dir_all(&data_dir)?;
 
     // The endpoint key must survive restarts: it IS the relay's identity —
     // the dial strings in every ContactRecord point at it.
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(load_or_create_key(&data_dir.join("relay.key"))?)
-        .bind()
-        .await?;
+    let mut builder = Endpoint::builder(presets::Minimal)
+        .secret_key(load_or_create_key(&data_dir.join("relay.key"))?);
+    if let Some(port) = port {
+        builder = builder.bind_addr((Ipv4Addr::UNSPECIFIED, port))?;
+    }
+    let endpoint = builder.bind().await?;
     println!("zink-relay listening (data: {})", data_dir.display());
     println!("  endpoint id: {}", endpoint.id());
     for sock in endpoint.addr().ip_addrs() {
@@ -42,8 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mailboxes = FsMailboxStore::new(data_dir.join("mailboxes"));
     let blob_store = fs_blob_cache(
         &data_dir.join("blobs"),
-        DEFAULT_BLOB_TTL,
-        DEFAULT_GC_INTERVAL,
+        BlobCacheConfig::default(),
         SystemClock,
     )
     .await?;
@@ -57,6 +60,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;
     Ok(())
+}
+
+/// `[data-dir] [--port <udp-port>]`, in any order.
+fn parse_args() -> Result<(PathBuf, Option<u16>), Box<dyn std::error::Error + Send + Sync>> {
+    let mut data_dir = PathBuf::from("./zink-relay-data");
+    let mut port = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--port" {
+            let value = args.next().ok_or("missing value for --port")?;
+            port = Some(value.parse().map_err(|e| format!("--port: {e}"))?);
+        } else {
+            data_dir = PathBuf::from(arg);
+        }
+    }
+    Ok((data_dir, port))
 }
 
 fn load_or_create_key(path: &Path) -> Result<SecretKey, Box<dyn std::error::Error + Send + Sync>> {
