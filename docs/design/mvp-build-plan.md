@@ -94,8 +94,27 @@ web/                   # (Stage C) PWA assets + service worker
   per conversation + a participants→conversation index; `send` threads drafts from the
   stored DAG — one conversation per participant set is CLI policy, not protocol.)*
 
-## Stage C — PWA client (WASM)
+## Stage C — Phone client
 
+> **Client-stance rethink (2026-07-11):** pivoting the MVP client from PWA/WASM to
+> **native Android + Linux desktop (Leptos + Tauri v2)**, pending the spike below.
+> Rationale: A6 proved iroh-in-WASM works but Stage C's hardest remaining risks (Web
+> Push, IndexedDB keystore eviction, TLS/VAPID ops) are all browser-platform costs; a
+> native client erases them (persistent-connection delivery per the rendezvous doc's
+> "forward-now", filesystem keystore reusing the B5 client work, dial-by-`ip@port` with
+> no TLS) *and* gets real p2p between phones. The PWA becomes the post-MVP second
+> client — the cross-implementation proof, not the MVP bottleneck. **If the spike
+> passes:** re-slice C1–C4 around native and update SPEC §11's "Client scope: PWA only"
+> resolved decision explicitly. The C0–C4 slices below are the pre-pivot PWA plan,
+> kept until then.
+
+- [ ] **C-spike · 🎯🚩 Native client spike (Android).** The native sibling of A6:
+  Tauri v2 scaffold; cross-compile `zink-protocol` + iroh for `aarch64-linux-android`;
+  a hello-world app on a real phone registers a mailbox against the deployed relay.
+  *Done when:* the phone shows a successful register round-trip. Retires the new
+  unknowns — NDK/crypto cross-compilation, iroh-on-Android, Tauri mobile toolchain.
+  *(Risk spike: iroh-on-Android + Tauri mobile. UI-polish maturity is NOT retired here —
+  it reveals itself in the UI slice and stays a bounded, iterable risk.)*
 - [ ] **C0 · Ops prerequisites.** Public relay with a domain + TLS; a VAPID keypair;
   relay outbound HTTPS to browser push services. **Minimal abuse caps** before public
   exposure: max blob push size and a per-mailbox item cap — SPEC §8 claims "relay
@@ -140,8 +159,9 @@ online and offline, with notifications.
 ## Notes
 
 - **Risk spikes** (🎯 with *Risk spike*) are integration unknowns paper can't resolve —
-  A4 (custom ALPN), A6 (iroh WASM), C4 (push). Expect to learn by building; keep them
-  small and isolated.
+  A4 (custom ALPN), A6 (iroh WASM), C-spike (iroh-on-Android + Tauri mobile), C4 (push —
+  obsolete if the native pivot lands; persistent-connection delivery replaces Web Push).
+  Expect to learn by building; keep them small and isolated.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages, B1 DAG store, C1 WASM
   integration, C4 push. Write these as short `docs/design/<name>.md` when we reach them.
 - **Async ports, sync core.** Ports are async traits from A4 onward; the pure
