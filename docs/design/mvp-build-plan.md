@@ -178,12 +178,19 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   structured DTOs rendered from the **stored DAG**, not `recv`'s return value
   (dissolves the per-call dedup re-surfacing; replaces `recv_texts`'s formatted
   strings); `app/ui/` Leptos CSR crate with a hand-rolled `invoke` shim (no
-  `tauri-sys` dependency), trunk wired into `beforeDevCommand`/`beforeBuildCommand`;
-  conversation list + message view + send text; refresh = on-load + button +
-  coarse foreground poll (C4 replaces this with forward-now). Reply resolves
-  participants → contact records for relays; unknown participant keys are skipped
-  with a warning (client policy, best-effort). *Done when:* two Linux desktops
-  chat through the deployed relay.
+  `tauri-sys` dependency), built by `app/ui/build.sh` wired into
+  `beforeDevCommand`/`beforeBuildCommand` (wasm-bindgen CLI, the proven §A6 flow
+  — no trunk, one less tool); conversation list + message view + send text;
+  refresh = on-load + button + coarse foreground poll (C4 replaces this with
+  forward-now). Reply resolves participants → contact records for relays;
+  unknown participant keys are skipped with a warning (client policy,
+  best-effort). *Done when:* two Linux desktops chat through the deployed relay.
+  *(2026-07-12: code complete — `reply_contacts`/`send_in` in `zink-client` with
+  a CLI `reply` command e2e-testing the unknown-participant skip; `app/dto`
+  crate = one set of command wire types both sides compile against; C2 flows
+  (QR/scan/paste/petnames) ported into the Leptos contacts view. Desktop
+  crate check-compiles for aarch64-linux-android; **awaiting the two-desktop
+  chat run** — this box ticks when that passes.)*
 - [ ] **C3c · Images + mobile polish.** Image pick → thumbnail via webview canvas
   (keeps the `image` crate off the Rust side); send full + thumb as the existing
   `BlobDraft` pair; render thumbnails, tap to fetch/decrypt full-res through the

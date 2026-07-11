@@ -96,6 +96,64 @@ async fn history__should_show_a_threaded_two_sided_conversation_on_both_devices(
 
 #[tokio::test(flavor = "multi_thread")]
 #[allow(non_snake_case)]
+async fn reply__should_thread_into_the_conversation_and_skip_unknown_participants() {
+    // Given: alice starts a conversation with bob (record) AND carol (raw
+    // key — bob holds no record for her)
+    let (_router, dial) = spawn_relay().await;
+    let dir = temp_dir("reply");
+    let key_a = key_path(&dir, "alice.key");
+    let key_b = key_path(&dir, "bob.key");
+    let key_c = key_path(&dir, "carol.key");
+    cli(&["keygen", &key_a]);
+    cli(&["keygen", &key_c]);
+    let pubkey_c = stdout_of(&cli(&["pubkey", &key_c]));
+    cli(&["keygen", &key_b]);
+    let record_a = record_payload(&key_a, "Alice", &dial);
+    let record_b = record_payload(&key_b, "Bob", &dial);
+    cli(&["contact-add", "--key", &key_a, &record_b]);
+    cli(&["contact-add", "--key", &key_b, &record_a]);
+
+    let carol_raw = format!("{pubkey_c}@{dial}");
+    stdout_of(&cli(&[
+        "send",
+        "--key",
+        &key_a,
+        "--to",
+        "Bob",
+        "--to",
+        &carol_raw,
+        "hello group",
+    ]));
+    stdout_of(&cli(&["recv", "--key", &key_b]));
+    let conversation = stdout_of(&cli(&["conversations", "--key", &key_b]))
+        .split_whitespace()
+        .next()
+        .expect("conversation id")
+        .to_string();
+
+    // When: bob replies by conversation id — he can reach alice, not carol
+    let output = cli(&["reply", "--key", &key_b, &conversation[..12], "hi all"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let replied = stdout_of(&output);
+    assert!(replied.contains("to 1 relay(s)"), "got: {replied}");
+    assert!(
+        stderr.contains(&pubkey_c[..8]) && stderr.contains("no contact record"),
+        "unknown participant not surfaced: {stderr}"
+    );
+
+    // Then: the reply threads into the same conversation on alice's side
+    stdout_of(&cli(&["recv", "--key", &key_a]));
+    let history_a = stdout_of(&cli(&["history", "--key", &key_a, &conversation]));
+    assert_eq!(
+        history_a.lines().collect::<Vec<_>>(),
+        ["me: hello group", "Bob: hi all"],
+    );
+
+    std::fs::remove_dir_all(&dir).expect("clean up temp dir");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
 async fn history__should_serve_blobs_from_the_local_cache_once_the_relay_is_gone() {
     // Given: alice sent bob an image; bob received the message (not the blobs)
     let (router, dial) = spawn_relay().await;

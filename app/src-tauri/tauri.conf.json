@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "identifier": "org.nearone.zink",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "beforeDevCommand": "sh ../ui/build.sh",
+    "beforeBuildCommand": "sh ../ui/build.sh"
   },
   "app": {
     "windows": [

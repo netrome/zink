@@ -12,6 +12,7 @@
 //! zink-cli recv --key <file> [--relay <relay> …] [--blobs-dir <dir>]
 //! zink-cli conversations --key <file>
 //! zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
+//! zink-cli reply --key <file> <conversation-id | prefix> <text>
 //! ```
 //!
 //! `<relay>` is a dial string `<endpoint-id>@<ip:port>` as printed by
@@ -36,6 +37,7 @@ async fn main() -> ExitCode {
         Some("recv") => recv(&args[1..]).await,
         Some("conversations") => conversations(&args[1..]).await,
         Some("history") => history(&args[1..]).await,
+        Some("reply") => reply(&args[1..]).await,
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -58,6 +60,7 @@ const USAGE: &str = "usage:
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
   zink-cli conversations --key <file>
   zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
+  zink-cli reply --key <file> <conversation-id | prefix> <text>
 (<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay; recv defaults
  to the home relays set via my-record)";
 
@@ -313,6 +316,44 @@ async fn history(args: &[String]) -> Result<(), String> {
             None => {}
         }
     }
+    Ok(())
+}
+
+/// Reply into a stored conversation: participants resolve back to contact
+/// records; unreachable keys are called out, not silently dropped.
+async fn reply(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [wanted, text] = positionals.as_slice() else {
+        return Err(format!(
+            "exactly one conversation id (or prefix) and one text expected\n{USAGE}"
+        ));
+    };
+    let client = Client::open(&single(&flags, "--key")?).await?;
+    let conversation = resolve_conversation(&client, wanted)?;
+    let resolved = client.reply_contacts(conversation)?;
+    for key in &resolved.unknown {
+        eprintln!(
+            "warning: no contact record for participant {} — they will not receive this reply",
+            &hex::encode(&key.0)[..8]
+        );
+    }
+    if resolved.contacts.is_empty() {
+        return Err("no reachable participants — add their contact records first".into());
+    }
+    let receipt = client
+        .send_in(
+            conversation,
+            &resolved.contacts,
+            text.clone().into_bytes(),
+            vec![],
+        )
+        .await?;
+    println!(
+        "replied in {} (seq {}) to {} relay(s)",
+        &hex::encode(&receipt.conversation.0)[..8],
+        receipt.seq,
+        receipt.relay_count
+    );
     Ok(())
 }
 

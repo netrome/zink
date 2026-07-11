@@ -1,0 +1,11 @@
+[package]
+name = "zink-app-dto"
+version = "0.1.0"
+edition = "2024"
+
+# Standalone crate (outside the workspace, like the rest of app/): the one
+# place the Tauri command layer and the WASM UI agree on wire shapes, so the
+# boundary can't drift — both sides compile against the same structs.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

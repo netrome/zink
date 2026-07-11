@@ -65,19 +65,7 @@ impl Client {
             .collect();
         let existing = self.state.conversation_for(&participants);
         let draft = match existing {
-            Some(conversation) => {
-                let dag = self.state.load_dag(conversation)?;
-                MessageDraft {
-                    conversation: Some(conversation),
-                    parents: dag.heads(),
-                    recipients,
-                    seq: dag.next_seq(&self.device.public()),
-                    logical: dag.next_logical(),
-                    timestamp_ms: now_ms(),
-                    plaintext,
-                    blobs: blob_drafts,
-                }
-            }
+            Some(conversation) => self.threaded_draft(conversation, recipients)?,
             None => MessageDraft {
                 conversation: None,
                 parents: vec![],
@@ -85,19 +73,115 @@ impl Client {
                 seq: 0,
                 logical: 0,
                 timestamp_ms: now_ms(),
-                plaintext,
-                blobs: blob_drafts,
+                plaintext: vec![],
+                blobs: vec![],
             },
         };
+        let record_mapping = existing.is_none().then_some(&participants);
+        self.finish_send(draft, plaintext, blob_drafts, contacts, record_mapping)
+            .await
+    }
+
+    /// Send *into a known conversation*, whatever its participant set maps
+    /// to — how an edge replies from a history view. Leaves the participant
+    /// → conversation index alone (that index is `send`'s policy).
+    pub async fn send_in(
+        &self,
+        conversation: MessageId,
+        contacts: &[Contact],
+        plaintext: Vec<u8>,
+        blob_drafts: Vec<BlobDraft>,
+    ) -> Result<SendReceipt, String> {
+        if contacts.is_empty() {
+            return Err("at least one recipient required".into());
+        }
+        let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
+        let draft = self.threaded_draft(conversation, recipients)?;
+        self.finish_send(draft, plaintext, blob_drafts, contacts, None)
+            .await
+    }
+
+    /// Whom a reply in this conversation goes to: every participant except
+    /// this device, resolved through the contact store. Participants with
+    /// no stored record are returned as `unknown` — there is no relay to
+    /// reach them at, so a reply is best-effort by design (the edge decides
+    /// how loudly to say so).
+    pub fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, String> {
+        let me = self.device.public();
+        let participants: BTreeSet<PublicKey> = self
+            .state
+            .load_envelopes(conversation)?
+            .iter()
+            .flat_map(|envelope| {
+                envelope
+                    .core
+                    .recipients
+                    .iter()
+                    .copied()
+                    .chain([envelope.core.sender])
+            })
+            .filter(|key| *key != me)
+            .collect();
+        let records = self.state.contacts()?;
+        let mut contacts = Vec::new();
+        let mut unknown = Vec::new();
+        for key in participants {
+            match records
+                .iter()
+                .find(|(_, record)| record.keys.contains(&key))
+            {
+                Some((_, record)) => contacts.push(Contact {
+                    keys: vec![key],
+                    relays: record.relays.clone(),
+                }),
+                None => unknown.push(key),
+            }
+        }
+        Ok(ReplyContacts { contacts, unknown })
+    }
+
+    /// A draft threaded onto the stored DAG's heads (body filled by
+    /// `finish_send`).
+    fn threaded_draft(
+        &self,
+        conversation: MessageId,
+        recipients: Vec<PublicKey>,
+    ) -> Result<MessageDraft, String> {
+        let dag = self.state.load_dag(conversation)?;
+        Ok(MessageDraft {
+            conversation: Some(conversation),
+            parents: dag.heads(),
+            recipients,
+            seq: dag.next_seq(&self.device.public()),
+            logical: dag.next_logical(),
+            timestamp_ms: now_ms(),
+            plaintext: vec![],
+            blobs: vec![],
+        })
+    }
+
+    /// The shared send tail: seal, persist (envelope + own-blob cache +
+    /// optionally the participant mapping), deposit once per distinct
+    /// relay, push blobs.
+    async fn finish_send(
+        &self,
+        mut draft: MessageDraft,
+        plaintext: Vec<u8>,
+        blob_drafts: Vec<BlobDraft>,
+        contacts: &[Contact],
+        record_mapping: Option<&BTreeSet<PublicKey>>,
+    ) -> Result<SendReceipt, String> {
+        draft.plaintext = plaintext;
+        draft.blobs = blob_drafts;
         let seq = draft.seq;
+        let existing = draft.conversation;
         let sealed = MessageEnvelope::seal(draft, &self.device, &mut OsRng)
             .map_err(|e| format!("seal message: {e}"))?;
         let id = sealed.envelope.id();
         let conversation = existing.unwrap_or(id);
         self.state.store_envelope(conversation, &sealed.envelope)?;
-        if existing.is_none() {
-            self.state
-                .record_conversation(&participants, conversation)?;
+        if let Some(participants) = record_mapping {
+            self.state.record_conversation(participants, conversation)?;
         }
         // Own blobs go straight into the local cache: they get pushed to the
         // *recipients'* relays, so this is the only place we can refetch
@@ -474,6 +558,13 @@ pub struct Received {
     /// The relay it arrived through — where its blobs can be fetched.
     pub relay: String,
     pub body: Result<Vec<u8>, OpenError>,
+}
+
+/// Whom a reply reaches: the resolvable participants, and the keys we hold
+/// no record for (unreachable — surfaced, not silently dropped).
+pub struct ReplyContacts {
+    pub contacts: Vec<Contact>,
+    pub unknown: Vec<PublicKey>,
 }
 
 /// One stored conversation, as the edge lists it. Participants are keys —

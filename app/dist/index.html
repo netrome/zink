@@ -5,130 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>zink</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 1rem auto; padding: 0 1rem; }
-    h3 { margin: 1.2rem 0 .4rem; border-bottom: 1px solid #ddd; }
-    input, textarea, select, button { width: 100%; font-size: 1rem; padding: .55rem; margin: .2rem 0 .6rem; box-sizing: border-box; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif; max-width: 28rem; margin: 0 auto;
+      padding: .5rem 1rem; display: flex; flex-direction: column;
+      min-height: 100vh;
+    }
+    header { display: flex; gap: .4rem; padding: .3rem 0 .5rem; }
+    header button { flex: 1; background: #ddd; color: #333; }
+    header button.active { background: #0e6b64; color: #fff; }
+    main { flex: 1; display: flex; flex-direction: column; }
+    h3 { margin: 1rem 0 .4rem; border-bottom: 1px solid #ddd; }
+    input, textarea, select, button {
+      width: 100%; font-size: 1rem; padding: .55rem; margin: .2rem 0 .4rem;
+    }
     button { background: #0e6b64; color: #fff; border: none; border-radius: .4rem; }
     button.secondary { background: #555; }
+    #status { min-height: 1.3em; font-size: .9rem; }
+    .ok { color: green; } .err { color: crimson; }
     #qr { text-align: center; margin: .5rem 0; }
     #qr svg { max-width: 240px; }
     #record-text { font-family: monospace; font-size: .6rem; word-break: break-all; color: #777; }
-    #status { margin: .5rem 0; min-height: 1.2em; } .ok { color: green; } .err { color: crimson; }
-    #inbox div { padding: .4rem 0; border-bottom: 1px solid #eee; word-break: break-word; }
-    .hidden { display: none; }
+    .row { padding: .55rem .2rem; border-bottom: 1px solid #eee; cursor: pointer; }
+    .row b { margin-right: .5rem; }
+    .dim { color: #888; font-size: .8rem; }
+    .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; }
+    .msg { max-width: 85%; align-self: flex-start; background: #eee;
+           border-radius: .6rem; padding: .4rem .6rem; word-break: break-word; }
+    .msg.mine { align-self: flex-end; background: #d3ece9; }
+    .compose { margin-top: auto; padding-top: .5rem; }
   </style>
 </head>
 <body>
-  <div id="status"></div>
-
-  <h3>me</h3>
-  <label>name <input id="name" placeholder="how contacts see you"></label>
-  <label>relay <input id="relay" placeholder="endpoint-id@ip:port"></label>
-  <button id="save">save profile & show QR</button>
-  <div id="qr"></div>
-  <div id="record-text"></div>
-
-  <h3>add contact</h3>
-  <button id="scan">scan QR</button>
-  <textarea id="paste" rows="2" placeholder="…or paste a ZINK: payload"></textarea>
-  <button id="add" class="secondary">add from pasted text</button>
-
-  <h3>chat</h3>
-  <label>to <select id="to"></select></label>
-  <label>message <textarea id="text" rows="2"></textarea></label>
-  <button id="send">send</button>
-  <button id="refresh" class="secondary">check inbox</button>
-  <div id="inbox"></div>
-
-  <script>
-    const { invoke } = window.__TAURI__.core;
-    const el = (id) => document.getElementById(id);
-    const flash = (message, cls) => { el("status").textContent = message; el("status").className = cls || ""; };
-
-    function showRecord(record) {
-      if (!record) return;
-      el("qr").innerHTML = record.svg;
-      el("record-text").textContent = record.text;
-    }
-
-    function showContacts(names) {
-      el("to").innerHTML = names.length
-        ? names.map((name) => `<option>${name}</option>`).join("")
-        : "<option disabled selected>no contacts yet</option>";
-    }
-
-    async function hydrate() {
-      try {
-        const state = await invoke("app_state");
-        if (state.name) el("name").value = state.name;
-        if (state.relay) el("relay").value = state.relay;
-        showRecord(state.record);
-        showContacts(state.contacts);
-      } catch (e) { flash("❌ " + e, "err"); }
-    }
-    hydrate();
-
-    el("save").onclick = async () => {
-      flash("saving…");
-      try {
-        const record = await invoke("set_profile", {
-          name: el("name").value.trim(),
-          relay: el("relay").value.trim(),
-        });
-        showRecord(record);
-        flash("✅ profile saved — let a friend scan your QR", "ok");
-      } catch (e) { flash("❌ " + e, "err"); }
-    };
-
-    async function addContact(payload) {
-      const petname = await invoke("add_contact", { payload, petname: null });
-      await hydrate();
-      flash(`✅ added ${petname}`, "ok");
-    }
-
-    el("scan").onclick = async () => {
-      flash("opening camera…");
-      try {
-        await invoke("plugin:barcode-scanner|request_permissions");
-        const scanned = await invoke("plugin:barcode-scanner|scan", {
-          windowed: false,
-          formats: ["QR_CODE"],
-        });
-        await addContact(scanned.content);
-      } catch (e) { flash("❌ " + e, "err"); }
-    };
-
-    el("add").onclick = async () => {
-      try {
-        await addContact(el("paste").value);
-        el("paste").value = "";
-      } catch (e) { flash("❌ " + e, "err"); }
-    };
-
-    el("send").onclick = async () => {
-      flash("sending…");
-      try {
-        const receipt = await invoke("send_text", {
-          to: el("to").value,
-          text: el("text").value,
-        });
-        el("text").value = "";
-        flash("✅ " + receipt, "ok");
-      } catch (e) { flash("❌ " + e, "err"); }
-    };
-
-    el("refresh").onclick = async () => {
-      flash("fetching…");
-      try {
-        const lines = await invoke("recv_texts");
-        flash(lines.length ? `✅ ${lines.length} new` : "no new messages", "ok");
-        for (const line of lines) {
-          const entry = document.createElement("div");
-          entry.textContent = line;
-          el("inbox").prepend(entry);
-        }
-      } catch (e) { flash("❌ " + e, "err"); }
-    };
+  <script type="module">
+    import init from "./pkg/zink_ui.js";
+    init();
   </script>
 </body>
 </html>

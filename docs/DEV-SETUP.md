@@ -108,6 +108,13 @@ cargo tauri android build --debug --target aarch64
 # → gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ```
 
+The webview UI is a Leptos crate (`app/ui`, wasm32-only) compiled into
+`app/dist/pkg/` by `app/ui/build.sh` — the same `wasm-bindgen` CLI flow as
+`web/spike` (§2), no extra toolchain. `tauri.conf.json` runs the script
+automatically before `cargo tauri dev` / `build`; run it by hand after UI
+changes if you sideload APKs some other way. `app/dto` holds the command
+wire types shared by `app/src-tauri` and `app/ui`.
+
 Notes:
 - The app crate is **excluded from the workspace** — its *desktop* build needs
   system webkit2gtk (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)

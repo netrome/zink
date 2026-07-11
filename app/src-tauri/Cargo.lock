@@ -7420,8 +7420,16 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-barcode-scanner",
  "tokio",
+ "zink-app-dto",
  "zink-client",
  "zink-protocol",
+]
+
+[[package]]
+name = "zink-app-dto"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -50,6 +50,14 @@ client.history(conversation) -> Vec<HistoryMessage>  // linearized; bodies opene
 client.fetch_stored_blob(conversation, message, &BlobHash) -> Vec<u8>
                                               // cache, else own home relays (that's
                                               // where senders push blobs for us)
+// replying (C3b):
+client.reply_contacts(conversation) -> ReplyContacts // participants → contact records;
+                                              // keys without a record come back as
+                                              // `unknown` (unreachable, surfaced)
+client.send_in(conversation, &[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt
+                                              // thread into a *given* conversation
+                                              // (send-by-contacts uses the participant
+                                              // index; this bypasses it)
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened
