@@ -150,6 +150,8 @@ journalctl --user -u zink-relay | grep dial:   # the dial string for clients
 - Data (mailboxes, blob cache, the relay's identity key) lives in
   `~/zink-relay-data`; the endpoint id and `--port 4400` are stable, so the
   dial string survives restarts and reboots.
+- New key files (`relay.key`, client `device.key`) are written `0600`. A key
+  created before that change keeps its old mode — `chmod 600` it once.
 - Abuse caps are compiled-in defaults for now: 30-day mailbox retention,
   1024 items per mailbox, 30-day blob TTL, 64 MiB max blob (oversized pushes
   are *evicted on the next sweep* — iroh-blobs 0.103 cannot reject a push

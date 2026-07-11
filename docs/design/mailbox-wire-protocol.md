@@ -29,6 +29,21 @@ Status: **resolved for MVP.**
   iroh connection. `register` / `fetch` / `ack` operate on *the caller's own* mailbox —
   there is no way to name another key's mailbox. `deposit` is open to any connected
   peer (gating deferred; rendezvous doc §5).
+- **Untrusted relay, bounded client.** The client drives the drain loop, so it must
+  assume a hostile relay: it abandons a relay that returns a non-advancing `fetch`
+  page (cursor ≤ the one requested), rather than looping on its input forever. (A
+  hostile relay can still stream unbounded *advancing* pages; recv accumulating into
+  bounded memory regardless is future hardening, not MVP-critical at friends-scale.)
+- **Envelope-version evolution ⚠️.** Because responses embed *structured* envelopes
+  (not opaque per-item bytes), a future envelope version that changes the BORSH shape
+  fails decoding of the **whole** `MailboxResponse` — re-wedging the mailbox for a
+  client too old to parse it. Fine while only v1 exists; when a wire-incompatible v2
+  is needed, either bump the ALPN generation (`zink-mailbox/2`) or carry envelopes as
+  opaque length-delimited bytes so old clients can skip unknown versions per item. A
+  client also **acks envelope versions it cannot parse** (deleting them unread from
+  its own mailbox) so an unparseable item can't wedge the drain — acceptable because
+  the mailbox is per-device and an item this device can't read is undeliverable to it
+  anyway.
 
 ## Messages (BORSH, versioned)
 

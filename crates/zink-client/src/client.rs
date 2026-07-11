@@ -139,9 +139,20 @@ impl Client {
                 if items.is_empty() {
                     break;
                 }
-                let mut page_cursor = after;
+                let page_cursor = items
+                    .iter()
+                    .map(|item| item.cursor)
+                    .max()
+                    .expect("non-empty");
+                // Relays are untrusted (tenet 5). An honest page always
+                // advances (the store yields only `cursor > after`); a
+                // non-advancing page is a hostile/buggy relay trying to spin
+                // this drain forever. Abandon it — don't loop on its input.
+                if page_cursor <= after {
+                    eprintln!("relay {relay} returned a non-advancing fetch page; abandoning it");
+                    break;
+                }
                 for item in items {
-                    page_cursor = page_cursor.max(item.cursor);
                     if item.envelope.version != zink_protocol::FORMAT_VERSION
                         || item.envelope.core.version != zink_protocol::FORMAT_VERSION
                     {
