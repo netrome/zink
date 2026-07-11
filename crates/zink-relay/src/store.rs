@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::io;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -15,9 +16,13 @@ pub const DEFAULT_MAILBOX_RETENTION: Duration = Duration::from_secs(30 * 24 * 60
 
 /// What the mailbox domain needs from storage. Async trait (per STYLE.md)
 /// so an on-disk adapter can implement it later without touching the domain.
+///
+/// An `Err` means the operation may not have taken effect: the service
+/// answers `Internal` instead of acknowledging — the relay must never claim
+/// `Deposited` for an envelope it failed to store.
 pub trait MailboxStore: Send + Sync + 'static {
     /// Create or refresh a mailbox.
-    fn register(&self, mailbox: PublicKey) -> impl Future<Output = ()> + Send;
+    fn register(&self, mailbox: PublicKey) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Append an envelope to a mailbox. No-op if the mailbox is not
     /// registered (no storage for keys that never asked) or if the message
@@ -26,17 +31,17 @@ pub trait MailboxStore: Send + Sync + 'static {
         &self,
         mailbox: PublicKey,
         envelope: MessageEnvelope,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Envelopes with cursor > `after`, oldest first, each with its cursor.
     fn fetch(
         &self,
         mailbox: PublicKey,
         after: u64,
-    ) -> impl Future<Output = Vec<(u64, MessageEnvelope)>> + Send;
+    ) -> impl Future<Output = io::Result<Vec<(u64, MessageEnvelope)>>> + Send;
 
     /// Drop envelopes with cursor ≤ `up_to`.
-    fn ack(&self, mailbox: PublicKey, up_to: u64) -> impl Future<Output = ()> + Send;
+    fn ack(&self, mailbox: PublicKey, up_to: u64) -> impl Future<Output = io::Result<()>> + Send;
 }
 
 pub struct InMemoryStore<C: Clock = SystemClock> {
@@ -103,19 +108,20 @@ struct StoredItem {
 }
 
 impl<C: Clock> MailboxStore for InMemoryStore<C> {
-    async fn register(&self, mailbox: PublicKey) {
+    async fn register(&self, mailbox: PublicKey) -> io::Result<()> {
         self.mailboxes.lock().unwrap().entry(mailbox).or_default();
+        Ok(())
     }
 
-    async fn append(&self, mailbox: PublicKey, envelope: MessageEnvelope) {
+    async fn append(&self, mailbox: PublicKey, envelope: MessageEnvelope) -> io::Result<()> {
         let mut mailboxes = self.mailboxes.lock().unwrap();
         let Some(state) = mailboxes.get_mut(&mailbox) else {
-            return;
+            return Ok(());
         };
         self.purge_expired(state);
         let id = envelope.id();
         if state.items.iter().any(|item| item.envelope.id() == id) {
-            return;
+            return Ok(());
         }
         state.last_cursor += 1;
         state.items.push(StoredItem {
@@ -123,26 +129,32 @@ impl<C: Clock> MailboxStore for InMemoryStore<C> {
             deposited_at: self.clock.now(),
             envelope,
         });
+        Ok(())
     }
 
-    async fn fetch(&self, mailbox: PublicKey, after: u64) -> Vec<(u64, MessageEnvelope)> {
+    async fn fetch(
+        &self,
+        mailbox: PublicKey,
+        after: u64,
+    ) -> io::Result<Vec<(u64, MessageEnvelope)>> {
         let mut mailboxes = self.mailboxes.lock().unwrap();
         let Some(state) = mailboxes.get_mut(&mailbox) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         self.purge_expired(state);
-        state
+        Ok(state
             .items
             .iter()
             .filter(|item| item.cursor > after)
             .map(|item| (item.cursor, item.envelope.clone()))
-            .collect()
+            .collect())
     }
 
-    async fn ack(&self, mailbox: PublicKey, up_to: u64) {
+    async fn ack(&self, mailbox: PublicKey, up_to: u64) -> io::Result<()> {
         if let Some(state) = self.mailboxes.lock().unwrap().get_mut(&mailbox) {
             state.items.retain(|item| item.cursor > up_to);
         }
+        Ok(())
     }
 }
 
@@ -178,14 +190,17 @@ mod tests {
         let (now, clock) = test_clock();
         let store = InMemoryStore::with_clock(Duration::from_secs(100), clock);
         let mailbox = DeviceKey::from_seed([2; 32]).public();
-        store.register(mailbox).await;
-        store.append(mailbox, envelope_to(mailbox, b"old")).await;
+        store.register(mailbox).await.unwrap();
+        store
+            .append(mailbox, envelope_to(mailbox, b"old"))
+            .await
+            .unwrap();
 
         // When: time passes beyond the retention window
         *now.lock().unwrap() += Duration::from_secs(101);
 
         // Then: the unacked envelope is gone
-        assert!(store.fetch(mailbox, 0).await.is_empty());
+        assert!(store.fetch(mailbox, 0).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -194,14 +209,17 @@ mod tests {
         let (now, clock) = test_clock();
         let store = InMemoryStore::with_clock(Duration::from_secs(100), clock);
         let mailbox = DeviceKey::from_seed([2; 32]).public();
-        store.register(mailbox).await;
-        store.append(mailbox, envelope_to(mailbox, b"fresh")).await;
+        store.register(mailbox).await.unwrap();
+        store
+            .append(mailbox, envelope_to(mailbox, b"fresh"))
+            .await
+            .unwrap();
 
         // When: time passes, but not past the window
         *now.lock().unwrap() += Duration::from_secs(99);
 
         // Then
-        assert_eq!(store.fetch(mailbox, 0).await.len(), 1);
+        assert_eq!(store.fetch(mailbox, 0).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -210,16 +228,22 @@ mod tests {
         let (now, clock) = test_clock();
         let store = InMemoryStore::with_clock(Duration::from_secs(100), clock);
         let mailbox = DeviceKey::from_seed([2; 32]).public();
-        store.register(mailbox).await;
-        store.append(mailbox, envelope_to(mailbox, b"first")).await;
+        store.register(mailbox).await.unwrap();
+        store
+            .append(mailbox, envelope_to(mailbox, b"first"))
+            .await
+            .unwrap();
         *now.lock().unwrap() += Duration::from_secs(60);
-        store.append(mailbox, envelope_to(mailbox, b"second")).await;
+        store
+            .append(mailbox, envelope_to(mailbox, b"second"))
+            .await
+            .unwrap();
 
         // When: the first crosses the window, the second does not
         *now.lock().unwrap() += Duration::from_secs(60);
 
         // Then: only the second remains
-        let items = store.fetch(mailbox, 0).await;
+        let items = store.fetch(mailbox, 0).await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].1.core.body, b"second");
     }

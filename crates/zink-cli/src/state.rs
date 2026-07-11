@@ -40,7 +40,7 @@ impl ClientState {
     ) -> Result<(), String> {
         let path = self.participants_file(participants);
         create_parent(&path)?;
-        std::fs::write(&path, conversation.0).map_err(|e| format!("write {path:?}: {e}"))
+        write_atomic(&path, &conversation.0).map_err(|e| format!("write {path:?}: {e}"))
     }
 
     /// Persist an envelope under its conversation. Idempotent (the file
@@ -54,21 +54,28 @@ impl ClientState {
             .conversation_dir(conversation)
             .join(format!("{}.env", hex(&envelope.id().0)));
         create_parent(&path)?;
-        std::fs::write(&path, envelope.to_bytes()).map_err(|e| format!("write {path:?}: {e}"))
+        write_atomic(&path, &envelope.to_bytes()).map_err(|e| format!("write {path:?}: {e}"))
     }
 
     /// Rebuild the DAG from the stored envelopes. Order on disk is
-    /// irrelevant — the store accepts children before parents.
+    /// irrelevant — the store accepts children before parents. A damaged
+    /// file is skipped with a warning, never fatal: the DAG then honestly
+    /// reports the hole as a missing parent / seq gap. Only a missing
+    /// genesis is unrecoverable (there is no root to build on).
     pub fn load_dag(&self, conversation: MessageId) -> Result<ConversationDag, String> {
         let mut cores = Vec::new();
         let dir = self.conversation_dir(conversation);
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("read {dir:?}: {e}"))?;
-        for entry in entries {
-            let path = entry.map_err(|e| format!("read {dir:?}: {e}"))?.path();
-            let bytes = std::fs::read(&path).map_err(|e| format!("read {path:?}: {e}"))?;
-            let envelope = MessageEnvelope::try_from_bytes(&bytes)
-                .map_err(|e| format!("decode {path:?}: {e}"))?;
-            cores.push(envelope.core);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    MessageEnvelope::try_from_bytes(&bytes).map_err(|e| e.to_string())
+                }) {
+                Ok(envelope) => cores.push(envelope.core),
+                Err(e) => eprintln!("warning: skipping damaged {path:?}: {e}"),
+            }
         }
         let genesis_at = cores
             .iter()
@@ -82,8 +89,9 @@ impl ClientState {
         let mut dag = ConversationDag::new(cores.swap_remove(genesis_at))
             .map_err(|e| format!("stored genesis invalid: {e}"))?;
         for core in cores {
-            dag.insert(core)
-                .map_err(|e| format!("stored message invalid: {e}"))?;
+            if let Err(e) = dag.insert(core) {
+                eprintln!("warning: skipping invalid stored message: {e}");
+            }
         }
         Ok(dag)
     }
@@ -108,6 +116,14 @@ impl ClientState {
 fn create_parent(path: &std::path::Path) -> Result<(), String> {
     let parent = path.parent().expect("state paths always have a parent");
     std::fs::create_dir_all(parent).map_err(|e| format!("create {parent:?}: {e}"))
+}
+
+/// Temp file + rename: a crash mid-write never leaves a truncated file.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
 }
 
 fn hex(bytes: &[u8]) -> String {

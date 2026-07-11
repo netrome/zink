@@ -11,7 +11,9 @@
 //! KiB and mailboxes hold tens of messages at friends-scale — not worth a
 //! blocking-pool round-trip per call yet.
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use zink_protocol::{MessageEnvelope, PublicKey};
@@ -23,6 +25,10 @@ pub struct FsMailboxStore<W: WallClock = SystemClock> {
     root: PathBuf,
     retention: Duration,
     clock: W,
+    /// Serializes mutations: concurrent deposits must not race the
+    /// scan-then-write cursor/dedup logic (the in-memory store gets the
+    /// same guarantee from its data mutex).
+    lock: Mutex<()>,
 }
 
 impl FsMailboxStore {
@@ -37,6 +43,7 @@ impl<W: WallClock> FsMailboxStore<W> {
             root: root.into(),
             retention,
             clock,
+            lock: Mutex::new(()),
         }
     }
 
@@ -77,49 +84,70 @@ impl<W: WallClock> std::fmt::Debug for FsMailboxStore<W> {
 }
 
 impl<W: WallClock> MailboxStore for FsMailboxStore<W> {
-    async fn register(&self, mailbox: PublicKey) {
-        let _ = std::fs::create_dir_all(self.mailbox_dir(&mailbox));
+    async fn register(&self, mailbox: PublicKey) -> io::Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        std::fs::create_dir_all(self.mailbox_dir(&mailbox))
     }
 
-    async fn append(&self, mailbox: PublicKey, envelope: MessageEnvelope) {
+    async fn append(&self, mailbox: PublicKey, envelope: MessageEnvelope) -> io::Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let dir = self.mailbox_dir(&mailbox);
         if !dir.is_dir() {
-            return; // not registered
+            return Ok(()); // not registered — deliberate no-op
         }
         let items = self.live_items(&dir);
         let id = hex(&envelope.id().0);
         if items.iter().any(|item| item.id_hex == id) {
-            return; // duplicate — idempotent retry
+            return Ok(()); // duplicate — idempotent retry
         }
-        let next_cursor = items.last().map_or(1, |item| item.cursor + 1);
         let name = ItemName {
-            cursor: next_cursor,
+            cursor: items.last().map_or(1, |item| item.cursor + 1),
             deposited_ms: self.clock.now_ms(),
             id_hex: id,
         };
-        let _ = std::fs::write(dir.join(name.file_name()), envelope.to_bytes());
+        write_atomic(&dir.join(name.file_name()), &envelope.to_bytes())
     }
 
-    async fn fetch(&self, mailbox: PublicKey, after: u64) -> Vec<(u64, MessageEnvelope)> {
+    async fn fetch(
+        &self,
+        mailbox: PublicKey,
+        after: u64,
+    ) -> io::Result<Vec<(u64, MessageEnvelope)>> {
+        let _guard = self.lock.lock().unwrap();
         let dir = self.mailbox_dir(&mailbox);
-        self.live_items(&dir)
+        // Individual unreadable/undecodable files are skipped, not fatal:
+        // best-effort delivery of everything that is intact.
+        Ok(self
+            .live_items(&dir)
             .into_iter()
             .filter(|item| item.cursor > after)
             .filter_map(|item| {
                 let bytes = std::fs::read(dir.join(item.file_name())).ok()?;
                 Some((item.cursor, MessageEnvelope::try_from_bytes(&bytes).ok()?))
             })
-            .collect()
+            .collect())
     }
 
-    async fn ack(&self, mailbox: PublicKey, up_to: u64) {
+    async fn ack(&self, mailbox: PublicKey, up_to: u64) -> io::Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let dir = self.mailbox_dir(&mailbox);
         for item in self.live_items(&dir) {
             if item.cursor <= up_to {
-                let _ = std::fs::remove_file(dir.join(item.file_name()));
+                std::fs::remove_file(dir.join(item.file_name()))?;
             }
         }
+        Ok(())
     }
+}
+
+/// Write via temp file + rename so a crash never leaves a truncated item.
+/// (Same-directory rename is atomic on POSIX; the pid suffix keeps two
+/// processes on one data dir from clobbering each other's temp file.)
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The filename scheme, parsed and rendered in one place.
@@ -210,13 +238,13 @@ mod tests {
         let deposited = envelope(mailbox, b"survives");
         {
             let store = FsMailboxStore::new(&root);
-            store.register(mailbox).await;
-            store.append(mailbox, deposited.clone()).await;
+            store.register(mailbox).await.unwrap();
+            store.append(mailbox, deposited.clone()).await.unwrap();
         }
 
         // When: a fresh store opens the same directory
         let store = FsMailboxStore::new(&root);
-        let items = store.fetch(mailbox, 0).await;
+        let items = store.fetch(mailbox, 0).await.unwrap();
 
         // Then
         assert_eq!(items.len(), 1);
@@ -232,14 +260,17 @@ mod tests {
         let (now, clock) = test_wall_clock();
         let store = FsMailboxStore::with_clock(&root, Duration::from_secs(100), clock);
         let mailbox = DeviceKey::from_seed([2; 32]).public();
-        store.register(mailbox).await;
-        store.append(mailbox, envelope(mailbox, b"old")).await;
+        store.register(mailbox).await.unwrap();
+        store
+            .append(mailbox, envelope(mailbox, b"old"))
+            .await
+            .unwrap();
 
         // When
         *now.lock().unwrap() += 101_000;
 
         // Then: purged, including the file on disk
-        assert!(store.fetch(mailbox, 0).await.is_empty());
+        assert!(store.fetch(mailbox, 0).await.unwrap().is_empty());
         assert_eq!(
             std::fs::read_dir(store.mailbox_dir(&mailbox))
                 .unwrap()
@@ -256,22 +287,25 @@ mod tests {
         let root = temp_root("dedup-ack");
         let store = FsMailboxStore::new(&root);
         let mailbox = DeviceKey::from_seed([2; 32]).public();
-        store.register(mailbox).await;
+        store.register(mailbox).await.unwrap();
         let first = envelope(mailbox, b"one");
-        store.append(mailbox, first.clone()).await;
-        store.append(mailbox, first).await; // retry
-        store.append(mailbox, envelope(mailbox, b"two")).await;
+        store.append(mailbox, first.clone()).await.unwrap();
+        store.append(mailbox, first).await.unwrap(); // retry
+        store
+            .append(mailbox, envelope(mailbox, b"two"))
+            .await
+            .unwrap();
 
         // When
-        let items = store.fetch(mailbox, 0).await;
+        let items = store.fetch(mailbox, 0).await.unwrap();
 
         // Then: deduped, cursors monotonic
         assert_eq!(items.len(), 2);
         assert!(items[0].0 < items[1].0);
 
         // And: ack up to the first drops only the first
-        store.ack(mailbox, items[0].0).await;
-        let remaining = store.fetch(mailbox, 0).await;
+        store.ack(mailbox, items[0].0).await.unwrap();
+        let remaining = store.fetch(mailbox, 0).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].1.core.body, b"two");
 
@@ -283,8 +317,11 @@ mod tests {
         let root = temp_root("unregistered");
         let store = FsMailboxStore::new(&root);
         let mailbox = DeviceKey::from_seed([2; 32]).public();
-        store.append(mailbox, envelope(mailbox, b"void")).await;
-        assert!(store.fetch(mailbox, 0).await.is_empty());
+        store
+            .append(mailbox, envelope(mailbox, b"void"))
+            .await
+            .unwrap();
+        assert!(store.fetch(mailbox, 0).await.unwrap().is_empty());
         std::fs::remove_dir_all(&root).expect("clean up temp dir");
     }
 }
