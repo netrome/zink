@@ -116,13 +116,14 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   iroh + ring cross-compile cleanly. Scaffold lives in `app/`; build gotchas —
   debuginfo-bloated debug APKs, Gradle in-place repackaging — documented in
   DEV-SETUP.md.)*
-- [ ] **C0 · Relay deployment & caps.** Run the relay as an unattended service on the
-  public server (stable port, persistent data dir, restarts on boot). **Minimal abuse
-  caps**: max blob push size and a per-mailbox item cap — SPEC §8 claims "relay
-  rate/size caps" as the MVP anti-spam and today the blobs ALPN accepts unbounded
-  pushes. No TLS/domain/VAPID needed (native clients dial `id@ip:port` directly).
-  *Done when:* the relay survives a server reboot unattended and rejects an oversized
-  blob push.
+- [ ] **C0 · Relay deployment & caps.** *(Scheduled after C1, before C2 — the service
+  unit matters once two-phone testing wants an always-on relay; the caps before the
+  relay is advertised.)* Run the relay as an unattended service on the public server
+  (stable port, persistent data dir, restarts on boot). **Minimal abuse caps**: max
+  blob push size and a per-mailbox item cap — SPEC §8 claims "relay rate/size caps" as
+  the MVP anti-spam and today the blobs ALPN accepts unbounded pushes. No
+  TLS/domain/VAPID needed (native clients dial `id@ip:port` directly). *Done when:*
+  the relay survives a server reboot unattended and rejects an oversized blob push.
 - [ ] **C1 · Client core (`zink-client`).** 🎯 Lift the client logic from `zink-cli`
   into `zink-client` as a native lib shared by CLI and app: keystore, conversation
   state + DAG threading, send/recv/fan-out, blob fetch. The app gets a persistent
