@@ -147,14 +147,41 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   its mailboxes (kills the register-before-first-deposit footgun); CLI renders
   terminal QRs via `my-record --qr`. **C3 follow-up:** the scanner view has no
   cancel/back affordance if no QR is in sight.)*
-- [ ] **C3 · Messaging UI (Leptos).** Conversation list; message view (linearized
-  DAG); send text; send image (client-side thumbnail + full-res); scanner
-  cancel/back affordance (C2 footgun). *Done when:* usable text + image chat between
-  two phones.
-  *(Fold in from the A1–C2 review: (a) render conversation views from the **stored
-  DAG**, not from `recv`'s return value — dissolves the per-call dedup re-surfacing;
-  (b) a **process-wide/managed `Client`** instead of one-per-Tauri-command, closing
-  the concurrent-state-dir and double-first-run-key races [review MEDIUM-4].)*
+- [ ] **C3 · Messaging UI (Leptos).** Split into three runnable sub-slices below.
+  *Done when:* usable text + image chat between two phones.
+  *(Decision, 2026-07-12 — **self-wrap convention**: `seal` always adds a key-wrap
+  for the sender's own key, *without* listing self in `core.recipients` or
+  depositing to self. Senders can then reopen their own stored envelopes, so
+  history renders from the stored DAG with everything ciphertext-at-rest. Wraps
+  live outside the hashed core: ids unchanged, no version bump, recipients
+  unaffected. A client convention, not protocol — a client that skips it only
+  loses its own history; full send-to-self (deposit to own mailbox) is the D2
+  multi-device extension of the same idea. Record in SPEC §6 when it lands.)*
+- [ ] **C3a · Client-core groundwork (no UI).** Self-wrap in `seal`; conversation
+  enumeration + history API on `Client` (linearized, opened bodies); encrypted
+  blob cache in `ClientState` (`blobs/<hash>`, ciphertext at rest — without it the
+  relay's 30-day TTL silently eats images, and every view costs a round-trip);
+  blob fetch for stored messages via *own home relays* (that's where senders push
+  them); CLI `conversations` / `history` subcommands so it's all e2e-testable
+  without phones. *Done when:* the CLI shows a threaded, decrypted two-sided
+  history — including the device's own sent messages.
+- [ ] **C3b · Managed client + structured commands + Leptos scaffold.** One
+  long-lived `Client` in Tauri managed state (closes the concurrent-state-dir and
+  double-first-run-key races found in the A1–C2 review); commands return
+  structured DTOs rendered from the **stored DAG**, not `recv`'s return value
+  (dissolves the per-call dedup re-surfacing; replaces `recv_texts`'s formatted
+  strings); `app/ui/` Leptos CSR crate with a hand-rolled `invoke` shim (no
+  `tauri-sys` dependency), trunk wired into `beforeDevCommand`/`beforeBuildCommand`;
+  conversation list + message view + send text; refresh = on-load + button +
+  coarse foreground poll (C4 replaces this with forward-now). Reply resolves
+  participants → contact records for relays; unknown participant keys are skipped
+  with a warning (client policy, best-effort). *Done when:* two Linux desktops
+  chat through the deployed relay.
+- [ ] **C3c · Images + mobile polish.** Image pick → thumbnail via webview canvas
+  (keeps the `image` crate off the Rust side); send full + thumb as the existing
+  `BlobDraft` pair; render thumbnails, tap to fetch/decrypt full-res through the
+  blob cache; scanner cancel/back affordance (C2 footgun); Android build + the
+  two-phone acceptance run. *Done when:* C3's overall criterion.
 - [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
   connection (rendezvous doc §3 — specified, never implemented); the app holds a
   persistent connection via an Android foreground service; local notification on
