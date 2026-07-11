@@ -10,6 +10,8 @@
 //! zink-cli send --key <file> --to <petname | pubkey@relay[,relay…]> [--to …]
 //!               [--image <file> [--thumb <file>]] <text>
 //! zink-cli recv --key <file> [--relay <relay> …] [--blobs-dir <dir>]
+//! zink-cli conversations --key <file>
+//! zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
 //! ```
 //!
 //! `<relay>` is a dial string `<endpoint-id>@<ip:port>` as printed by
@@ -19,7 +21,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use zink_client::{Client, Contact, Received, hex, keystore};
-use zink_protocol::{BlobDraft, BlobKind, ContactRecord};
+use zink_protocol::{BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -32,6 +34,8 @@ async fn main() -> ExitCode {
         Some("contacts") => contacts(&args[1..]).await,
         Some("send") => send(&args[1..]).await,
         Some("recv") => recv(&args[1..]).await,
+        Some("conversations") => conversations(&args[1..]).await,
+        Some("history") => history(&args[1..]).await,
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -52,6 +56,8 @@ const USAGE: &str = "usage:
   zink-cli send --key <file> --to <petname | pubkey@relay[,relay...]> [--to ...]
                 [--image <file> [--thumb <file>]] <text>
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
+  zink-cli conversations --key <file>
+  zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
 (<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay; recv defaults
  to the home relays set via my-record)";
 
@@ -232,17 +238,120 @@ async fn recv(args: &[String]) -> Result<(), String> {
 async fn save_blobs(client: &Client, message: &Received, dir: &str) -> Result<(), String> {
     for blob_ref in &message.envelope.core.blob_refs {
         let plaintext = client.fetch_blob(message, &blob_ref.hash).await?;
-        let kind = match blob_ref.kind {
-            BlobKind::Thumbnail => "thumbnail",
-            BlobKind::Full => "full",
-        };
-        let path = Path::new(dir).join(format!(
-            "{}-{kind}.bin",
-            &hex::encode(&blob_ref.hash.0)[..8]
-        ));
-        std::fs::write(&path, &plaintext).map_err(|e| format!("write {}: {e}", path.display()))?;
-        println!("  saved {kind} blob to {}", path.display());
+        write_blob(dir, blob_ref, &plaintext)?;
     }
+    Ok(())
+}
+
+/// List every stored conversation, labelled with the other participants.
+async fn conversations(args: &[String]) -> Result<(), String> {
+    let (flags, _) = parse_flags(args)?;
+    let client = Client::open(&single(&flags, "--key")?).await?;
+    let summaries = client.conversations()?;
+    if summaries.is_empty() {
+        println!("no conversations");
+    }
+    let contacts = client.contacts()?;
+    let me = client.public_key();
+    for summary in summaries {
+        let others: Vec<String> = summary
+            .participants
+            .iter()
+            .filter(|key| **key != me)
+            .map(|key| label(&contacts, key))
+            .collect();
+        println!(
+            "{}  {} message(s)  with {}",
+            hex::encode(&summary.id.0),
+            summary.message_count,
+            if others.is_empty() {
+                "only me".to_string()
+            } else {
+                others.join(", ")
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Print one conversation's stored history in linearized order.
+async fn history(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [wanted] = positionals.as_slice() else {
+        return Err(format!(
+            "exactly one conversation id (or unique prefix) expected\n{USAGE}"
+        ));
+    };
+    let blobs_dir = optional(&flags, "--blobs-dir")?;
+    let client = Client::open(&single(&flags, "--key")?).await?;
+    let conversation = resolve_conversation(&client, wanted)?;
+    let contacts = client.contacts()?;
+    let me = client.public_key();
+    for message in client.history(conversation)? {
+        let from = if message.sender == me {
+            "me".to_string()
+        } else {
+            label(&contacts, &message.sender)
+        };
+        match &message.body {
+            Ok(plaintext) => println!("{from}: {}", String::from_utf8_lossy(plaintext)),
+            Err(e) => println!("{from}: <unopenable: {e}>"),
+        }
+        match &blobs_dir {
+            Some(dir) => {
+                for blob_ref in &message.blob_refs {
+                    let plaintext = client
+                        .fetch_stored_blob(conversation, message.id, &blob_ref.hash)
+                        .await?;
+                    write_blob(dir, blob_ref, &plaintext)?;
+                }
+            }
+            None if !message.blob_refs.is_empty() => println!(
+                "  ({} blob(s) attached; pass --blobs-dir to fetch)",
+                message.blob_refs.len()
+            ),
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// A full conversation id, or any unambiguous hex prefix of one.
+fn resolve_conversation(client: &Client, prefix: &str) -> Result<MessageId, String> {
+    let matching: Vec<MessageId> = client
+        .conversations()?
+        .into_iter()
+        .map(|summary| summary.id)
+        .filter(|id| hex::encode(&id.0).starts_with(prefix))
+        .collect();
+    match matching.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(format!("no conversation matches {prefix:?}")),
+        _ => Err(format!("{prefix:?} is ambiguous — give more of the id")),
+    }
+}
+
+/// Petname if the key belongs to a stored contact, else short hex.
+fn label(contacts: &[(String, ContactRecord)], key: &PublicKey) -> String {
+    contacts
+        .iter()
+        .find(|(_, record)| record.keys.contains(key))
+        .map(|(petname, _)| petname.clone())
+        .unwrap_or_else(|| hex::encode(&key.0)[..8].to_string())
+}
+
+/// Write one decrypted blob to `dir`, named by hash prefix and kind.
+fn write_blob(dir: &str, blob_ref: &BlobRef, plaintext: &[u8]) -> Result<(), String> {
+    let kind = match blob_ref.kind {
+        BlobKind::Thumbnail => "thumbnail",
+        BlobKind::Full => "full",
+    };
+    let path = Path::new(dir).join(format!(
+        "{}-{kind}.bin",
+        &hex::encode(&blob_ref.hash.0)[..8]
+    ));
+    std::fs::write(&path, plaintext).map_err(|e| format!("write {}: {e}", path.display()))?;
+    println!("  saved {kind} blob to {}", path.display());
     Ok(())
 }
 

@@ -157,7 +157,7 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   unaffected. A client convention, not protocol — a client that skips it only
   loses its own history; full send-to-self (deposit to own mailbox) is the D2
   multi-device extension of the same idea. Record in SPEC §6 when it lands.)*
-- [ ] **C3a · Client-core groundwork (no UI).** Self-wrap in `seal`; conversation
+- [x] **C3a · Client-core groundwork (no UI).** Self-wrap in `seal`; conversation
   enumeration + history API on `Client` (linearized, opened bodies); encrypted
   blob cache in `ClientState` (`blobs/<hash>`, ciphertext at rest — without it the
   relay's 30-day TTL silently eats images, and every view costs a round-trip);
@@ -165,6 +165,13 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   them); CLI `conversations` / `history` subcommands so it's all e2e-testable
   without phones. *Done when:* the CLI shows a threaded, decrypted two-sided
   history — including the device's own sent messages.
+  ✅ *(2026-07-12: self-wrap recorded in SPEC §6; `conversations`/`history`/
+  `fetch_stored_blob` on `Client` (client-core.md updated); own blobs cached at
+  send time — the sender's local copy is the only one reachable for own history,
+  since blobs are pushed to the recipients' relays. e2e: two-sided threaded
+  history on both devices, and blobs still render *after the relay is gone* (cache
+  proof). Envelopes stored before the self-wrap show as `<unopenable>` — honest,
+  dev-stage data only.)*
 - [ ] **C3b · Managed client + structured commands + Leptos scaffold.** One
   long-lived `Client` in Tauri managed state (closes the concurrent-state-dir and
   double-first-run-key races found in the A1–C2 review); commands return

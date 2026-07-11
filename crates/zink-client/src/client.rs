@@ -1,14 +1,14 @@
 //! The client: one device key, one endpoint, on-disk state, and the
 //! send/recv flows over them. Edges (CLI, app) stay presentation-only.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use iroh::Endpoint;
 use rand_core::OsRng;
 use zink_protocol::{
-    Attestation, BlobDraft, BlobHash, Claim, ContactRecord, DeviceKey, FORMAT_VERSION, MailboxOp,
-    MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
+    Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, FORMAT_VERSION,
+    MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
     SignedAttestation, distinct_relays,
 };
 
@@ -99,6 +99,12 @@ impl Client {
             self.state
                 .record_conversation(&participants, conversation)?;
         }
+        // Own blobs go straight into the local cache: they get pushed to the
+        // *recipients'* relays, so this is the only place we can refetch
+        // them from when rendering our own history.
+        for blob in &sealed.blobs {
+            self.state.save_blob(&blob.hash, &blob.bytes)?;
+        }
 
         let relays = distinct_relays(contacts.iter().map(|c| c.relays.clone()));
         let staging = blobs::stage(&sealed.blobs).await?;
@@ -182,21 +188,126 @@ impl Client {
         Ok(received)
     }
 
-    /// Fetch + verify + decrypt one blob referenced by a received message,
-    /// from the relay it arrived through.
+    /// Fetch + verify + decrypt one blob referenced by a received message:
+    /// the local cache first, then the relay it arrived through (caching
+    /// the ciphertext for the next time).
     pub async fn fetch_blob(
         &self,
         received: &Received,
         hash: &BlobHash,
     ) -> Result<Vec<u8>, String> {
-        blobs::fetch_blob(
-            &self.endpoint,
-            &received.relay,
+        self.open_cached_or_fetch(
             &received.envelope,
-            &self.device,
             hash,
+            std::slice::from_ref(&received.relay),
         )
         .await
+    }
+
+    /// Fetch + verify + decrypt a blob referenced by a *stored* message:
+    /// the local cache first, then this device's home relays (senders push
+    /// blobs to their recipients' relays — for stored history, that's us).
+    pub async fn fetch_stored_blob(
+        &self,
+        conversation: MessageId,
+        message: MessageId,
+        hash: &BlobHash,
+    ) -> Result<Vec<u8>, String> {
+        let envelope = self.state.load_envelope(conversation, message)?;
+        self.open_cached_or_fetch(&envelope, hash, &self.state.home_relays())
+            .await
+    }
+
+    /// The shared blob path: try the cache, then each relay in turn;
+    /// verify + decrypt against the referencing envelope (`open_blob`
+    /// checks the hash and the key commitment); cache ciphertext that
+    /// proved out. A cache entry that fails to open is ignored, not fatal —
+    /// the refetch replaces it.
+    async fn open_cached_or_fetch(
+        &self,
+        envelope: &MessageEnvelope,
+        hash: &BlobHash,
+        relays: &[String],
+    ) -> Result<Vec<u8>, String> {
+        if let Some(bytes) = self.state.load_blob(hash)
+            && let Ok(plaintext) = envelope.open_blob(&self.device, hash, &bytes)
+        {
+            return Ok(plaintext);
+        }
+        let mut last_error = String::from("no relay to fetch from");
+        for relay in relays {
+            match blobs::fetch_encrypted(&self.endpoint, relay, hash).await {
+                Ok(bytes) => {
+                    let plaintext = envelope
+                        .open_blob(&self.device, hash, &bytes)
+                        .map_err(|e| format!("decrypt blob: {e}"))?;
+                    self.state.save_blob(hash, &bytes)?;
+                    return Ok(plaintext);
+                }
+                Err(error) => last_error = error,
+            }
+        }
+        Err(format!("blob fetch failed: {last_error}"))
+    }
+
+    /// Every stored conversation, newest first (by wall-clock hint — a
+    /// display ordering, like everything timestamp-based).
+    pub fn conversations(&self) -> Result<Vec<ConversationSummary>, String> {
+        let mut summaries = Vec::new();
+        for id in self.state.conversations() {
+            let envelopes = self.state.load_envelopes(id)?;
+            if envelopes.is_empty() {
+                continue;
+            }
+            let participants: BTreeSet<PublicKey> = envelopes
+                .iter()
+                .flat_map(|envelope| {
+                    envelope
+                        .core
+                        .recipients
+                        .iter()
+                        .copied()
+                        .chain([envelope.core.sender])
+                })
+                .collect();
+            summaries.push(ConversationSummary {
+                id,
+                participants: participants.into_iter().collect(),
+                message_count: envelopes.len(),
+                last_timestamp_ms: envelopes
+                    .iter()
+                    .map(|envelope| envelope.core.timestamp_ms)
+                    .max()
+                    .unwrap_or(0),
+            });
+        }
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_timestamp_ms));
+        Ok(summaries)
+    }
+
+    /// One conversation's stored messages in the DAG's linearized order.
+    /// Bodies are opened per message and never fail the whole history — an
+    /// envelope this device cannot open (e.g. sealed before the self-wrap
+    /// convention) surfaces as `Err`, honestly, like `Received` does.
+    pub fn history(&self, conversation: MessageId) -> Result<Vec<HistoryMessage>, String> {
+        let envelopes = self.state.load_envelopes(conversation)?;
+        let by_id: BTreeMap<MessageId, &MessageEnvelope> = envelopes
+            .iter()
+            .map(|envelope| (envelope.id(), envelope))
+            .collect();
+        let dag = self.state.load_dag(conversation)?;
+        Ok(dag
+            .linearize()
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .map(|envelope| HistoryMessage {
+                id: envelope.id(),
+                sender: envelope.core.sender,
+                timestamp_ms: envelope.core.timestamp_ms,
+                body: envelope.open(&self.device),
+                blob_refs: envelope.core.blob_refs.clone(),
+            })
+            .collect())
     }
 
     /// Set this device's display name and home relays — what `my_record`
@@ -363,6 +474,28 @@ pub struct Received {
     /// The relay it arrived through — where its blobs can be fetched.
     pub relay: String,
     pub body: Result<Vec<u8>, OpenError>,
+}
+
+/// One stored conversation, as the edge lists it. Participants are keys —
+/// naming them is the edge's policy (petnames, hex, whatever).
+pub struct ConversationSummary {
+    pub id: MessageId,
+    /// Every key seen in the conversation (senders ∪ recipients), sorted;
+    /// includes this device.
+    pub participants: Vec<PublicKey>,
+    pub message_count: usize,
+    /// Largest wall-clock hint seen — display ordering only, never trusted.
+    pub last_timestamp_ms: u64,
+}
+
+/// One message out of a stored conversation, in linearized order.
+pub struct HistoryMessage {
+    pub id: MessageId,
+    pub sender: PublicKey,
+    /// The sender's wall-clock hint — display only.
+    pub timestamp_ms: u64,
+    pub body: Result<Vec<u8>, OpenError>,
+    pub blob_refs: Vec<BlobRef>,
 }
 
 fn now_ms() -> u64 {

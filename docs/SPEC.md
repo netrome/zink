@@ -325,6 +325,13 @@ visible.
   iroh keys are Ed25519; sealing uses the standard **Ed25519→X25519** conversion (use a
   vetted implementation — clamping / low-order-point footguns; never hand-rolled), and
   the message id is signed with the Ed25519 key. One key per device, two uses.
+- **Self-wrap convention (2026-07-12):** senders also seal each content-key **to their
+  own key**, *without* listing themselves in `recipients` — key-wraps live outside the
+  hashed core, so ids are unaffected and recipients see no difference. This is what
+  lets a device reopen its own stored copy when rendering history (everything at rest
+  stays ciphertext). A client convention, not protocol: a client that skips it only
+  loses its own history. Depositing to your *own mailbox* is the multi-device
+  extension of the same idea (phase 2).
 - **Key commitment (non-committing-AEAD fix):** common AEADs (XChaCha20-Poly1305,
   AES-GCM) are **not** key-committing — a malicious sender could craft one ciphertext
   that decrypts to *different* valid plaintexts under two content-keys, seal a different

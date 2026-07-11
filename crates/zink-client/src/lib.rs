@@ -19,6 +19,6 @@ mod spike;
 mod state;
 
 #[cfg(not(target_family = "wasm"))]
-pub use client::{Client, Contact, Received, SendReceipt};
+pub use client::{Client, Contact, ConversationSummary, HistoryMessage, Received, SendReceipt};
 #[cfg(target_family = "wasm")]
 pub use spike::spike_register;

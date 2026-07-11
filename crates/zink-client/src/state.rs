@@ -13,11 +13,16 @@
 //!   home relays (what goes into its ContactRecord).
 //! - `contacts/<key-hex>.record` (wire bytes) + `.name` (the local petname
 //!   — client policy, defaulting to the contact's self-claimed name).
+//! - `blobs/<hash-hex>` — cached *encrypted* blobs (ciphertext at rest, like
+//!   the envelopes), so images outlive the relay cache's TTL and the
+//!   sender's own images need no relay at all (C3a).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use zink_protocol::{ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey};
+use zink_protocol::{
+    BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey,
+};
 
 pub struct ClientState {
     root: PathBuf,
@@ -61,26 +66,71 @@ impl ClientState {
         write_atomic(&path, &envelope.to_bytes()).map_err(|e| format!("write {path:?}: {e}"))
     }
 
-    /// Rebuild the DAG from the stored envelopes. Order on disk is
-    /// irrelevant — the store accepts children before parents. A damaged
-    /// file is skipped with a warning, never fatal: the DAG then honestly
-    /// reports the hole as a missing parent / seq gap. Only a missing
-    /// genesis is unrecoverable (there is no root to build on).
-    pub fn load_dag(&self, conversation: MessageId) -> Result<ConversationDag, String> {
-        let mut cores = Vec::new();
+    /// All decodable envelopes stored under a conversation, unordered. A
+    /// damaged file is skipped with a warning, never fatal: the DAG then
+    /// honestly reports the hole as a missing parent / seq gap.
+    pub fn load_envelopes(&self, conversation: MessageId) -> Result<Vec<MessageEnvelope>, String> {
         let dir = self.conversation_dir(conversation);
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("read {dir:?}: {e}"))?;
+        let mut envelopes = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "env") {
+                continue; // e.g. an orphaned write_atomic temp file
+            }
             match std::fs::read(&path)
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| {
                     MessageEnvelope::try_from_bytes(&bytes).map_err(|e| e.to_string())
                 }) {
-                Ok(envelope) => cores.push(envelope.core),
+                Ok(envelope) => envelopes.push(envelope),
                 Err(e) => eprintln!("warning: skipping damaged {path:?}: {e}"),
             }
         }
+        Ok(envelopes)
+    }
+
+    /// One stored envelope by conversation + message id.
+    pub fn load_envelope(
+        &self,
+        conversation: MessageId,
+        message: MessageId,
+    ) -> Result<MessageEnvelope, String> {
+        let path = self
+            .conversation_dir(conversation)
+            .join(format!("{}.env", hex(&message.0)));
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {path:?}: {e}"))?;
+        MessageEnvelope::try_from_bytes(&bytes).map_err(|e| format!("decode {path:?}: {e}"))
+    }
+
+    /// Every conversation with stored envelopes, sorted by id (the caller
+    /// orders for display — id order is just deterministic).
+    pub fn conversations(&self) -> Vec<MessageId> {
+        let dir = self.root.join("conversations");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<MessageId> = entries
+            .flatten()
+            .filter_map(|entry| {
+                crate::hex::parse32(&entry.file_name().to_string_lossy())
+                    .ok()
+                    .map(MessageId)
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Rebuild the DAG from the stored envelopes. Order on disk is
+    /// irrelevant — the store accepts children before parents. Only a
+    /// missing genesis is unrecoverable (there is no root to build on).
+    pub fn load_dag(&self, conversation: MessageId) -> Result<ConversationDag, String> {
+        let mut cores: Vec<_> = self
+            .load_envelopes(conversation)?
+            .into_iter()
+            .map(|envelope| envelope.core)
+            .collect();
         let genesis_at = cores
             .iter()
             .position(|core| core.conversation.is_none())
@@ -98,6 +148,25 @@ impl ClientState {
             }
         }
         Ok(dag)
+    }
+
+    /// Cache a blob as fetched/produced — encrypted, keyed by its hash.
+    /// Idempotent (content-addressed: same hash ⇒ same bytes).
+    pub fn save_blob(&self, hash: &BlobHash, bytes: &[u8]) -> Result<(), String> {
+        let path = self.blob_path(hash);
+        create_parent(&path)?;
+        write_atomic(&path, bytes).map_err(|e| format!("write {path:?}: {e}"))
+    }
+
+    /// A cached encrypted blob, if present. The caller verifies + decrypts
+    /// against the referencing envelope — the cache is trusted no more than
+    /// a relay would be.
+    pub fn load_blob(&self, hash: &BlobHash) -> Option<Vec<u8>> {
+        std::fs::read(self.blob_path(hash)).ok()
+    }
+
+    fn blob_path(&self, hash: &BlobHash) -> PathBuf {
+        self.root.join("blobs").join(hex(&hash.0))
     }
 
     pub fn save_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {

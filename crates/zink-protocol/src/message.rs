@@ -112,9 +112,16 @@ impl MessageEnvelope {
             blobs.push(EncryptedBlob { hash, bytes });
             blob_keys.push((hash, key));
         }
+        // Every recipient gets a wrap — and so does the sender (the self-wrap
+        // convention, SPEC §6). Wraps live outside the hashed core, so this
+        // changes no id and no recipient sees a difference; it lets the
+        // sender reopen its own stored copy when rendering history.
+        let sender_public = sender.public();
+        let self_wrap = (!draft.recipients.contains(&sender_public)).then_some(sender_public);
         let key_wraps = draft
             .recipients
             .iter()
+            .chain(self_wrap.iter())
             .map(|recipient| {
                 let mut sealed = vec![SealedKey {
                     object: SealedRef::Body,
@@ -651,6 +658,50 @@ mod tests {
                 .unwrap_err(),
             OpenError::Crypto(CryptoError::CommitmentMismatch)
         );
+    }
+
+    #[test]
+    fn seal__should_let_the_sender_open_its_own_message_and_blobs() {
+        // Given: the self-wrap convention (SPEC §6) — the sender is wrapped
+        // for, but never listed as a recipient
+        let mut rng = rng();
+        let sender = device_key(1);
+        let recipient = device_key(2);
+
+        // When
+        let sealed =
+            MessageEnvelope::seal(draft_with_blobs(recipient.public()), &sender, &mut rng).unwrap();
+
+        // Then: the sender reopens body and blobs from its stored copy…
+        assert_eq!(sealed.envelope.open(&sender).unwrap(), b"see attached");
+        let blob = &sealed.blobs[0];
+        assert_eq!(
+            sealed
+                .envelope
+                .open_blob(&sender, &blob.hash, &blob.bytes)
+                .unwrap(),
+            b"tiny preview"
+        );
+        // …and the signed core still names only the real recipient.
+        assert_eq!(sealed.envelope.core.recipients, vec![recipient.public()]);
+    }
+
+    #[test]
+    fn seal__should_not_duplicate_the_wrap_when_the_sender_is_a_recipient() {
+        // Given: a draft that already lists the sender among the recipients
+        let mut rng = rng();
+        let sender = device_key(1);
+        let draft = draft_to(
+            vec![sender.public(), device_key(2).public()],
+            b"note to self",
+        );
+
+        // When
+        let sealed = MessageEnvelope::seal(draft, &sender, &mut rng).unwrap();
+
+        // Then: one wrap per key, and the sender still opens it
+        assert_eq!(sealed.envelope.key_wraps.len(), 2);
+        assert_eq!(sealed.envelope.open(&sender).unwrap(), b"note to self");
     }
 
     #[test]

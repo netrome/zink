@@ -38,10 +38,18 @@ client.send(&[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt  // seal → dep
                                               // distinct relay (retry) → push blobs
 client.recv(&[relay]) -> Vec<Received>        // register → page-fetch → dedup by id →
                                               // open → remember → ack each page
-client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // fetch (via the relay it
-                                              // arrived through) + verify + decrypt
+client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else the relay it
+                                              // arrived through; verify + decrypt
 // profile + contacts (C2): set_profile, my_record, add_contact, contacts,
 // resolve_contact, register_at_home_relays
+// stored history (C3a):
+client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
+                                              // last timestamp — naming is the edge's
+client.history(conversation) -> Vec<HistoryMessage>  // linearized; bodies opened per
+                                              // message (self-wrap covers own sends)
+client.fetch_stored_blob(conversation, message, &BlobHash) -> Vec<u8>
+                                              // cache, else own home relays (that's
+                                              // where senders push blobs for us)
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened
@@ -63,6 +71,11 @@ not a contract.
   configuration) — also sufficient native, so all consumers share one iroh config.
 - Contacts remain `(key, relay dial strings)` — the ContactRecord wire format and QR
   exchange are C2.
+- **Blob cache (C3a): ciphertext at rest.** `<key-file>.state/blobs/<hash-hex>` holds
+  encrypted blobs exactly as relays do; every read re-verifies against the referencing
+  envelope (`open_blob`), so the cache is trusted no more than a relay. Own blobs are
+  cached at send time — they get pushed to the *recipients'* relays, so the local copy
+  is the only one we can render our own history from.
 
 ## Non-goals (C1)
 

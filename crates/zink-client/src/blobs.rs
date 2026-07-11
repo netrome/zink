@@ -7,7 +7,7 @@ use iroh_blobs::Hash;
 use iroh_blobs::protocol::{ChunkRanges, ChunkRangesSeq, ObserveRequest, PushRequest};
 use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
-use zink_protocol::{BlobHash, DeviceKey, EncryptedBlob, MessageEnvelope};
+use zink_protocol::{BlobHash, EncryptedBlob};
 
 use crate::net;
 
@@ -44,13 +44,13 @@ pub(crate) async fn stage(blobs: &[EncryptedBlob]) -> Result<MemStore, String> {
     Ok(staging)
 }
 
-/// Fetch one referenced blob from a relay's cache, verify + decrypt it
-/// (hash and commitment checked in `open_blob`).
-pub(crate) async fn fetch_blob(
+/// Fetch one blob's *ciphertext* from a relay's cache. The caller verifies
+/// and decrypts against the envelope that references it (`open_blob`) —
+/// and may cache the ciphertext, which stays exactly as untrusted as the
+/// relay it came from.
+pub(crate) async fn fetch_encrypted(
     endpoint: &Endpoint,
     relay: &str,
-    envelope: &MessageEnvelope,
-    device: &DeviceKey,
     hash: &BlobHash,
 ) -> Result<Vec<u8>, String> {
     let store = MemStore::new();
@@ -61,14 +61,12 @@ pub(crate) async fn fetch_blob(
         .fetch(connection, blob_hash)
         .await
         .map_err(|e| format!("fetch blob: {e}"))?;
-    let bytes = store
+    store
         .blobs()
         .get_bytes(blob_hash)
         .await
-        .map_err(|e| format!("read fetched blob: {e}"))?;
-    envelope
-        .open_blob(device, hash, &bytes)
-        .map_err(|e| format!("decrypt blob: {e}"))
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| format!("read fetched blob: {e}"))
 }
 
 /// Push completion is not acknowledged in-band (iroh-blobs 0.103), so
