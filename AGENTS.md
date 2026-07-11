@@ -14,6 +14,7 @@ lean and build-focused; richer process (formal feature/refactor/review modes) co
 - `docs/SPEC.md` — the protocol (§11 resolved decisions, §12 phasing).
 - `docs/STYLE.md` — code conventions.
 - `docs/design/*.md` — detailed designs, including `mvp-build-plan.md` (the current task list).
+- `docs/DEV-SETUP.md` — toolchain setup (core, WASM, Android) for building on a fresh machine.
 - `README.md` — project overview (if present).
 
 ## Invariants (never violate in code)

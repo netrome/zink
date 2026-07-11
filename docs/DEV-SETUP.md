@@ -1,0 +1,111 @@
+# Developer Setup
+
+Everything needed to build and test zink on a fresh Linux machine (headless is
+fine — no GUI tools required anywhere). Reproduces the exact toolchain used in
+development; versions are pinned where the ecosystem makes that matter.
+
+## 1. Core (all crates, all tests)
+
+- **Rust** (stable, ≥ 1.97, edition 2024) via [rustup](https://rustup.rs).
+- That's it: `cargo build && cargo test` from the repo root.
+
+```sh
+cargo build
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all --check
+```
+
+## 2. WASM (browser client, `web/spike`)
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
+```
+
+⚠️ The `wasm-bindgen` CLI version must **exactly match** the `wasm-bindgen`
+crate version in `Cargo.lock` (currently 0.2.126) — check with
+`cargo tree -i wasm-bindgen` after dependency bumps, and reinstall the CLI to
+match.
+
+Build the browser spike bundle: `./web/spike/build.sh`.
+
+## 3. Android (native phone client)
+
+No Android Studio needed — everything installs from the command line into
+`~/android/`. Total download ≈ 1.5 GB.
+
+### 3.1 JDK 21 (required by `sdkmanager` and Gradle)
+
+```sh
+mkdir -p ~/android && cd ~/android
+curl -sL -o jdk.tar.gz \
+  "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse"
+tar xzf jdk.tar.gz && rm jdk.tar.gz && mv jdk-21* jdk
+```
+
+### 3.2 Android SDK command-line tools + packages
+
+```sh
+cd ~/android
+curl -sL -o cmdtools.zip \
+  "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
+mkdir -p sdk/cmdline-tools
+unzip -q cmdtools.zip -d sdk/cmdline-tools
+mv sdk/cmdline-tools/cmdline-tools sdk/cmdline-tools/latest
+rm cmdtools.zip
+
+export JAVA_HOME=~/android/jdk
+yes | sdk/cmdline-tools/latest/bin/sdkmanager --licenses
+sdk/cmdline-tools/latest/bin/sdkmanager \
+  "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.1.12297006"
+```
+
+### 3.3 Environment (add to your shell rc)
+
+```sh
+export JAVA_HOME="$HOME/android/jdk"
+export ANDROID_HOME="$HOME/android/sdk"
+export NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+```
+
+### 3.4 Rust target
+
+```sh
+rustup target add aarch64-linux-android   # 64-bit ARM — every modern phone
+```
+
+(Add `armv7-linux-androideabi`, `x86_64-linux-android` only if you need old
+devices or an emulator.)
+
+### 3.5 Smoke test the cross-compile
+
+Tauri configures the NDK toolchain automatically during `tauri android build`;
+for a raw `cargo` cross-build the three env vars below do the same job (the
+`CC`/`AR` pair is what C-code build scripts like blake3's look for):
+
+```sh
+NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
+export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
+export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+
+cargo build -p zink-protocol --target aarch64-linux-android   # all the crypto
+cargo build -p zink-relay --lib --target aarch64-linux-android # iroh + tokio + ring
+```
+
+Both must finish clean — they prove the whole crypto and networking stack
+cross-compiles before any app scaffolding enters the picture.
+
+### 3.6 Deploying to a phone
+
+Enable *Developer options → USB debugging* on the phone, then `adb devices`
+over USB (or `adb pair` for wireless debugging). APK install: `adb install <apk>`.
+
+## 4. Optional
+
+- **Node.js ≥ 20** — only for the browser/service-worker unit tests
+  (`node --test`, see STYLE.md); no npm packages needed.
+- **Tauri CLI** (phone client, from the C-spike onward):
+  `cargo install tauri-cli --locked`.
