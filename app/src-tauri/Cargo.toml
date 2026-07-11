@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 iroh = "1.0.2"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+zink-client = { version = "0.1.0", path = "../../crates/zink-client" }
 zink-protocol = { path = "../../crates/zink-protocol" }
 
 # Debug APKs carry the native lib; without this it's ~350 MB of debuginfo.

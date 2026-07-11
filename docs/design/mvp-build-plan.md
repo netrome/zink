@@ -124,11 +124,14 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   the MVP anti-spam and today the blobs ALPN accepts unbounded pushes. No
   TLS/domain/VAPID needed (native clients dial `id@ip:port` directly). *Done when:*
   the relay survives a server reboot unattended and rejects an oversized blob push.
-- [ ] **C1 · Client core (`zink-client`).** 🎯 Lift the client logic from `zink-cli`
+- [x] **C1 · Client core (`zink-client`).** 🎯 Lift the client logic from `zink-cli`
   into `zink-client` as a native lib shared by CLI and app: keystore, conversation
   state + DAG threading, send/recv/fan-out, blob fetch. The app gets a persistent
   device key in its data dir. *Done when:* the CLI runs on `zink-client` with all
   existing e2e tests green, and the app sends + receives a text via Tauri commands.
+  *(Design: [client-core.md](./client-core.md). ✅ 2026-07-11: phone ↔ CLI chat worked
+  live — two client implementations threading one conversation. No tokio in the lib;
+  the A6 WASM spike moved to a wasm-gated module and still builds.)*
 - [ ] **C2 · Contacts & QR.** ContactRecord (SPEC §3.6): generate + display your QR
   (keys, self-attestations, relays); scan a contact's (tauri barcode-scanner plugin);
   contact store; send-by-name. *Done when:* two phones exchange QRs and message each

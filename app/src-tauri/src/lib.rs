@@ -1,65 +1,70 @@
-//! zink phone/desktop app (Tauri). C-spike scope: prove a real phone can
-//! run the native iroh stack — one register round-trip against the relay.
+//! zink phone/desktop app (Tauri): thin command layer over `zink-client`.
+//! C1 scope: send + receive text with a persistent device key. UI, contacts
+//! and live delivery come in C2–C4.
 
-use std::str::FromStr;
+use tauri::Manager;
+use zink_client::{Client, Contact, hex};
 
-use iroh::endpoint::presets;
-use iroh::{Endpoint, EndpointAddr, EndpointId};
-use zink_protocol::{
-    MAILBOX_ALPN, MAX_RESPONSE_BYTES, MailboxOp, MailboxRequest, MailboxResponse, MailboxResult,
-};
-
-/// Register a mailbox on the relay over native QUIC — the same round-trip
-/// as A6's browser spike, minus the iroh-relay detour: a native client
-/// dials the relay's socket directly.
+/// This device's public key (creating it on first run), so it can be shared
+/// with a contact. QR exchange replaces this in C2.
 #[tauri::command]
-async fn spike_register(relay: String) -> Result<String, String> {
-    let (id, sock) = relay
-        .split_once('@')
-        .ok_or("relay must be <endpoint-id>@<ip:port>")?;
-    let id = EndpointId::from_str(id).map_err(|e| format!("endpoint id: {e}"))?;
-    let sock = std::net::SocketAddr::from_str(sock).map_err(|e| format!("socket addr: {e}"))?;
+async fn my_key(app: tauri::AppHandle) -> Result<String, String> {
+    let client = open_client(&app).await?;
+    Ok(hex::encode(&client.public_key().0))
+}
 
-    // Ephemeral endpoint key (builder default) — the real keystore, where
-    // the device key doubles as the endpoint key, is a later slice.
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .bind()
-        .await
-        .map_err(|e| format!("bind: {e}"))?;
-    let connection = endpoint
-        .connect(EndpointAddr::new(id).with_ip_addr(sock), MAILBOX_ALPN)
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+/// Send a text to one contact (`<pubkey-hex>`) via a relay dial string.
+#[tauri::command]
+async fn send_text(
+    app: tauri::AppHandle,
+    relay: String,
+    to: String,
+    text: String,
+) -> Result<String, String> {
+    let client = open_client(&app).await?;
+    let contact = Contact::parse(&format!("{to}@{relay}"))?;
+    let receipt = client.send(&[contact], text.into_bytes(), vec![]).await?;
+    Ok(format!(
+        "sent (conv {}, seq {})",
+        &hex::encode(&receipt.conversation.0)[..8],
+        receipt.seq
+    ))
+}
 
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
-        .map_err(|e| format!("open stream: {e}"))?;
-    send.write_all(&MailboxRequest::new(MailboxOp::Register).to_bytes())
-        .await
-        .map_err(|e| format!("send: {e}"))?;
-    send.finish().map_err(|e| format!("finish: {e}"))?;
-    let bytes = recv
-        .read_to_end(MAX_RESPONSE_BYTES)
-        .await
-        .map_err(|e| format!("read: {e}"))?;
+/// Drain the relay's mailbox; returns displayable lines.
+#[tauri::command]
+async fn recv_texts(app: tauri::AppHandle, relay: String) -> Result<Vec<String>, String> {
+    let client = open_client(&app).await?;
+    let received = client.recv(&[relay]).await?;
+    Ok(received
+        .iter()
+        .map(|message| match &message.body {
+            Ok(plaintext) => format!(
+                "from {}: {}",
+                &hex::encode(&message.envelope.core.sender.0)[..8],
+                String::from_utf8_lossy(plaintext)
+            ),
+            Err(e) => format!("undecryptable message ({e})"),
+        })
+        .collect())
+}
 
-    match MailboxResponse::try_from_bytes(&bytes)
-        .map_err(|e| format!("decode: {e}"))?
-        .result
-    {
-        MailboxResult::Registered => Ok(format!(
-            "registered mailbox for {} over native QUIC",
-            endpoint.id()
-        )),
-        other => Err(format!("unexpected response: {other:?}")),
-    }
+/// One client per call for now: binds a fresh endpoint each time. Fine at
+/// C1 scope; a managed long-lived client arrives with the UI slice.
+async fn open_client(app: &tauri::AppHandle) -> Result<Client, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("create data dir: {e}"))?;
+    let key_path = data_dir.join("device.key");
+    Client::open_or_create(&key_path.to_string_lossy()).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![spike_register])
+        .invoke_handler(tauri::generate_handler![my_key, send_text, recv_texts])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

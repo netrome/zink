@@ -8,6 +8,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 iroh = { version = "1.0.2", default-features = false, features = ["tls-ring"] }
+zink-protocol = { path = "../zink-protocol" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+blake3 = "1"
+iroh-blobs = "0.103"
+n0-future = "0.3.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-zink-protocol = { path = "../zink-protocol" }

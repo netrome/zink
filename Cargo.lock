@@ -5186,12 +5186,10 @@ dependencies = [
 name = "zink-cli"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "iroh",
  "iroh-blobs",
- "n0-future",
- "rand_core 0.6.4",
  "tokio",
+ "zink-client",
  "zink-protocol",
  "zink-relay",
 ]
@@ -5200,7 +5198,11 @@ dependencies = [
 name = "zink-client"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "iroh",
+ "iroh-blobs",
+ "n0-future",
+ "rand_core 0.6.4",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "zink-protocol",
