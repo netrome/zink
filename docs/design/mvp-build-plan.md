@@ -14,10 +14,13 @@ clean · `mvp-build-plan.md` updated · docs updated if behavior changed.
 **Workspace shape (target):**
 ```
 crates/zink-protocol   # pure core: types, BORSH, hashing, DAG, crypto. No I/O.
-crates/zink-relay      # bin: iroh relay + mailbox ALPN + push + blob cache. Ports+adapters.
+crates/zink-relay      # bin: iroh relay + mailbox ALPN + blob cache. Ports+adapters.
 crates/zink-cli        # bin: native dev/test client (not shipped) — drives the relay.
-crates/zink-client     # (Stage C) lib compiled to WASM for the PWA
-web/                   # (Stage C) PWA assets + service worker
+crates/zink-client     # client core lib shared by CLI + app (C1); also builds to WASM
+                       # (A6 spike — groundwork for the post-MVP PWA client)
+app/                   # Tauri v2 phone/desktop app (excluded from workspace: desktop
+                       # builds need system webkit2gtk; Android goes via `cargo tauri`)
+web/                   # browser spike page (A6) — post-MVP PWA groundwork
 ```
 
 ---
@@ -94,50 +97,54 @@ web/                   # (Stage C) PWA assets + service worker
   per conversation + a participants→conversation index; `send` threads drafts from the
   stored DAG — one conversation per participant set is CLI policy, not protocol.)*
 
-## Stage C — Phone client
+## Stage C — Phone client (native, Tauri v2)
 
-> **Client-stance rethink (2026-07-11):** pivoting the MVP client from PWA/WASM to
-> **native Android + Linux desktop (Leptos + Tauri v2)**, pending the spike below.
-> Rationale: A6 proved iroh-in-WASM works but Stage C's hardest remaining risks (Web
-> Push, IndexedDB keystore eviction, TLS/VAPID ops) are all browser-platform costs; a
-> native client erases them (persistent-connection delivery per the rendezvous doc's
-> "forward-now", filesystem keystore reusing the B5 client work, dial-by-`ip@port` with
-> no TLS) *and* gets real p2p between phones. The PWA becomes the post-MVP second
-> client — the cross-implementation proof, not the MVP bottleneck. **If the spike
-> passes:** re-slice C1–C4 around native and update SPEC §11's "Client scope: PWA only"
-> resolved decision explicitly. The C0–C4 slices below are the pre-pivot PWA plan,
-> kept until then.
+> **Client-stance pivot (2026-07-11, resolved — SPEC §11 updated):** MVP client =
+> **native Android + Linux desktop (Tauri v2, Leptos UI)** instead of PWA/WASM,
+> verified by the C-spike below. The browser platform carried the MVP's hardest costs
+> (Web Push, evictable IndexedDB keystore, TLS/VAPID ops) and denies true p2p; native
+> replaces them with persistent-connection delivery ("forward-now"), a filesystem
+> keystore reusing the B5 client work, and direct `id@ip:port` dialing. **The PWA
+> becomes the post-MVP second client** — the cross-implementation proof; its
+> groundwork (A6, `crates/zink-client` WASM spike, `web/spike`) stays in-tree.
 
-- [ ] **C-spike · 🎯🚩 Native client spike (Android).** The native sibling of A6:
+- [x] **C-spike · 🎯🚩 Native client spike (Android).** The native sibling of A6:
   Tauri v2 scaffold; cross-compile `zink-protocol` + iroh for `aarch64-linux-android`;
   a hello-world app on a real phone registers a mailbox against the deployed relay.
-  *Done when:* the phone shows a successful register round-trip. Retires the new
-  unknowns — NDK/crypto cross-compilation, iroh-on-Android, Tauri mobile toolchain.
-  *(Risk spike: iroh-on-Android + Tauri mobile. UI-polish maturity is NOT retired here —
-  it reveals itself in the UI slice and stays a bounded, iterable risk.)*
-- [ ] **C0 · Ops prerequisites.** Public relay with a domain + TLS; a VAPID keypair;
-  relay outbound HTTPS to browser push services. **Minimal abuse caps** before public
-  exposure: max blob push size and a per-mailbox item cap — SPEC §8 claims "relay
+  *Done when:* the phone shows a successful register round-trip.
+  ✅ *(2026-07-11: APK built on the first attempt; phone registered over native QUIC.
+  iroh + ring cross-compile cleanly. Scaffold lives in `app/`; build gotchas —
+  debuginfo-bloated debug APKs, Gradle in-place repackaging — documented in
+  DEV-SETUP.md.)*
+- [ ] **C0 · Relay deployment & caps.** Run the relay as an unattended service on the
+  public server (stable port, persistent data dir, restarts on boot). **Minimal abuse
+  caps**: max blob push size and a per-mailbox item cap — SPEC §8 claims "relay
   rate/size caps" as the MVP anti-spam and today the blobs ALPN accepts unbounded
-  pushes. *Done when:* the relay is reachable from a browser over TLS, can send a test
-  Web Push, and rejects an oversized blob push. (Needed before C1/C4 can be tested at all.)
-- [ ] **C1 · WASM + browser→relay.** 🎯 Build `zink-protocol`/`zink-client` to WASM
-  (`iroh` `default-features = false`); connect browser→relay over WebSocket; fetch a
-  message. *Done when:* a browser fetches a message **deposited by `zink-cli`** — proving
-  cross-implementation interop. (The iroh-in-WASM unknown is retired in A6; this slice is
-  integration work.)
-- [ ] **C2 · Client core in-browser.** Keystore (IndexedDB); ContactRecord generate +
-  QR scan; DAG store (IndexedDB); fan-out send + mailbox drain. *Done when:* two browser
-  instances hold a 1:1 conversation via the relay.
-- [ ] **C3 · Minimal UI.** Conversation list; message view; send text; send image
-  (thumbnail preview → full). *Done when:* usable text + image chat between two browsers.
-- [ ] **C4 · 🎯🚩 Push (isolated).** Service worker + Web Push subscription; relay VAPID
-  sender; content-free push → SW wakes → fetch → generic notification. *Done when:* a
-  backgrounded PWA on **Android** receives a push showing "New message"; opening shows
-  content. *(Risk spike: PWA Web Push — quarantine this slice.)*
+  pushes. No TLS/domain/VAPID needed (native clients dial `id@ip:port` directly).
+  *Done when:* the relay survives a server reboot unattended and rejects an oversized
+  blob push.
+- [ ] **C1 · Client core (`zink-client`).** 🎯 Lift the client logic from `zink-cli`
+  into `zink-client` as a native lib shared by CLI and app: keystore, conversation
+  state + DAG threading, send/recv/fan-out, blob fetch. The app gets a persistent
+  device key in its data dir. *Done when:* the CLI runs on `zink-client` with all
+  existing e2e tests green, and the app sends + receives a text via Tauri commands.
+- [ ] **C2 · Contacts & QR.** ContactRecord (SPEC §3.6): generate + display your QR
+  (keys, self-attestations, relays); scan a contact's (tauri barcode-scanner plugin);
+  contact store; send-by-name. *Done when:* two phones exchange QRs and message each
+  other by contact name.
+- [ ] **C3 · Messaging UI (Leptos).** Conversation list; message view (linearized
+  DAG); send text; send image (client-side thumbnail + full-res). *Done when:* usable
+  text + image chat between two phones.
+- [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
+  connection (rendezvous doc §3 — specified, never implemented); the app holds a
+  persistent connection via an Android foreground service; local notification on
+  arrival (tauri-plugin-notification); fetch-on-foreground stays the backstop.
+  *Done when:* a backgrounded app on a real phone shows a notification for an
+  incoming message. *(Risk spike: background delivery vs Android Doze/battery
+  optimization — the successor to the retired Web Push spike.)*
 
-**🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android,
-online and offline, with notifications.
+**🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
+(+ Linux desktop), online and offline, with notifications.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
@@ -159,11 +166,12 @@ online and offline, with notifications.
 ## Notes
 
 - **Risk spikes** (🎯 with *Risk spike*) are integration unknowns paper can't resolve —
-  A4 (custom ALPN), A6 (iroh WASM), C-spike (iroh-on-Android + Tauri mobile), C4 (push —
-  obsolete if the native pivot lands; persistent-connection delivery replaces Web Push).
+  A4 (custom ALPN) ✅, A6 (iroh WASM) ✅, C-spike (iroh-on-Android + Tauri mobile) ✅,
+  C4 (background delivery vs Android Doze — replaced the retired Web Push spike).
   Expect to learn by building; keep them small and isolated.
-- **Just-in-time design docs** (🎯): A4 mailbox wire messages, B1 DAG store, C1 WASM
-  integration, C4 push. Write these as short `docs/design/<name>.md` when we reach them.
+- **Just-in-time design docs** (🎯): A4 mailbox wire messages ✅, B1 DAG store ✅,
+  C1 client-core split, C4 live delivery / foreground service. Write these as short
+  `docs/design/<name>.md` when we reach them.
 - **Async ports, sync core.** Ports are async traits from A4 onward; the pure
   `zink-protocol` core stays synchronous (no async runtime, no threads) so it ports to
   single-threaded WASM cleanly. This keeps Stage C a re-plumbing, not a rewrite.

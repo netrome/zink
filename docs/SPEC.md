@@ -305,9 +305,11 @@ visible.
   fallback). This stops anyone draining or deleting another key's mailbox. *Who may
   deposit*, retention windows, rate/size caps, and whether to keep messages from
   non-contacts are **relay-operator policy**, not protocol.
-- **Web Push gateway:** on deposit, the relay sends a content-free push ("you have
-  messages"); the device wakes, authenticates, pulls, decrypts. Requires VAPID +
-  browser push services — an unavoidable non-p2p dependency for a PWA. Acknowledged.
+- **Wake-on-message:** the *native* MVP client holds a live connection to its
+  relay(s) and receives deliveries forwarded over it ("forward-now"), kept alive by an
+  OS foreground service. The **Web Push gateway** (content-free push → device wakes,
+  authenticates, pulls, decrypts; VAPID + browser push services — an unavoidable
+  non-p2p dependency) is what the future PWA client needs instead.
 - **Retention bounds recoverability.** Peer-to-peer backfill is the *primary* path;
   relay retention is a reluctant, TTL-bounded fallback for offline delivery, kept as
   minimal as possible.
@@ -358,11 +360,11 @@ visible.
 ## 8. System components
 
 ```
-┌─────────────────┐    direct connections (relay-routed — browsers can't hole-punch)   ┌─────────────────┐
-│  PWA client      │◀────────────────────────────────────────────────────────────────▶│  PWA client      │
-│  (WASM + iroh)   │                                                                 │  (WASM + iroh)   │
+┌─────────────────┐    direct QUIC (hole-punched; relay-assisted when NATed —          ┌─────────────────┐
+│  App client      │    browsers, as a future second client, are always relay-routed)  │  App client      │
+│  (native + iroh) │◀───────────────────────────────────────────────────────────────▶│  (native + iroh) │
 └───────┬─────────┘                                                                 └─────────────────┘
-        │  mailbox sync · push registration · blob fetch
+        │  mailbox sync · blob fetch · live-delivery connection
         ▼
 ┌──────────────────────────────────────────────────┐
 │  Relay + Mailbox + Push gateway (small binary)      │  ← untrusted; ciphertext + metadata only
@@ -373,9 +375,11 @@ visible.
 └──────────────────────────────────────────────────┘
 ```
 
-- **PWA client (WASM):** the only client for the MVP. iroh built with
-  `default-features = false`; **always relay-routed** (browsers can't hole-punch).
-  Holds keys, attestations, contacts, crypto, the DAG store, and UI.
+- **App client (native, Tauri v2):** the MVP client — Android + Linux desktop from
+  one codebase. Native iroh: direct QUIC with hole-punching, relays only for
+  introduction/fallback/offline. Holds keys, attestations, contacts, crypto, the DAG
+  store, and UI. *(A PWA/WASM client is the planned second implementation, post-MVP:
+  iroh-in-WASM is proven, but it is always relay-routed and needs the Web Push path.)*
 - **Relay / mailbox / push server:** small Rust binary; untrusted for content;
   minimal role (help peers connect + retain messages). **Anyone can run one**, and
   they are interchangeable — a user configures which relay(s) they use. I'll run one
@@ -429,7 +433,7 @@ custom conversation views — is **client policy/UX**.
 | Decision | Choice | Why |
 |---|---|---|
 | Recovery anchor | **None** | Social recovery only; an anchor adds complexity and fights the philosophy. |
-| Client scope | **PWA only** | Simplicity; native (true p2p) can come later. |
+| Client scope | **Native app first** (Tauri v2: Android + Linux desktop; revised 2026-07-11, was "PWA only") | The browser platform carried the MVP's hardest costs (Web Push, evictable IndexedDB keystore, TLS/VAPID ops) and denies true p2p; native reuses the proven Rust client stack and hole-punches. The PWA becomes the post-MVP second client (iroh-in-WASM already proven). |
 | Wire format | **BORSH** | Deterministic encoding required for content-addressing. |
 | Pairwise channel | **Static sealed-box** | Simple; FS has low value for a history-retaining friends app. |
 | Device history sync | **Peer sync + content-key re-wrap** | No shared family key; device sync = peer sync. |

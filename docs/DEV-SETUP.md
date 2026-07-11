@@ -98,14 +98,36 @@ cargo build -p zink-relay --lib --target aarch64-linux-android # iroh + tokio + 
 Both must finish clean — they prove the whole crypto and networking stack
 cross-compiles before any app scaffolding enters the picture.
 
-### 3.6 Deploying to a phone
+### 3.6 Building the app (`app/`)
+
+```sh
+cargo install tauri-cli --locked            # once
+cd app/src-tauri
+cargo tauri android init                    # once per checkout (generates gen/android)
+cargo tauri android build --debug --target aarch64
+# → gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+Notes:
+- The app crate is **excluded from the workspace** — its *desktop* build needs
+  system webkit2gtk (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
+  for the `apt` packages; only needed on machines building the desktop app).
+  Android builds need nothing beyond §3.1–3.4.
+- Debug APKs are auto-signed and sideloadable; release builds need a signing
+  config (not set up yet).
+- The app's `Cargo.toml` sets `[profile.dev] debug = false, strip = "debuginfo"` —
+  without it the debug APK is ~350 MB of Rust debuginfo. Debug via `adb logcat`.
+- Gradle repackages APKs **in place**: after big dependency changes the APK can
+  carry dead space from stale entries. `rm -rf gen/android/app/build/outputs`
+  and rebuild to compact it.
+
+### 3.7 Deploying to a phone
 
 Enable *Developer options → USB debugging* on the phone, then `adb devices`
-over USB (or `adb pair` for wireless debugging). APK install: `adb install <apk>`.
+over USB (or `adb pair` for wireless debugging). APK install: `adb install <apk>`
+— or serve the APK over HTTP and download it on the phone.
 
 ## 4. Optional
 
 - **Node.js ≥ 20** — only for the browser/service-worker unit tests
   (`node --test`, see STYLE.md); no npm packages needed.
-- **Tauri CLI** (phone client, from the C-spike onward):
-  `cargo install tauri-cli --locked`.
