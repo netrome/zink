@@ -367,13 +367,17 @@ visible.
         │  mailbox sync · blob fetch · live-delivery connection
         ▼
 ┌──────────────────────────────────────────────────┐
-│  Relay + Mailbox + Push gateway (small binary)      │  ← untrusted; ciphertext + metadata only
-│   · iroh relay (connectivity / NAT traversal)       │     interchangeable; anyone can run one
-│   · encrypted mailbox (offline delivery)            │
+│  Relay + Mailbox (small binary)                     │  ← untrusted; ciphertext + metadata only
+│   · mailbox ALPN (offline delivery, deposit/fetch)  │     interchangeable; anyone can run one
 │   · encrypted blob cache (TTL)                      │
-│   · Web Push (VAPID) sender                         │
+│   · live-forward to connected recipients (C4)       │
 └──────────────────────────────────────────────────┘
 ```
+
+*(Shipped relay = mailbox ALPN + blob cache; native clients dial its `id@ip:port`
+directly, so it hosts neither an iroh-relay server nor a Web Push sender. Both belong
+to the future PWA client's path: a co-located iroh-relay for browser WebSocket
+transport, and Web Push for browser wake — see §5.3 and the A6 spike.)*
 
 - **App client (native, Tauri v2):** the MVP client — Android + Linux desktop from
   one codebase. Native iroh: direct QUIC with hole-punching, relays only for
@@ -445,10 +449,12 @@ custom conversation views — is **client policy/UX**.
 | Key sealing | **libsodium-style sealed box** (X25519 via the standard Ed25519 conversions) | Anonymous, per-recipient, vetted construction — nothing hand-rolled. |
 | `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |
 
-**Still to pin down (implementation-level):** Web Push
-payload/encryption specifics, the `who-is-this` query format and default hop limit,
-sync-time head/`seq` exchange, the mailbox auth/handshake, relay discovery/config UX,
-and the deferred capability/token gating mechanism (added as a versioned field when needed).
+**Still to pin down (implementation-level):** the `who-is-this` query format and
+default hop limit, sync-time head/`seq` exchange, relay discovery/config UX, and the
+deferred capability/token gating mechanism (added as a versioned field when needed).
+*(The mailbox auth/handshake is resolved and shipped — connection-key auth over the
+`zink-mailbox/1` ALPN, [mailbox-wire-protocol.md](../docs/design/mailbox-wire-protocol.md).
+Web Push specifics move to the future PWA client's scope.)*
 
 ---
 

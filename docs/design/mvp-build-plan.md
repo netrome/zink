@@ -151,6 +151,10 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   DAG); send text; send image (client-side thumbnail + full-res); scanner
   cancel/back affordance (C2 footgun). *Done when:* usable text + image chat between
   two phones.
+  *(Fold in from the A1–C2 review: (a) render conversation views from the **stored
+  DAG**, not from `recv`'s return value — dissolves the per-call dedup re-surfacing;
+  (b) a **process-wide/managed `Client`** instead of one-per-Tauri-command, closing
+  the concurrent-state-dir and double-first-run-key races [review MEDIUM-4].)*
 - [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
   connection (rendezvous doc §3 — specified, never implemented); the app holds a
   persistent connection via an Android foreground service; local notification on
@@ -158,9 +162,30 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   *Done when:* a backgrounded app on a real phone shows a notification for an
   incoming message. *(Risk spike: background delivery vs Android Doze/battery
   optimization — the successor to the retired Web Push spike.)*
+  *(Fold in from the A1–C2 review [MEDIUM-3]: **send is store-first with no
+  re-deposit path** — a failed deposit leaves a phantom message in the local DAG and
+  a permanent seq gap. Fix here where delivery state gets a home: store on first
+  successful deposit, or track per-relay delivery so a later pass re-deposits.)*
 
 **🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
 (+ Linux desktop), online and offline, with notifications.
+
+### Hardening pass (2026-07-11, post-C2 independent review)
+
+Two fresh-eyes reviews (one via subagent, one external) audited A1–C2. Core clean:
+invariants held, crypto/commitment/signature paths tested against attacks,
+content-addressing pinned, no panics on hostile input. Fixed in this pass:
+- **fs mailbox cursor reset after a full drain** (data loss) — persistent per-mailbox
+  high-water counter; regression test `append__cursor_should_not_reset_after_a_full_drain`.
+- **unpaginated fetch** (a >16 MiB mailbox was undrainable) — relay pages responses
+  (`MAX_FETCH_PAGE_BYTES`), client loops until empty; test + wire-doc update.
+- swallowed tag-set after blob push (silent blob loss to GC) — now logged.
+- key files written `0600`; zeroize on the crypto error path; recv skips
+  unsupported-version envelopes (SPEC §10).
+Deferred with homes above: MEDIUM-3 → C4, MEDIUM-4 + render-from-DAG → C3. Also noted:
+`zink-client` has no unit tests of its own (only e2e coverage); `String` errors will
+want structured variants once the UI branches on failure kind; contact identity keyed
+on `keys.first()` needs revisiting at D2.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
@@ -171,7 +196,9 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
   petnames; `who-is-this` pull; client-side trust ranking.
 - [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
-  resolution; history backfill via content-key re-wrap.
+  resolution; history backfill via content-key re-wrap. *(Review note: contact
+  identity is currently keyed on `record.keys.first()` — revisit so a re-scanned
+  record with reordered/added device keys isn't treated as a different contact.)*
 - [ ] **D3 · Groups.** Multi-recipient conversations in the UI (delivery is already
   fan-out; this is mostly membership *presentation* — client UX).
 - [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?" answers

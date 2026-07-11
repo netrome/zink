@@ -85,8 +85,11 @@ impl ContentKey {
         let mut bytes = x25519_secret(device)
             .unseal(sealed)
             .map_err(|_| CryptoError::OpenFailed)?;
-        let key = Self(bytes[..].try_into().map_err(|_| CryptoError::Malformed)?);
+        // Zeroize the unsealed buffer on every path, including the
+        // wrong-length error return.
+        let array: Result<[u8; 32], _> = bytes[..].try_into();
         bytes.zeroize();
+        let key = Self(array.map_err(|_| CryptoError::Malformed)?);
         if key.commitment() != *expected {
             return Err(CryptoError::CommitmentMismatch);
         }

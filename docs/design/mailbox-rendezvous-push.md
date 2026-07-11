@@ -4,7 +4,16 @@ Detailed design for the operational core of Phase 0 — how a message actually r
 an offline recipient and wakes their device. Downstream of [SPEC.md](../SPEC.md) and
 [DESIGN-PHILOSOPHY.md](../DESIGN-PHILOSOPHY.md).
 
-Status: **draft for discussion.** ⚠️ marks open decisions.
+Status: **partially superseded.** ⚠️ marks open decisions.
+
+> **Superseded by the native-client pivot (2026-07-11, SPEC §11).** §6 (Web Push /
+> VAPID) describes the *PWA* wake path and its "Android-first, no native wrapper"
+> conclusion is now reversed: the MVP client is native (Tauri), so wake-on-message is
+> a persistent live connection with an OS foreground service (SPEC §5.3
+> "wake-on-message"), not Web Push. §6 stays as the design for the *future* PWA
+> client. The mailbox, rendezvous, retention, and blob sections (§2–§5, §7–§9) are
+> current and shipped; the wire messages are pinned in
+> [mailbox-wire-protocol.md](./mailbox-wire-protocol.md).
 
 ---
 

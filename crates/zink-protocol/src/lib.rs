@@ -23,8 +23,8 @@ pub use dag::{ConversationDag, DagError, InsertOutcome};
 pub use fanout::distinct_relays;
 pub use keys::{DeviceKey, PublicKey, Signature, VerifyError};
 pub use mailbox::{
-    MAILBOX_ALPN, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MailboxErrorCode, MailboxItem, MailboxOp,
-    MailboxRequest, MailboxResponse, MailboxResult,
+    MAILBOX_ALPN, MAX_FETCH_PAGE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MailboxErrorCode,
+    MailboxItem, MailboxOp, MailboxRequest, MailboxResponse, MailboxResult,
 };
 pub use message::{
     BlobDraft, BlobHash, BlobKind, BlobRef, EncryptedBlob, KeyCommitment, KeyWrap, MessageCore,

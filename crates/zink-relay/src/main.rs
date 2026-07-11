@@ -87,9 +87,31 @@ fn load_or_create_key(path: &Path) -> Result<SecretKey, Box<dyn std::error::Erro
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = SecretKey::generate();
-            std::fs::write(path, key.to_bytes())?;
+            write_private(path, &key.to_bytes())?;
             Ok(key)
         }
         Err(e) => Err(format!("read {}: {e}", path.display()).into()),
+    }
+}
+
+/// Write the relay's identity key owner-only (0600 on Unix) — it must not be
+/// world-readable. Small enough to keep here rather than take a dependency
+/// on the client crate just for a file-permission helper.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
     }
 }

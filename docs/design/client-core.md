@@ -32,17 +32,22 @@ zink-cli (args/printing)  app/src-tauri (Tauri commands)   [post-MVP: PWA via WA
 A `Client` owns the device key, one iroh endpoint, and the on-disk state:
 
 ```rust
-Client::open(key_path)                 // load key (CLI keygen creates it)
-Client::open_or_create(key_path)       // app: silent first-run key creation
-client.send(&[Contact], text, Vec<BlobDraft>) -> SendReceipt   // seal → deposit per
-                                       // distinct relay (retry) → push blobs (observed)
-client.recv(&[relay]) -> Vec<Received> // register → fetch → dedup by id → open →
-                                       // remember → ack per relay
-client.fetch_blob(relay, &Received, hash) -> Vec<u8>            // fetch + verify + decrypt
+Client::open(key_path)                        // load key (CLI keygen creates it)
+Client::open_or_create(key_path)              // app: silent first-run key creation
+client.send(&[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt  // seal → deposit per
+                                              // distinct relay (retry) → push blobs
+client.recv(&[relay]) -> Vec<Received>        // register → page-fetch → dedup by id →
+                                              // open → remember → ack each page
+client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // fetch (via the relay it
+                                              // arrived through) + verify + decrypt
+// profile + contacts (C2): set_profile, my_record, add_contact, contacts,
+// resolve_contact, register_at_home_relays
 ```
 
-`Received` carries plaintext bytes, sender, conversation id, and blob refs — the
-*edge* decides presentation (print, JSON to a webview, notification text).
+`Received` carries the envelope (sender, conversation id, blob refs) and the opened
+body as a `Result` — the *edge* decides presentation (print, webview, notification).
+The actual signatures live in `crates/zink-client/src/client.rs`; this sketch is a map,
+not a contract.
 
 ## Decisions
 

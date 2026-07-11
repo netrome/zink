@@ -3,8 +3,8 @@
 //! calls this with the connection's verified key.
 
 use zink_protocol::{
-    MailboxErrorCode, MailboxItem, MailboxOp, MailboxRequest, MailboxResponse, MailboxResult,
-    PublicKey,
+    MAX_FETCH_PAGE_BYTES, MailboxErrorCode, MailboxItem, MailboxOp, MailboxRequest,
+    MailboxResponse, MailboxResult, PublicKey,
 };
 
 use crate::store::MailboxStore;
@@ -49,13 +49,21 @@ impl<S: MailboxStore> MailboxService<S> {
                 MailboxResult::Deposited { id }
             }
             MailboxOp::Fetch { after } => {
-                let items = self
-                    .store
-                    .fetch(caller, after)
-                    .await?
-                    .into_iter()
-                    .map(|(cursor, envelope)| MailboxItem { cursor, envelope })
-                    .collect();
+                // Page the response: stop before it would exceed the fetch
+                // budget, but always include at least one envelope so a
+                // mailbox never wedges. The client loops until a page is
+                // empty. Items are cursor-ascending, so a truncated page is
+                // simply resumed from its last cursor.
+                let mut items = Vec::new();
+                let mut bytes = 0usize;
+                for (cursor, envelope) in self.store.fetch(caller, after).await? {
+                    let size = envelope.to_bytes().len();
+                    if !items.is_empty() && bytes + size > MAX_FETCH_PAGE_BYTES {
+                        break;
+                    }
+                    bytes += size;
+                    items.push(MailboxItem { cursor, envelope });
+                }
                 MailboxResult::Envelopes { items }
             }
             MailboxOp::Ack { up_to } => {
@@ -296,5 +304,43 @@ mod tests {
         // Then
         assert_eq!(fetched_items(&service, b, 0).await.len(), 1);
         assert_eq!(fetched_items(&service, c, 0).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch__should_page_a_mailbox_too_large_for_one_response() {
+        // Given: enough ~1 MiB envelopes to exceed the fetch page budget
+        let service = service();
+        let mailbox = device_key(2).public();
+        service
+            .handle(mailbox, MailboxRequest::new(MailboxOp::Register))
+            .await;
+        let count = (MAX_FETCH_PAGE_BYTES / (1 << 20)) + 3;
+        for i in 0..count {
+            let mut body = vec![0u8; 1 << 20];
+            body[0] = i as u8; // distinct bodies → distinct ids
+            service
+                .handle(
+                    device_key(1).public(),
+                    deposit(envelope_to(&[mailbox], &body)),
+                )
+                .await;
+        }
+
+        // When: draining page-by-page like the client does
+        let mut drained = 0;
+        let mut after = 0;
+        loop {
+            let page = fetched_items(&service, mailbox, after).await;
+            if page.is_empty() {
+                break;
+            }
+            // Each page is bounded — never the whole mailbox at once.
+            assert!(page.len() < count, "page was not bounded: {}", page.len());
+            after = page.iter().map(|item| item.cursor).max().unwrap();
+            drained += page.len();
+        }
+
+        // Then: every message is delivered across the pages
+        assert_eq!(drained, count);
     }
 }

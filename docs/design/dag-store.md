@@ -8,7 +8,8 @@ Status: **resolved for MVP.**
 ## Scope & placement
 
 - One `ConversationDag` per conversation, living in `zink-protocol` (pure: no I/O, no
-  async). Persistence (B5) and the multi-conversation container (C2) wrap it later.
+  async). Persistence (B5) and the multi-conversation container (client state, C1/C3)
+  wrap it later.
 - It stores **`MessageCore`s that the caller has already authenticated** (envelope
   signature verified, commitment checked). The store orders; it does not vet crypto.
 - Cycles need no handling: a parent reference is a BLAKE3 hash of the parent's bytes,

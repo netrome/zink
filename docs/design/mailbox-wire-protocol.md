@@ -17,6 +17,14 @@ Status: **resolved for MVP.**
   framing**. Streams are cheap; a client opens as many as it has requests.
 - **Size caps:** requests ≤ 1 MiB, responses ≤ 16 MiB (`read_to_end` limits).
   Operator policy may lower them; the constants live in `zink-protocol::mailbox`.
+- **`fetch` is paginated.** A single response carries at most `MAX_FETCH_PAGE_BYTES`
+  (< the 16 MiB response cap) of envelopes — always at least one, so a mailbox never
+  wedges. Items are cursor-ascending; the client resumes with `fetch(after = last
+  cursor)` and repeats until a page returns empty, acking each page so storage is
+  released as it drains. Without this, a mailbox larger than 16 MiB (≤1024 items ×
+  ≤1 MiB) would exceed the client's read limit before it could ack — undrainable until
+  TTL. The relay bounding the page is what makes the "responses ≤ 16 MiB" cap
+  actually honorable.
 - **Auth is the connection** (design doc §5): the relay reads the peer's key from the
   iroh connection. `register` / `fetch` / `ack` operate on *the caller's own* mailbox —
   there is no way to name another key's mailbox. `deposit` is open to any connected

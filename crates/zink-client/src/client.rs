@@ -117,8 +117,10 @@ impl Client {
         })
     }
 
-    /// Drain every relay: register, fetch, dedup by message id, open, and
-    /// remember what verified; ack each relay at its own cursor.
+    /// Drain every relay: register, then fetch page-by-page (the relay caps
+    /// each response, so a large mailbox needs several rounds), dedup by
+    /// message id, open, and remember what verified; ack each page at its
+    /// own cursor so storage is released as we go.
     pub async fn recv(&self, relays: &[String]) -> Result<Vec<Received>, String> {
         let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
         let mut received = Vec::new();
@@ -126,29 +128,44 @@ impl Client {
             let connection =
                 net::connect(&self.endpoint, relay, zink_protocol::MAILBOX_ALPN).await?;
             net::request(&connection, MailboxOp::Register).await?;
-            let items = match net::request(&connection, MailboxOp::Fetch { after: 0 }).await? {
-                MailboxResult::Envelopes { items } => items,
-                other => return Err(format!("unexpected response from {relay}: {other:?}")),
-            };
-            // Cursors are relay-local: ack each relay at its own high-water mark.
-            let mut last_cursor = None;
-            for item in items {
-                last_cursor = last_cursor.max(Some(item.cursor));
-                if !seen.insert(item.envelope.id().0) {
-                    continue; // already drained via another relay
+            // Cursors are relay-local: page through this relay, acking each
+            // page's high-water mark, until a page comes back empty.
+            let mut after = 0u64;
+            loop {
+                let items = match net::request(&connection, MailboxOp::Fetch { after }).await? {
+                    MailboxResult::Envelopes { items } => items,
+                    other => return Err(format!("unexpected response from {relay}: {other:?}")),
+                };
+                if items.is_empty() {
+                    break;
                 }
-                let body = item.envelope.open(&self.device);
-                if body.is_ok() {
-                    self.remember(&item.envelope)?;
+                let mut page_cursor = after;
+                for item in items {
+                    page_cursor = page_cursor.max(item.cursor);
+                    if item.envelope.version != zink_protocol::FORMAT_VERSION
+                        || item.envelope.core.version != zink_protocol::FORMAT_VERSION
+                    {
+                        // A future protocol version this client can't parse
+                        // (SPEC §10: surfaced, never misparsed). Skipped, and
+                        // acked with the page so it doesn't wedge the drain.
+                        eprintln!("skipping message with unsupported version");
+                        continue;
+                    }
+                    if !seen.insert(item.envelope.id().0) {
+                        continue; // already drained via another relay
+                    }
+                    let body = item.envelope.open(&self.device);
+                    if body.is_ok() {
+                        self.remember(&item.envelope)?;
+                    }
+                    received.push(Received {
+                        envelope: item.envelope,
+                        relay: relay.clone(),
+                        body,
+                    });
                 }
-                received.push(Received {
-                    envelope: item.envelope,
-                    relay: relay.clone(),
-                    body,
-                });
-            }
-            if let Some(up_to) = last_cursor {
-                net::request(&connection, MailboxOp::Ack { up_to }).await?;
+                net::request(&connection, MailboxOp::Ack { up_to: page_cursor }).await?;
+                after = page_cursor;
             }
         }
         Ok(received)

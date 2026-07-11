@@ -62,7 +62,14 @@ fn blob_cache_events<W: WallClock>(
             if let ProviderMessage::PushRequestReceivedNotify(msg) = message {
                 let hash = msg.inner.request.hash;
                 let tag = push_tag(wall_clock.now_ms(), &hash);
-                let _ = blob_store.tags().set(tag, hash).await;
+                // If tagging fails the blob is stored but unprotected — the
+                // next GC would delete a blob the uploader believes it
+                // delivered. Log loudly; the sender may re-push (idempotent
+                // by hash) to re-tag. A blocking in-process channel makes
+                // this rare, but silence would be a silent delivery hole.
+                if let Err(e) = blob_store.tags().set(tag, hash).await {
+                    eprintln!("warning: failed to tag pushed blob {hash}: {e}");
+                }
             }
         }
     });

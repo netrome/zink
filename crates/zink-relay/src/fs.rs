@@ -67,6 +67,21 @@ impl<W: WallClock> FsMailboxStore<W> {
         self.root.join(hex(&mailbox.0))
     }
 
+    /// Bump and persist the mailbox's monotonic deposit counter. Held under
+    /// the store lock by the sole caller (`append`), so read-modify-write is
+    /// race-free. The `cursor` file has no `.env` suffix, so `live_items`
+    /// ignores it.
+    fn next_cursor(&self, dir: &Path) -> io::Result<u64> {
+        let path = dir.join("cursor");
+        let last: u64 = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let next = last + 1;
+        write_atomic(&path, next.to_string().as_bytes())?;
+        Ok(next)
+    }
+
     /// All live items in a mailbox, oldest first. Expired files are deleted
     /// on the way (the lazy purge, same as the in-memory store).
     fn live_items(&self, dir: &Path) -> Vec<ItemName> {
@@ -119,8 +134,13 @@ impl<W: WallClock> MailboxStore for FsMailboxStore<W> {
         if items.len() >= self.max_items {
             return Ok(()); // full mailbox — best-effort skip, never an error
         }
+        // Cursor is a persistent per-mailbox high-water mark, NOT derived
+        // from live items: a full drain (ack or TTL purge) must not reset it,
+        // or a client persisting its fetch cursor would silently miss the
+        // next deposit (mailbox-wire-protocol.md: "monotonic deposit index").
+        let cursor = self.next_cursor(&dir)?;
         let name = ItemName {
-            cursor: items.last().map_or(1, |item| item.cursor + 1),
+            cursor,
             deposited_ms: self.clock.now_ms(),
             id_hex: id,
         };
@@ -288,14 +308,15 @@ mod tests {
         // When
         *now.lock().unwrap() += 101_000;
 
-        // Then: purged, including the file on disk
+        // Then: purged, including the item file on disk (the persistent
+        // `cursor` marker file legitimately remains).
         assert!(store.fetch(mailbox, 0).await.unwrap().is_empty());
-        assert_eq!(
-            std::fs::read_dir(store.mailbox_dir(&mailbox))
-                .unwrap()
-                .count(),
-            0
-        );
+        let item_files = std::fs::read_dir(store.mailbox_dir(&mailbox))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "env"))
+            .count();
+        assert_eq!(item_files, 0);
 
         std::fs::remove_dir_all(&root).expect("clean up temp dir");
     }
@@ -361,6 +382,37 @@ mod tests {
 
         // Then: the third deposit was skipped
         assert_eq!(store.fetch(mailbox, 0).await.unwrap().len(), 2);
+
+        std::fs::remove_dir_all(&root).expect("clean up temp dir");
+    }
+
+    #[tokio::test]
+    async fn append__cursor_should_not_reset_after_a_full_drain() {
+        // Given: a deposit that is then fully acked away
+        let root = temp_root("cursor-drain");
+        let store = FsMailboxStore::new(&root);
+        let mailbox = DeviceKey::from_seed([2; 32]).public();
+        store.register(mailbox).await.unwrap();
+        store
+            .append(mailbox, envelope(mailbox, b"first"))
+            .await
+            .unwrap();
+        let first_cursor = store.fetch(mailbox, 0).await.unwrap()[0].0;
+        store.ack(mailbox, first_cursor).await.unwrap();
+        assert!(store.fetch(mailbox, 0).await.unwrap().is_empty());
+
+        // When: a new message is deposited into the now-empty mailbox
+        store
+            .append(mailbox, envelope(mailbox, b"second"))
+            .await
+            .unwrap();
+
+        // Then: its cursor is strictly greater — a client that persisted
+        // `first_cursor` and fetches after it still sees the new message.
+        let after = store.fetch(mailbox, first_cursor).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].0 > first_cursor);
+        assert_eq!(after[0].1.core.body, b"second");
 
         std::fs::remove_dir_all(&root).expect("clean up temp dir");
     }

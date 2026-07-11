@@ -16,6 +16,15 @@ pub const MAILBOX_ALPN: &[u8] = b"zink-mailbox/1";
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 pub const MAX_RESPONSE_BYTES: usize = 16 << 20;
 
+/// A `Fetch` response carries at most this many bytes of envelopes, so a
+/// large mailbox is drained page-by-page instead of overflowing
+/// `MAX_RESPONSE_BYTES` in one unpaginated response (which would wedge the
+/// mailbox — the client couldn't read it, so couldn't ack it). Headroom is
+/// left under `MAX_RESPONSE_BYTES` for framing; the relay always includes at
+/// least one envelope so a full mailbox always makes progress. The client
+/// repeats `fetch` (advancing `after`) until a page comes back empty.
+pub const MAX_FETCH_PAGE_BYTES: usize = 12 << 20;
+
 /// One mailbox operation. `register`/`fetch`/`ack` act on the mailbox of the
 /// key that authenticated the connection — no other mailbox can be named.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
