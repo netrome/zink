@@ -24,3 +24,10 @@ zink-protocol = { path = "../../crates/zink-protocol" }
 [profile.dev]
 debug = false
 strip = "debuginfo"
+
+[profile.release]
+opt-level = "s"     # optimize for size; "z" shaves a bit more at some speed cost
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
