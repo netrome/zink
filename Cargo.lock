@@ -5186,6 +5186,7 @@ dependencies = [
 name = "zink-cli"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "iroh",
  "iroh-blobs",
  "n0-future",

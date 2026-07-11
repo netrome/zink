@@ -1,140 +1,173 @@
-//! Blob-cache retention: a pushed blob lives for a TTL, then iroh-blobs GC
-//! collects it (mailbox design §7/§8 — TTL cache, not permanent storage).
+//! Blob-cache retention (B5, tag-based): every pushed blob gets a
+//! timestamped tag; tagged blobs are GC roots, so a blob lives until its
+//! tag is pruned. Tags persist inside the blob store itself, so retention
+//! state survives restarts along with the blobs — no side registry to lose.
 //!
-//! iroh-blobs deletes unprotected blobs on every GC run, so retention is
-//! expressed inversely: we track when each blob was pushed and *protect* the
-//! ones still inside the TTL window.
+//! Eviction = a pruner task deletes tags older than the TTL; the next GC
+//! run collects the now-unprotected blobs.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Duration;
 
 use iroh_blobs::Hash;
-use iroh_blobs::store::mem::{MemStore, Options};
-use iroh_blobs::store::{GcConfig, ProtectCb, ProtectOutcome};
+use iroh_blobs::api::Store;
+use iroh_blobs::store::GcConfig;
+use iroh_blobs::store::fs::FsStore;
+use iroh_blobs::store::mem::MemStore;
+use n0_future::StreamExt;
 
-use crate::clock::{Clock, SystemClock};
+use crate::clock::WallClock;
 
 /// How long a pushed blob is kept for recipients to fetch.
 pub const DEFAULT_BLOB_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-/// How often GC sweeps expired blobs.
+/// How often GC sweeps unprotected blobs (and the pruner sweeps old tags).
 pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Tracks push times and answers "which blobs are still protected?".
-pub struct BlobRetention<C: Clock = SystemClock> {
-    pushed_at: Mutex<HashMap<Hash, Instant>>,
-    ttl: Duration,
-    clock: C,
+const PUSH_TAG_PREFIX: &str = "pushed-";
+
+/// The retention tag for a push: `pushed-<unix-ms:020>-<hash-hex>`.
+/// Re-pushing writes a new tag — the newest one keeps the blob alive.
+pub fn push_tag(now_ms: u64, hash: &Hash) -> String {
+    format!("{PUSH_TAG_PREFIX}{now_ms:020}-{}", hash.to_hex())
 }
 
-impl BlobRetention {
-    pub fn new(ttl: Duration) -> Self {
-        Self::with_clock(ttl, SystemClock)
-    }
+/// The timestamp of a push tag; `None` for tags this scheme doesn't own.
+pub fn push_tag_timestamp_ms(tag: &[u8]) -> Option<u64> {
+    let name = std::str::from_utf8(tag).ok()?;
+    let rest = name.strip_prefix(PUSH_TAG_PREFIX)?;
+    let (timestamp, _) = rest.split_at_checked(20)?;
+    timestamp.parse().ok()
 }
 
-impl<C: Clock> BlobRetention<C> {
-    pub fn with_clock(ttl: Duration, clock: C) -> Self {
-        Self {
-            pushed_at: Mutex::new(HashMap::new()),
-            ttl,
-            clock,
-        }
-    }
-
-    /// Record (or refresh) a push. A re-push of an existing blob restarts
-    /// its TTL — deliberate: someone still cares about it.
-    pub fn record(&self, hash: Hash) {
-        let now = self.clock.now();
-        self.pushed_at.lock().unwrap().insert(hash, now);
-    }
-
-    /// Hashes still inside the TTL window. Expired entries are pruned from
-    /// the registry as a side effect — GC deletes their blobs right after.
-    pub fn protected(&self) -> HashSet<Hash> {
-        let now = self.clock.now();
-        let ttl = self.ttl;
-        let mut pushed_at = self.pushed_at.lock().unwrap();
-        pushed_at.retain(|_, at| now.duration_since(*at) < ttl);
-        pushed_at.keys().copied().collect()
-    }
-}
-
-impl<C: Clock> std::fmt::Debug for BlobRetention<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlobRetention")
-            .field("ttl", &self.ttl)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A blob store wired for cache semantics: GC runs every `gc_interval` and
-/// deletes everything `retention` no longer protects.
-pub fn blob_cache<C: Clock>(retention: Arc<BlobRetention<C>>, gc_interval: Duration) -> MemStore {
-    let protect: ProtectCb = Arc::new(move |live| {
-        let retention = retention.clone();
-        Box::pin(async move {
-            live.extend(retention.protected());
-            ProtectOutcome::Continue
-        })
-    });
-    MemStore::new_with_opts(Options {
+/// In-memory blob cache with TTL semantics (dev / tests).
+pub fn mem_blob_cache<W: WallClock>(ttl: Duration, gc_interval: Duration, clock: W) -> MemStore {
+    let store = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
         gc_config: Some(GcConfig {
             interval: gc_interval,
-            add_protected: Some(protect),
+            add_protected: None,
         }),
-    })
+    });
+    spawn_tag_pruner((*store).clone(), ttl, gc_interval, clock);
+    store
+}
+
+/// On-disk blob cache with TTL semantics. Blobs *and* their retention tags
+/// live in `root` and survive restarts together.
+pub async fn fs_blob_cache<W: WallClock>(
+    root: &Path,
+    ttl: Duration,
+    gc_interval: Duration,
+    clock: W,
+) -> Result<FsStore, Box<dyn std::error::Error + Send + Sync>> {
+    let mut options = iroh_blobs::store::fs::options::Options::new(root);
+    options.gc = Some(GcConfig {
+        interval: gc_interval,
+        add_protected: None,
+    });
+    let store = FsStore::load_with_opts(root.join("blobs.db"), options).await?;
+    spawn_tag_pruner((*store).clone(), ttl, gc_interval, clock);
+    Ok(store)
+}
+
+/// Periodically delete push tags older than `ttl`; GC then collects the
+/// blobs they were keeping alive.
+fn spawn_tag_pruner<W: WallClock>(store: Store, ttl: Duration, interval: Duration, clock: W) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            prune_expired_tags(&store, ttl, clock.now_ms()).await;
+        }
+    });
+}
+
+async fn prune_expired_tags(store: &Store, ttl: Duration, now_ms: u64) {
+    let ttl_ms = ttl.as_millis() as u64;
+    let Ok(mut tags) = store.tags().list().await else {
+        return;
+    };
+    // Collect first, delete after — no mutation under the live list stream.
+    let mut expired = Vec::new();
+    while let Some(tag) = tags.next().await {
+        let Ok(tag) = tag else { continue };
+        let Some(pushed_ms) = push_tag_timestamp_ms(&tag.name.0) else {
+            continue; // not ours
+        };
+        if now_ms.saturating_sub(pushed_ms) >= ttl_ms {
+            expired.push(tag.name);
+        }
+    }
+    for name in expired {
+        let _ = store.tags().delete(&name.0).await;
+    }
 }
 
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::testutil::test_clock;
 
-    #[test]
-    fn protected__should_include_blobs_inside_the_ttl_window() {
-        // Given
-        let (_, clock) = test_clock();
-        let retention = BlobRetention::with_clock(Duration::from_secs(100), clock);
-        let hash = Hash::from_bytes([1; 32]);
-
-        // When
-        retention.record(hash);
-
-        // Then
-        assert!(retention.protected().contains(&hash));
+    fn hash(n: u8) -> Hash {
+        Hash::from_bytes([n; 32])
     }
 
     #[test]
-    fn protected__should_drop_blobs_past_the_ttl() {
+    fn push_tag__should_roundtrip_its_timestamp() {
         // Given
-        let (now, clock) = test_clock();
-        let retention = BlobRetention::with_clock(Duration::from_secs(100), clock);
-        let hash = Hash::from_bytes([1; 32]);
-        retention.record(hash);
+        let tag = push_tag(1_700_000_000_000, &hash(1));
 
-        // When
-        *now.lock().unwrap() += Duration::from_secs(101);
-
-        // Then
-        assert!(retention.protected().is_empty());
+        // When / Then
+        assert_eq!(
+            push_tag_timestamp_ms(tag.as_bytes()),
+            Some(1_700_000_000_000)
+        );
     }
 
     #[test]
-    fn record__should_restart_the_ttl_on_a_re_push() {
-        // Given: a blob pushed, then re-pushed 60s later (100s TTL)
-        let (now, clock) = test_clock();
-        let retention = BlobRetention::with_clock(Duration::from_secs(100), clock);
-        let hash = Hash::from_bytes([1; 32]);
-        retention.record(hash);
-        *now.lock().unwrap() += Duration::from_secs(60);
-        retention.record(hash);
+    fn push_tag_timestamp_ms__should_ignore_foreign_tags() {
+        for foreign in [
+            &b"some-other-tag"[..],
+            b"pushed-notanumber",
+            b"pushed-",
+            &[0xFF, 0xFE][..],
+        ] {
+            assert_eq!(push_tag_timestamp_ms(foreign), None);
+        }
+    }
 
-        // When: 60 more seconds — past the first push, not the second
-        *now.lock().unwrap() += Duration::from_secs(60);
+    #[tokio::test]
+    async fn prune_expired_tags__should_delete_only_tags_past_the_ttl() {
+        // Given: two pushed blobs, one old, one fresh
+        let store = MemStore::new();
+        let old = store.add_bytes(b"old".to_vec()).await.expect("add old");
+        let fresh = store.add_bytes(b"fresh".to_vec()).await.expect("add fresh");
+        let now_ms = 1_700_000_000_000u64;
+        store
+            .tags()
+            .set(push_tag(now_ms - 200_000, &old.hash), old.hash)
+            .await
+            .expect("tag old");
+        store
+            .tags()
+            .set(push_tag(now_ms - 50_000, &fresh.hash), fresh.hash)
+            .await
+            .expect("tag fresh");
 
-        // Then
-        assert!(retention.protected().contains(&hash));
+        // When: pruning with a 100s TTL
+        prune_expired_tags(&store, Duration::from_secs(100), now_ms).await;
+
+        // Then: of *our* push tags, only the fresh blob's remains
+        // (`add_bytes` creates its own auto-tags — not this scheme's).
+        let mut tags = store.tags().list().await.expect("list");
+        let mut remaining = Vec::new();
+        while let Some(tag) = tags.next().await {
+            let tag = tag.expect("tag");
+            if push_tag_timestamp_ms(&tag.name.0).is_some() {
+                remaining.push(tag);
+            }
+        }
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].hash, fresh.hash);
     }
 }

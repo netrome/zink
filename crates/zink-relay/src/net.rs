@@ -15,35 +15,42 @@ use zink_protocol::{
     MailboxResult, PublicKey,
 };
 
-use crate::blobs::BlobRetention;
-use crate::clock::Clock;
+use crate::blobs::push_tag;
+use crate::clock::WallClock;
 use crate::mailbox::MailboxService;
 use crate::store::MailboxStore;
 
 /// Spawn a router serving the mailbox protocol and the encrypted blob cache
 /// (iroh-blobs, SPEC §7) on `endpoint`. Pushes are allowed (uploaders
 /// deposit encrypted blobs so recipients can fetch after the sender goes
-/// offline) and feed `retention`, which bounds each blob's lifetime.
-pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, C: Clock>(
+/// offline); each push writes a timestamped retention tag that bounds the
+/// blob's lifetime (see `blobs`).
+pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, W: WallClock>(
     endpoint: Endpoint,
     service: MailboxService<S>,
     blob_store: &iroh_blobs::api::Store,
-    retention: Arc<BlobRetention<C>>,
+    wall_clock: W,
 ) -> Router {
     Router::builder(endpoint)
         .accept(MAILBOX_ALPN, MailboxHandler(Arc::new(service)))
         .accept(
             iroh_blobs::ALPN,
-            BlobsProtocol::new(blob_store, Some(blob_cache_events(retention))),
+            BlobsProtocol::new(
+                blob_store,
+                Some(blob_cache_events(blob_store.clone(), wall_clock)),
+            ),
         )
         .spawn()
 }
 
-/// Event config for the blob cache: push notifications feed the retention
-/// registry. iroh-blobs 0.103 gates *every* request type on `mask.get`
+/// Event config for the blob cache: each push notification writes the
+/// retention tag. iroh-blobs 0.103 gates *every* request type on `mask.get`
 /// (upstream quirk), so `get` carries the Notify mode that push needs;
 /// `push` is set to the same for when upstream fixes the dispatch.
-fn blob_cache_events<C: Clock>(retention: Arc<BlobRetention<C>>) -> EventSender {
+fn blob_cache_events<W: WallClock>(
+    blob_store: iroh_blobs::api::Store,
+    wall_clock: W,
+) -> EventSender {
     let mask = EventMask {
         get: RequestMode::Notify,
         push: RequestMode::Notify,
@@ -53,7 +60,9 @@ fn blob_cache_events<C: Clock>(retention: Arc<BlobRetention<C>>) -> EventSender 
     tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if let ProviderMessage::PushRequestReceivedNotify(msg) = message {
-                retention.record(msg.inner.request.hash);
+                let hash = msg.inner.request.hash;
+                let tag = push_tag(wall_clock.now_ms(), &hash);
+                let _ = blob_store.tags().set(tag, hash).await;
             }
         }
     });

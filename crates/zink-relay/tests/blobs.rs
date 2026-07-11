@@ -1,7 +1,6 @@
 //! B3: the relay blob cache over real iroh connections — push, fetch,
 //! and dedup by hash.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::endpoint::presets;
@@ -9,7 +8,8 @@ use iroh::{Endpoint, EndpointAddr};
 use iroh_blobs::protocol::{ChunkRanges, ChunkRangesSeq, ObserveRequest, PushRequest};
 use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
-use zink_relay::blobs::{BlobRetention, DEFAULT_BLOB_TTL, blob_cache};
+use zink_relay::blobs::{DEFAULT_BLOB_TTL, mem_blob_cache};
+use zink_relay::clock::SystemClock;
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
@@ -23,13 +23,12 @@ async fn spawn_relay_with(
         .await
         .expect("bind relay endpoint");
     let addr = endpoint.addr();
-    let retention = Arc::new(BlobRetention::new(ttl));
-    let blob_store = blob_cache(retention.clone(), gc_interval);
+    let blob_store = mem_blob_cache(ttl, gc_interval, SystemClock);
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
-        retention,
+        SystemClock,
     );
     (router, blob_store, addr)
 }
@@ -119,6 +118,56 @@ async fn blob_cache__should_serve_pushed_blobs_and_dedup_by_hash() {
         .expect("fetch blob");
     let fetched = store.blobs().get_bytes(hash).await.expect("read blob");
     assert_eq!(fetched.as_ref(), blob.as_slice());
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn fs_blob_cache__should_keep_blobs_and_their_retention_across_a_restart() {
+    // Given: an on-disk cache holding one tagged blob, then dropped
+    let root = std::env::temp_dir().join(format!("zink-blobcache-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    let hash = {
+        let store = zink_relay::blobs::fs_blob_cache(
+            &root,
+            DEFAULT_BLOB_TTL,
+            Duration::from_secs(3600),
+            SystemClock,
+        )
+        .await
+        .expect("open fs cache");
+        let tag = store
+            .add_bytes(b"persistent".to_vec())
+            .await
+            .expect("add blob");
+        // What the push event handler does on a real deposit:
+        store
+            .tags()
+            .set(
+                zink_relay::blobs::push_tag(1_700_000_000_000, &tag.hash),
+                tag.hash,
+            )
+            .await
+            .expect("tag blob");
+        store.shutdown().await.expect("shutdown");
+        tag.hash
+    };
+
+    // When: a fresh store opens the same directory
+    let store = zink_relay::blobs::fs_blob_cache(
+        &root,
+        DEFAULT_BLOB_TTL,
+        Duration::from_secs(3600),
+        SystemClock,
+    )
+    .await
+    .expect("reopen fs cache");
+
+    // Then: blob and retention tag both survived
+    let bytes = store.blobs().get_bytes(hash).await.expect("read blob");
+    assert_eq!(bytes.as_ref(), b"persistent");
+
+    store.shutdown().await.expect("shutdown");
+    std::fs::remove_dir_all(&root).expect("clean up temp dir");
 }
 
 #[tokio::test]

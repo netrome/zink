@@ -13,6 +13,8 @@
 //! once per distinct relay; recv drains every given relay and dedups by
 //! message id.
 
+mod state;
+
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -76,7 +78,9 @@ fn pubkey(args: &[String]) -> Result<(), String> {
 
 async fn send(args: &[String]) -> Result<(), String> {
     let (flags, positionals) = parse_flags(args)?;
-    let device = load_key(&single(&flags, "--key")?)?;
+    let key_path = single(&flags, "--key")?;
+    let device = load_key(&key_path)?;
+    let client_state = state::ClientState::open(&key_path);
     let contacts: Vec<Contact> = values(&flags, "--to")
         .iter()
         .map(|spec| parse_contact(spec))
@@ -89,21 +93,49 @@ async fn send(args: &[String]) -> Result<(), String> {
     };
     let blobs = blob_drafts(&flags)?;
 
-    // Until the DAG lands in the client (slice B5) every message is a
-    // standalone genesis.
-    let draft = MessageDraft {
-        conversation: None,
-        parents: vec![],
-        recipients: contacts.iter().map(|c| c.key).collect(),
-        seq: 0,
-        logical: 0,
-        timestamp_ms: now_ms(),
-        plaintext: text.clone().into_bytes(),
-        blobs,
+    // One conversation per participant set (client policy): thread into the
+    // stored DAG if we have one, else this message becomes the genesis.
+    let recipients: Vec<PublicKey> = contacts.iter().map(|c| c.key).collect();
+    let participants: BTreeSet<PublicKey> = recipients
+        .iter()
+        .copied()
+        .chain([device.public()])
+        .collect();
+    let existing = client_state.conversation_for(&participants);
+    let draft = match existing {
+        Some(conversation) => {
+            let dag = client_state.load_dag(conversation)?;
+            MessageDraft {
+                conversation: Some(conversation),
+                parents: dag.heads(),
+                recipients,
+                seq: dag.next_seq(&device.public()),
+                logical: dag.next_logical(),
+                timestamp_ms: now_ms(),
+                plaintext: text.clone().into_bytes(),
+                blobs,
+            }
+        }
+        None => MessageDraft {
+            conversation: None,
+            parents: vec![],
+            recipients,
+            seq: 0,
+            logical: 0,
+            timestamp_ms: now_ms(),
+            plaintext: text.clone().into_bytes(),
+            blobs,
+        },
     };
+    let seq = draft.seq;
     let sealed = MessageEnvelope::seal(draft, &device, &mut OsRng)
         .map_err(|e| format!("seal message: {e}"))?;
     let id = sealed.envelope.id();
+    let conversation = existing.unwrap_or(id);
+    client_state.store_envelope(conversation, &sealed.envelope)?;
+    if existing.is_none() {
+        client_state.record_conversation(&participants, conversation)?;
+    }
 
     // One envelope, one deposit per distinct relay across all recipients;
     // encrypted blobs go to each relay's blob cache the same way.
@@ -134,12 +166,28 @@ async fn send(args: &[String]) -> Result<(), String> {
         }
     }
     println!(
-        "deposited {} ({} blob(s)) to {} relay(s)",
+        "deposited {} (conv {}, seq {seq}) ({} blob(s)) to {} relay(s)",
         hex_encode(&id.0),
+        &hex_encode(&conversation.0)[..8],
         sealed.blobs.len(),
         relays.len()
     );
     Ok(())
+}
+
+/// Persist a verified envelope and its participant→conversation mapping,
+/// so a later `send` to the same people threads into this conversation.
+fn remember(client_state: &state::ClientState, envelope: &MessageEnvelope) -> Result<(), String> {
+    let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
+    client_state.store_envelope(conversation, envelope)?;
+    let participants: BTreeSet<PublicKey> = envelope
+        .core
+        .recipients
+        .iter()
+        .copied()
+        .chain([envelope.core.sender])
+        .collect();
+    client_state.record_conversation(&participants, conversation)
 }
 
 /// Deposit with a fresh connection per attempt. Deposits dedup by message
@@ -232,7 +280,9 @@ async fn recv(args: &[String]) -> Result<(), String> {
     if !positionals.is_empty() {
         return Err(USAGE.to_string());
     }
-    let device = load_key(&single(&flags, "--key")?)?;
+    let key_path = single(&flags, "--key")?;
+    let device = load_key(&key_path)?;
+    let client_state = state::ClientState::open(&key_path);
     let relays = values(&flags, "--relay");
     if relays.is_empty() {
         return Err(format!("at least one --relay required\n{USAGE}"));
@@ -258,11 +308,14 @@ async fn recv(args: &[String]) -> Result<(), String> {
             }
             printed_any = true;
             match item.envelope.open(&device) {
-                Ok(plaintext) => println!(
-                    "from {}: {}",
-                    &hex_encode(&item.envelope.core.sender.0)[..8],
-                    String::from_utf8_lossy(&plaintext)
-                ),
+                Ok(plaintext) => {
+                    println!(
+                        "from {}: {}",
+                        &hex_encode(&item.envelope.core.sender.0)[..8],
+                        String::from_utf8_lossy(&plaintext)
+                    );
+                    remember(&client_state, &item.envelope)?;
+                }
                 Err(e) => println!("undecryptable message ({e})"),
             }
             if !item.envelope.core.blob_refs.is_empty() {

@@ -17,15 +17,12 @@ async fn spawn_relay() -> (iroh::protocol::Router, EndpointAddr) {
         .await
         .expect("bind relay endpoint");
     let addr = endpoint.addr();
-    let retention = std::sync::Arc::new(zink_relay::blobs::BlobRetention::new(
-        zink_relay::blobs::DEFAULT_BLOB_TTL,
-    ));
     let blob_store = iroh_blobs::store::mem::MemStore::new();
     let router = spawn_relay_router(
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
-        retention,
+        zink_relay::clock::SystemClock,
     );
     (router, addr)
 }

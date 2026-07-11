@@ -6,6 +6,7 @@
 
 pub mod blobs;
 pub mod clock;
+pub mod fs;
 pub mod mailbox;
 pub mod net;
 pub mod store;

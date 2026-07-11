@@ -81,13 +81,18 @@ web/                   # (Stage C) PWA assets + service worker
   tests pass. *(Also the blob-cache TTL eviction deferred from B3: pushed blobs are
   tracked and protected for a TTL; iroh-blobs GC collects the rest. Defaults: 30-day
   mailbox retention and blob TTL, hourly GC.)*
-- [ ] **B5 · Persistence.** Relay mailbox + blob cache on-disk (behind a port); client
+- [x] **B5 · Persistence.** Relay mailbox + blob cache on-disk (behind a port); client
   DAG + keystore persisted. *Done when:* messages/keys survive a restart.
   *(Retention carry-over from B4: persisted timestamps must be wall-clock — `Instant`
   doesn't serialize. Blob retention should move off the in-memory push-time registry
   onto iroh-blobs' persisted **tags** (timestamped tag per push; evict = delete old
   tags, GC collects) — else a restart leaves persisted blobs unprotected and the first
   GC run wipes the cache.)*
+  ✅ *(FsMailboxStore + FsStore blob cache with tag-based retention, both under
+  `zink-relay [data-dir]`; the relay's own endpoint key persists too (`relay.key`) so
+  dial strings stay valid across restarts. Client: `<key-file>.state/` holds envelopes
+  per conversation + a participants→conversation index; `send` threads drafts from the
+  stored DAG — one conversation per participant set is CLI policy, not protocol.)*
 
 ## Stage C — PWA client (WASM)
 
