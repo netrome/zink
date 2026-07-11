@@ -7,8 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use iroh::Endpoint;
 use rand_core::OsRng;
 use zink_protocol::{
-    BlobDraft, BlobHash, DeviceKey, MailboxOp, MailboxResult, MessageDraft, MessageEnvelope,
-    MessageId, OpenError, PublicKey, distinct_relays,
+    Attestation, BlobDraft, BlobHash, Claim, ContactRecord, DeviceKey, FORMAT_VERSION, MailboxOp,
+    MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
+    SignedAttestation, distinct_relays,
 };
 
 use crate::state::ClientState;
@@ -56,7 +57,7 @@ impl Client {
         if contacts.is_empty() {
             return Err("at least one recipient required".into());
         }
-        let recipients: Vec<PublicKey> = contacts.iter().map(|c| c.key).collect();
+        let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
         let participants: BTreeSet<PublicKey> = recipients
             .iter()
             .copied()
@@ -170,6 +171,106 @@ impl Client {
         .await
     }
 
+    /// Set this device's display name and home relays — what `my_record`
+    /// publishes and what `recv` drains by default.
+    pub fn set_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("name must not be empty".into());
+        }
+        for relay in relays {
+            net::parse_relay(relay)?;
+        }
+        self.state.save_profile(name.trim(), relays)
+    }
+
+    pub fn profile_name(&self) -> Option<String> {
+        self.state.profile_name()
+    }
+
+    pub fn home_relays(&self) -> Vec<String> {
+        self.state.home_relays()
+    }
+
+    /// This device's ContactRecord: key, self-attested name, home relays.
+    /// The QR/paste payload is `record.to_qr_string()`.
+    pub fn my_record(&self) -> Result<ContactRecord, String> {
+        let name = self
+            .state
+            .profile_name()
+            .ok_or("set a profile name first")?;
+        let relays = self.state.home_relays();
+        if relays.is_empty() {
+            return Err("set a home relay first".into());
+        }
+        let me = self.device.public();
+        let attestation = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: me,
+                subject: me,
+                claim: Claim::Name(name),
+                revision: 0,
+            },
+            &self.device,
+        );
+        Ok(ContactRecord::new(vec![me], vec![attestation], relays))
+    }
+
+    /// Ensure a mailbox exists on every home relay. Called when publishing
+    /// a record: anyone who scans it must be able to deposit immediately —
+    /// a record that names a relay where you have no mailbox is a lie.
+    pub async fn register_at_home_relays(&self) -> Result<(), String> {
+        for relay in self.state.home_relays() {
+            let connection =
+                net::connect(&self.endpoint, &relay, zink_protocol::MAILBOX_ALPN).await?;
+            net::request(&connection, MailboxOp::Register).await?;
+        }
+        Ok(())
+    }
+
+    /// Store a scanned/pasted record. The petname defaults to the contact's
+    /// self-claimed name; the caller may override (petnames are ours, not
+    /// theirs). Returns the petname it was stored under.
+    pub fn add_contact(
+        &self,
+        record: &ContactRecord,
+        petname: Option<String>,
+    ) -> Result<String, String> {
+        if record.keys.is_empty() {
+            return Err("record has no keys".into());
+        }
+        if record.relays.is_empty() {
+            return Err("record has no relays — no way to reach them".into());
+        }
+        let petname = petname
+            .or_else(|| record.self_claimed_name().map(str::to_string))
+            .ok_or("record has no valid self-claimed name; provide a petname")?;
+        // A petname must resolve to one person: reject collisions with a
+        // *different* key; re-adding the same person updates their record.
+        for (existing_name, existing) in self.state.contacts()? {
+            if existing_name == petname && existing.keys.first() != record.keys.first() {
+                return Err(format!("a different contact is already named {petname:?}"));
+            }
+        }
+        self.state.save_contact(&petname, record)?;
+        Ok(petname)
+    }
+
+    /// All stored contacts as `(petname, record)`.
+    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, String> {
+        self.state.contacts()
+    }
+
+    /// Petname → the Contact to send to.
+    pub fn resolve_contact(&self, petname: &str) -> Result<Contact, String> {
+        self.state
+            .contacts()?
+            .into_iter()
+            .find(|(name, _)| name == petname)
+            .map(|(_, record)| Contact::from_record(&record))
+            .ok_or_else(|| format!("no contact named {petname:?}"))
+    }
+
     /// Persist a verified envelope and its participant→conversation mapping,
     /// so a later `send` to the same people threads into this conversation.
     fn remember(&self, envelope: &MessageEnvelope) -> Result<(), String> {
@@ -186,16 +287,17 @@ impl Client {
     }
 }
 
-/// A recipient and the relays hosting their mailbox — the stand-in for the
-/// ContactRecord until C2.
+/// A resolved recipient: the person's device keys and the relays hosting
+/// their mailboxes.
 pub struct Contact {
-    pub key: PublicKey,
+    pub keys: Vec<PublicKey>,
     pub relays: Vec<String>,
 }
 
 impl Contact {
     /// `<pubkey-hex>@<relay>[,<relay>…]` — hex contains no `@`, so the
-    /// first `@` splits key from relay list.
+    /// first `@` splits key from relay list. The raw escape hatch next to
+    /// named contacts.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let (key_hex, relay_list) = spec
             .split_once('@')
@@ -205,9 +307,16 @@ impl Contact {
             net::parse_relay(relay)?; // validate early, before any network work
         }
         Ok(Contact {
-            key: PublicKey(hex::parse32(key_hex)?),
+            keys: vec![PublicKey(hex::parse32(key_hex)?)],
             relays,
         })
+    }
+
+    fn from_record(record: &ContactRecord) -> Self {
+        Contact {
+            keys: record.keys.clone(),
+            relays: record.relays.clone(),
+        }
     }
 }
 

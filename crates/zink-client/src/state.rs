@@ -9,11 +9,15 @@
 //!   conversation id. "One conversation per participant set" is *client
 //!   policy* (SPEC tenet 4), not protocol: sender and recipients land in
 //!   the same conversation because both sides fingerprint the same set.
+//! - `profile.name` / `profile.relays` — this device's display name and
+//!   home relays (what goes into its ContactRecord).
+//! - `contacts/<key-hex>.record` (wire bytes) + `.name` (the local petname
+//!   — client policy, defaulting to the contact's self-claimed name).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use zink_protocol::{ConversationDag, MessageEnvelope, MessageId, PublicKey};
+use zink_protocol::{ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey};
 
 pub struct ClientState {
     root: PathBuf,
@@ -94,6 +98,75 @@ impl ClientState {
             }
         }
         Ok(dag)
+    }
+
+    pub fn save_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {
+        let name_path = self.root.join("profile.name");
+        create_parent(&name_path)?;
+        write_atomic(&name_path, name.as_bytes()).map_err(|e| format!("write profile: {e}"))?;
+        write_atomic(
+            &self.root.join("profile.relays"),
+            relays.join("\n").as_bytes(),
+        )
+        .map_err(|e| format!("write relays: {e}"))
+    }
+
+    pub fn profile_name(&self) -> Option<String> {
+        let name = std::fs::read_to_string(self.root.join("profile.name")).ok()?;
+        (!name.trim().is_empty()).then(|| name.trim().to_string())
+    }
+
+    pub fn home_relays(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.join("profile.relays"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string())
+            .collect()
+    }
+
+    /// Store a contact under a petname. The record is kept in wire form;
+    /// the petname is a sibling file (local convention, never protocol).
+    pub fn save_contact(&self, petname: &str, record: &ContactRecord) -> Result<(), String> {
+        let stem = self.contact_stem(record.keys.first().ok_or("record has no keys")?);
+        create_parent(&stem.with_extension("record"))?;
+        write_atomic(&stem.with_extension("record"), &record.to_bytes())
+            .map_err(|e| format!("write contact: {e}"))?;
+        write_atomic(&stem.with_extension("name"), petname.as_bytes())
+            .map_err(|e| format!("write petname: {e}"))
+    }
+
+    /// All stored contacts as `(petname, record)`, petname-sorted.
+    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, String> {
+        let dir = self.root.join("contacts");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(Vec::new());
+        };
+        let mut contacts = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "record") {
+                continue;
+            }
+            let record = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| ContactRecord::try_from_bytes(&bytes).map_err(|e| e.to_string()));
+            let petname = std::fs::read_to_string(path.with_extension("name"));
+            match (record, petname) {
+                (Ok(record), Ok(petname)) => contacts.push((petname.trim().to_string(), record)),
+                (record, petname) => eprintln!(
+                    "warning: skipping damaged contact {path:?}: {:?} {:?}",
+                    record.err(),
+                    petname.err()
+                ),
+            }
+        }
+        contacts.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(contacts)
+    }
+
+    fn contact_stem(&self, key: &PublicKey) -> PathBuf {
+        self.root.join("contacts").join(hex(&key.0))
     }
 
     fn conversation_dir(&self, conversation: MessageId) -> PathBuf {

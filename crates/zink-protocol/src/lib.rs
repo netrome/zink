@@ -5,6 +5,7 @@
 
 mod attestation;
 mod codec;
+mod contact_record;
 mod crypto;
 mod dag;
 mod fanout;
@@ -16,6 +17,7 @@ mod testutil;
 
 pub use attestation::{Attestation, AttestationId, Claim, SignedAttestation};
 pub use codec::DecodeError;
+pub use contact_record::ContactRecord;
 pub use crypto::{ContentKey, CryptoError};
 pub use dag::{ConversationDag, DagError, InsertOutcome};
 pub use fanout::distinct_relays;

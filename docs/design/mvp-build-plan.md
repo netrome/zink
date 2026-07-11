@@ -136,13 +136,21 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   *(Design: [client-core.md](./client-core.md). ✅ 2026-07-11: phone ↔ CLI chat worked
   live — two client implementations threading one conversation. No tokio in the lib;
   the A6 WASM spike moved to a wasm-gated module and still builds.)*
-- [ ] **C2 · Contacts & QR.** ContactRecord (SPEC §3.6): generate + display your QR
+- [x] **C2 · Contacts & QR.** ContactRecord (SPEC §3.6): generate + display your QR
   (keys, self-attestations, relays); scan a contact's (tauri barcode-scanner plugin);
   contact store; send-by-name. *Done when:* two phones exchange QRs and message each
   other by contact name.
+  ✅ *(2026-07-11: verified live — QR displayed on one device, camera-scanned by
+  another, plus paste fallback and rename. Record payload = `ZINK:<base32(borsh)>`
+  (QR alphanumeric mode); only verified *self-issued* name attestations are trusted;
+  petnames are client policy with collision rejection; publishing a record registers
+  its mailboxes (kills the register-before-first-deposit footgun); CLI renders
+  terminal QRs via `my-record --qr`. **C3 follow-up:** the scanner view has no
+  cancel/back affordance if no QR is in sight.)*
 - [ ] **C3 · Messaging UI (Leptos).** Conversation list; message view (linearized
-  DAG); send text; send image (client-side thumbnail + full-res). *Done when:* usable
-  text + image chat between two phones.
+  DAG); send text; send image (client-side thumbnail + full-res); scanner
+  cancel/back affordance (C2 footgun). *Done when:* usable text + image chat between
+  two phones.
 - [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
   connection (rendezvous doc §3 — specified, never implemented); the app holds a
   persistent connection via an Android foreground service; local notification on

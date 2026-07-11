@@ -15,7 +15,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 iroh = "1.0.2"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+serde = { version = "1.0.228", features = ["derive"] }
 tauri = { version = "2", features = [] }
+tauri-plugin-barcode-scanner = "2.4.5"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 zink-client = { version = "0.1.0", path = "../../crates/zink-client" }
 zink-protocol = { path = "../../crates/zink-protocol" }

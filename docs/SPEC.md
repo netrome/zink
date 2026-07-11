@@ -440,6 +440,7 @@ custom conversation views — is **client policy/UX**.
 | Relays | **Anyone can run one; interchangeable** | Minimal, replaceable infrastructure. |
 | Ordering | **Lamport (`logical`) + per-sender `seq` + DAG** | Partial-view ordering, gap detection, honest concurrency. |
 | Message integrity | **Commit the content-key in the core** (`key-commit`) | AEADs aren't key-committing; without it "same id ⇒ same content" breaks. |
+| ContactRecord wire form | **Relay endpoints as dial strings** (`id@ip:port`); QR payload = `ZINK:<base32(borsh)>` | Compact, human-inspectable, QR-alphanumeric-mode friendly; richer relay addressing (browser relay URLs) is a version bump. |
 | AEAD + commitment | **XChaCha20-Poly1305** (fresh random nonce, `nonce ‖ ct`); commitment = BLAKE3 `derive_key("zink v1 key-commit", content-key)` | Random-nonce-safe AEAD; domain-separated commitment, not a bare hash. |
 | Key sealing | **libsodium-style sealed box** (X25519 via the standard Ed25519 conversions) | Anonymous, per-recipient, vetted construction — nothing hand-rolled. |
 | `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |

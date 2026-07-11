@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+qrcode = { version = "0.14.1", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 zink-client = { path = "../zink-client" }
 zink-protocol = { path = "../zink-protocol" }

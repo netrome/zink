@@ -4,9 +4,12 @@
 //! ```text
 //! zink-cli keygen <key-file>                 # new key, prints public key
 //! zink-cli pubkey <key-file>                 # prints public key
-//! zink-cli send --key <file> --to <pubkey>@<relay>[,<relay>…] [--to …]
+//! zink-cli my-record --key <file> [--name <name>] [--relay <relay> …]
+//! zink-cli contact-add --key <file> [--name <petname>] <ZINK:…>
+//! zink-cli contacts --key <file>
+//! zink-cli send --key <file> --to <petname | pubkey@relay[,relay…]> [--to …]
 //!               [--image <file> [--thumb <file>]] <text>
-//! zink-cli recv --key <file> --relay <relay> [--relay …] [--blobs-dir <dir>]
+//! zink-cli recv --key <file> [--relay <relay> …] [--blobs-dir <dir>]
 //! ```
 //!
 //! `<relay>` is a dial string `<endpoint-id>@<ip:port>` as printed by
@@ -16,7 +19,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use zink_client::{Client, Contact, Received, hex, keystore};
-use zink_protocol::{BlobDraft, BlobKind};
+use zink_protocol::{BlobDraft, BlobKind, ContactRecord};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -24,6 +27,9 @@ async fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..]),
         Some("pubkey") => pubkey(&args[1..]),
+        Some("my-record") => my_record(&args[1..]).await,
+        Some("contact-add") => contact_add(&args[1..]).await,
+        Some("contacts") => contacts(&args[1..]).await,
         Some("send") => send(&args[1..]).await,
         Some("recv") => recv(&args[1..]).await,
         _ => Err(USAGE.to_string()),
@@ -40,10 +46,14 @@ async fn main() -> ExitCode {
 const USAGE: &str = "usage:
   zink-cli keygen <key-file>
   zink-cli pubkey <key-file>
-  zink-cli send --key <file> --to <pubkey>@<relay>[,<relay>...] [--to ...]
+  zink-cli my-record --key <file> [--name <name>] [--relay <relay> ...] [--qr]
+  zink-cli contact-add --key <file> [--name <petname>] <ZINK:...>
+  zink-cli contacts --key <file>
+  zink-cli send --key <file> --to <petname | pubkey@relay[,relay...]> [--to ...]
                 [--image <file> [--thumb <file>]] <text>
-  zink-cli recv --key <file> --relay <relay> [--relay ...] [--blobs-dir <dir>]
-(<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay)";
+  zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
+(<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay; recv defaults
+ to the home relays set via my-record)";
 
 fn keygen(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
@@ -58,11 +68,95 @@ fn pubkey(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Set (or reuse) the profile, print the shareable record payload.
+async fn my_record(args: &[String]) -> Result<(), String> {
+    // `--qr` is a boolean flag: give it a dummy value before pair-parsing.
+    let args: Vec<String> = args
+        .iter()
+        .flat_map(|arg| {
+            if arg == "--qr" {
+                vec![arg.clone(), "yes".to_string()]
+            } else {
+                vec![arg.clone()]
+            }
+        })
+        .collect();
+    let (flags, _) = parse_flags(&args)?;
+    let client = Client::open(&single(&flags, "--key")?).await?;
+    let name = optional(&flags, "--name")?.or_else(|| client.profile_name());
+    let relays = {
+        let given = values(&flags, "--relay");
+        if given.is_empty() {
+            client.home_relays()
+        } else {
+            given
+        }
+    };
+    let name = name.ok_or(format!("no profile name yet — pass --name\n{USAGE}"))?;
+    if relays.is_empty() {
+        return Err(format!("no home relay yet — pass --relay\n{USAGE}"));
+    }
+    client.set_profile(&name, &relays)?;
+    client.register_at_home_relays().await?;
+    let payload = client.my_record()?.to_qr_string();
+    println!("{payload}");
+    if flags.iter().any(|(flag, _)| flag == "--qr") {
+        let code = qrcode::QrCode::new(payload.as_bytes()).map_err(|e| format!("qr: {e}"))?;
+        println!(
+            "{}",
+            code.render::<qrcode::render::unicode::Dense1x2>().build()
+        );
+    }
+    Ok(())
+}
+
+async fn contact_add(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [payload] = positionals.as_slice() else {
+        return Err(format!("exactly one ZINK:... payload expected\n{USAGE}"));
+    };
+    let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
+    let client = Client::open(&single(&flags, "--key")?).await?;
+    let petname = client.add_contact(&record, optional(&flags, "--name")?)?;
+    println!("added contact {petname:?}");
+    Ok(())
+}
+
+async fn contacts(args: &[String]) -> Result<(), String> {
+    let (flags, _) = parse_flags(args)?;
+    let client = Client::open(&single(&flags, "--key")?).await?;
+    let contacts = client.contacts()?;
+    if contacts.is_empty() {
+        println!("no contacts");
+    }
+    for (petname, record) in contacts {
+        let keys: Vec<String> = record
+            .keys
+            .iter()
+            .map(|k| hex::encode(&k.0)[..8].to_string())
+            .collect();
+        println!(
+            "{petname}  ({}, {} relay(s))",
+            keys.join(","),
+            record.relays.len()
+        );
+    }
+    Ok(())
+}
+
 async fn send(args: &[String]) -> Result<(), String> {
     let (flags, positionals) = parse_flags(args)?;
+    let client = Client::open(&single(&flags, "--key")?).await?;
     let contacts: Vec<Contact> = values(&flags, "--to")
         .iter()
-        .map(|spec| Contact::parse(spec))
+        .map(|spec| {
+            // '@' means the raw pubkey@relay escape hatch; else a petname.
+            if spec.contains('@') {
+                Contact::parse(spec)
+            } else {
+                client.resolve_contact(spec)
+            }
+        })
         .collect::<Result<_, _>>()?;
     if contacts.is_empty() {
         return Err(format!("at least one --to required\n{USAGE}"));
@@ -72,7 +166,6 @@ async fn send(args: &[String]) -> Result<(), String> {
     };
     let blobs = blob_drafts(&flags)?;
 
-    let client = Client::open(&single(&flags, "--key")?).await?;
     let receipt = client
         .send(&contacts, text.clone().into_bytes(), blobs)
         .await?;
@@ -92,13 +185,22 @@ async fn recv(args: &[String]) -> Result<(), String> {
     if !positionals.is_empty() {
         return Err(USAGE.to_string());
     }
-    let relays = values(&flags, "--relay");
-    if relays.is_empty() {
-        return Err(format!("at least one --relay required\n{USAGE}"));
-    }
     let blobs_dir = optional(&flags, "--blobs-dir")?;
 
     let client = Client::open(&single(&flags, "--key")?).await?;
+    let relays = {
+        let given = values(&flags, "--relay");
+        if given.is_empty() {
+            client.home_relays()
+        } else {
+            given
+        }
+    };
+    if relays.is_empty() {
+        return Err(format!(
+            "no relays: pass --relay or set home relays via my-record\n{USAGE}"
+        ));
+    }
     let received = client.recv(&relays).await?;
     if received.is_empty() {
         println!("no new messages");
