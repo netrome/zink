@@ -15,10 +15,13 @@ use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, Pub
 /// The one `Client` for the app's lifetime, created on first use. A single
 /// instance means a single endpoint and no two commands racing first-run
 /// key creation or the state dir. `subscribed` tracks which home relays
-/// already have a live-delivery task, so re-checks are idempotent.
+/// already have a live-delivery task; `notified` dedups notifications by
+/// message id (with several home relays, more than one loop can deliver
+/// the same message).
 struct ManagedClient {
     client: tokio::sync::OnceCell<Arc<Client>>,
     subscribed: Mutex<HashSet<String>>,
+    notified: Arc<Mutex<HashSet<[u8; 32]>>>,
 }
 
 async fn client(
@@ -46,9 +49,10 @@ async fn client(
 
 /// One live-delivery task per home relay (C4b): the subscription loop
 /// drains on nudges and reconnects forever; each non-empty drain raises a
-/// `new-messages` event and the webview re-renders from the store. Called
-/// on every command — the `subscribed` set makes it spawn-once, and relays
-/// added later (set_profile) get picked up on the next call.
+/// `new-messages` event (webview re-renders from the store) and posts
+/// local notifications (C4c). Called on every command — the `subscribed`
+/// set makes it spawn-once, and relays added later (set_profile) get
+/// picked up on the next call.
 fn spawn_subscriptions(app: &AppHandle, managed: &State<'_, ManagedClient>, client: &Arc<Client>) {
     for relay in client.home_relays() {
         let mut subscribed = managed.subscribed.lock().expect("subscribed lock");
@@ -57,13 +61,62 @@ fn spawn_subscriptions(app: &AppHandle, managed: &State<'_, ManagedClient>, clie
         }
         drop(subscribed);
         let (app, client) = (app.clone(), client.clone());
+        let notified = managed.notified.clone();
         tauri::async_runtime::spawn(async move {
+            let on_new_client = client.clone();
             client
-                .subscribe(&relay, |messages| {
+                .subscribe(&relay, move |messages| {
                     let _ = app.emit("new-messages", messages.len());
+                    notify_arrivals(&app, &on_new_client, &notified, &messages);
                 })
                 .await;
         });
+    }
+}
+
+/// Petname + text-preview local notifications, posted after local decrypt
+/// (live-delivery.md §5 — resolved: the content never leaves the device;
+/// there is no third party anywhere in this path). Skipped while the
+/// window is focused (the live view is already updating); deduped by
+/// message id.
+fn notify_arrivals(
+    app: &AppHandle,
+    client: &Client,
+    notified: &Mutex<HashSet<[u8; 32]>>,
+    messages: &[zink_client::Received],
+) {
+    use tauri_plugin_notification::NotificationExt;
+    let focused = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false);
+    if focused {
+        return;
+    }
+    let contacts = client.contacts().unwrap_or_default();
+    for message in messages {
+        let Ok(body) = &message.body else {
+            continue; // nothing readable to preview
+        };
+        if !notified
+            .lock()
+            .expect("notified lock")
+            .insert(message.envelope.id().0)
+        {
+            continue;
+        }
+        let text = String::from_utf8_lossy(body);
+        let preview: String = if text.trim().is_empty() {
+            format!("📎 {} attachment(s)", message.envelope.core.blob_refs.len())
+        } else {
+            text.chars().take(120).collect()
+        };
+        let _ = app
+            .notification()
+            .builder()
+            .title(label(&contacts, &message.envelope.core.sender))
+            .body(preview)
+            .show();
     }
 }
 
@@ -311,10 +364,26 @@ fn qr_payload(record: &ContactRecord) -> Result<QrPayload, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().manage(ManagedClient {
-        client: tokio::sync::OnceCell::new(),
-        subscribed: Mutex::default(),
-    });
+    let builder = tauri::Builder::default()
+        .manage(ManagedClient {
+            client: tokio::sync::OnceCell::new(),
+            subscribed: Mutex::default(),
+            notified: Arc::default(),
+        })
+        .plugin(tauri_plugin_notification::init())
+        .setup(|_app| {
+            // Android 13+ gates notifications behind a runtime permission;
+            // ask once at startup, off the main thread (it shows a dialog).
+            #[cfg(mobile)]
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let handle = _app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = handle.notification().request_permission();
+                });
+            }
+            Ok(())
+        });
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder

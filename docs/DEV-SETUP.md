@@ -152,6 +152,13 @@ sideloadable; "install anyway"). Reinstalling a newer build over the same
 server when done** (`Ctrl-C`, or `pkill -f 'http.server 8080'`) rather than
 leaving a stray listener bound.
 
+First launch (C4c) asks for two things: **notification permission**
+(Android 13+) and the **battery-optimization exemption** — grant both, or
+background delivery will stall under Doze (live-delivery.md §5). The
+persistent "zink is connected" notification is the foreground service that
+keeps live delivery running; it's minimum-importance and collapses out of
+the way.
+
 ## 4. Optional
 
 - **Node.js ≥ 20** — only for the browser/service-worker unit tests

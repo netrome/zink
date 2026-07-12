@@ -145,7 +145,12 @@ connect → register → flush outbox → drain (fetch/ack) → loop {
 
 The reason C4 is flagged 🚩. Unknowns paper can't resolve:
 
-- **FGS mechanics.** Tauri v2 has no first-party foreground-service plugin; we
+- **FGS mechanics** *(shipped shape, C4c: even simpler than planned — the
+  service is started from `MainActivity.onCreate` (the app is foreground
+  there, so the FGS start is always allowed), which removed the need for
+  any Rust↔Kotlin plugin bridge at all; `gen/android` is committed, so the
+  two Kotlin files persist. Battery-exemption prompt also fires from
+  `onCreate`, once.)* Tauri v2 has no first-party foreground-service plugin; we
   write a minimal one. **The Kotlin is a shell, not a participant:** Android
   instantiates a `Service` class from the manifest via the JVM runtime — no
   Rust path to *being* that component — but the service's only job is to

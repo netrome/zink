@@ -263,6 +263,17 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   (tauri-plugin-notification). *Done when:* overnight on a real phone, screen
   off and unplugged, an incoming message notifies within minutes at
   single-digit battery drain — C4's overall criterion.
+  *(2026-07-12: code complete — `DeliveryService.kt` (~45 lines, pure
+  process-keeper, IMPORTANCE_MIN persistent notification) + manifest
+  (`specialUse` + subtype property + FGS/notification/battery permissions);
+  even simpler than designed: started from `MainActivity.onCreate`, so no
+  Rust↔Kotlin bridge exists at all. Battery-exemption prompt on first
+  launch; notification permission requested at startup (Android 13+).
+  Message notifications: petname + 120-char preview after local decrypt,
+  deduped by id, skipped while the window is focused; works on desktop too.
+  APK builds. **Awaiting the overnight measurement** — screen off,
+  unplugged, message at hour N notifies within minutes, single-digit drain;
+  that run ticks this box, C4, and the MVP milestone. 🎉)*
 
 **🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
 (+ Linux desktop), online and offline, with notifications.
