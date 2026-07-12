@@ -94,13 +94,17 @@ fn blob_cache_events<W: WallClock>(
 /// spawned so the depositor's request loop never waits on it either.
 const NUDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Live registered connections, newest `register` wins. Sessions are
-/// numbered so a stale connection's cleanup can never evict its
-/// replacement.
+/// Live registered connections. A key can hold **several at once** — a
+/// device's long-lived subscription *and* its short-lived poll connections
+/// coexist (both `Register`). Keeping only one (newest-wins) let a poll's
+/// throwaway connection evict the subscription from the nudge path when it
+/// closed, so nudges silently fell back to the poll. Nudge every live
+/// connection for a recipient; a closing connection removes only its own
+/// session. Sessions are numbered so cleanup never touches another's entry.
 #[derive(Debug, Default)]
 struct LiveConnections {
     next_session: u64,
-    by_key: HashMap<PublicKey, (u64, Connection)>,
+    by_key: HashMap<PublicKey, HashMap<u64, Connection>>,
 }
 
 #[derive(Debug)]
@@ -148,30 +152,41 @@ impl<S: MailboxStore + fmt::Debug> ProtocolHandler for MailboxHandler<S> {
                 // for it get a nudge instead of waiting for its next poll.
                 MailboxResult::Registered => {
                     let mut live = self.live.lock().expect("live map lock");
-                    live.next_session += 1;
-                    let this_session = live.next_session;
-                    session = Some(this_session);
+                    // One session per connection: assign on first register,
+                    // reuse if this connection registers again.
+                    let this_session = *session.get_or_insert_with(|| {
+                        live.next_session += 1;
+                        live.next_session
+                    });
                     live.by_key
-                        .insert(caller, (this_session, connection.clone()));
+                        .entry(caller)
+                        .or_default()
+                        .insert(this_session, connection.clone());
                 }
                 MailboxResult::Deposited { .. } => {
                     for recipient in &deposited_for {
-                        let target = {
+                        let targets: Vec<Connection> = {
                             let live = self.live.lock().expect("live map lock");
                             live.by_key
                                 .get(recipient)
-                                .map(|(_, connection)| connection.clone())
+                                .map(|conns| conns.values().cloned().collect())
+                                .unwrap_or_default()
                         };
                         let short = &hex_short(recipient);
-                        match target {
-                            Some(target) => {
-                                tracing::debug!(recipient = short, "nudging live recipient");
-                                nudge(target);
-                            }
-                            None => tracing::debug!(
+                        if targets.is_empty() {
+                            tracing::debug!(
                                 recipient = short,
                                 "deposit for a recipient with no live connection (will poll)"
-                            ),
+                            );
+                        } else {
+                            tracing::debug!(
+                                recipient = short,
+                                connections = targets.len(),
+                                "nudging live recipient"
+                            );
+                            for target in targets {
+                                nudge(target);
+                            }
                         }
                     }
                 }
@@ -182,16 +197,15 @@ impl<S: MailboxStore + fmt::Debug> ProtocolHandler for MailboxHandler<S> {
                 .map_err(AcceptError::from_err)?;
             send.finish().map_err(AcceptError::from_err)?;
         }
-        // Connection gone — drop its liveness, unless something newer for
-        // the same key already replaced it.
+        // Connection gone — drop only *this* connection's session; other
+        // live connections for the same key (e.g. its subscription) stay.
         if let Some(session) = session {
             let mut live = self.live.lock().expect("live map lock");
-            if live
-                .by_key
-                .get(&caller)
-                .is_some_and(|(live_session, _)| *live_session == session)
-            {
-                live.by_key.remove(&caller);
+            if let Some(conns) = live.by_key.get_mut(&caller) {
+                conns.remove(&session);
+                if conns.is_empty() {
+                    live.by_key.remove(&caller);
+                }
             }
         }
         Ok(())

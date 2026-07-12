@@ -121,12 +121,16 @@ bump: old clients never call `accept_uni`, and unread streams on a QUIC
 connection cost nothing. `Register` stays the subscription act — a connection
 that registered and stays open *is* "live" (no new subscribe op).
 
-**Relay side:** an in-memory map `mailbox key → live connection` maintained by
-the accept loop (insert on `register`, drop on connection close; a newer
-connection for the same key replaces the older). On `deposit`, nudge each
-hosted recipient's live connection, best-effort — a failed nudge is fine, the
-mailbox still holds the envelope and fetch-on-foreground remains the backstop.
-No persistence, no retry, no queue.
+**Relay side:** an in-memory map `mailbox key → {session → live connection}`
+maintained by the accept loop (insert on `register`, drop *that connection's*
+session on its close). A key holds **several connections at once** — a device's
+long-lived subscription and its short-lived poll connections both `Register`,
+and an early "newest-wins" single-slot map let a poll's throwaway connection
+evict the subscription from the nudge path when it closed (the real cause of
+the post-restart latency regression, 2026-07-12). On `deposit`, nudge *every*
+live connection for each hosted recipient, best-effort — a failed nudge is
+fine, the mailbox still holds the envelope and fetch-on-foreground remains the
+backstop. No persistence, no retry, no queue.
 
 ---
 

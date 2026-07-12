@@ -217,6 +217,43 @@ async fn nudge__should_go_to_the_newest_connection_when_a_device_reconnects() {
 
 #[tokio::test]
 #[allow(non_snake_case)]
+async fn nudge__should_survive_a_second_connection_registering_and_closing() {
+    // Given: B's subscription connection (held open = live), plus a second
+    // connection from the *same* endpoint acting like a poll: it registers,
+    // then closes. This is the real app shape (one endpoint, a long-lived
+    // subscription + throwaway poll connections). The poll's close must not
+    // evict the subscription from the nudge path.
+    let (_router, relay_addr) = spawn_relay().await;
+    let (b_endpoint, b_sub) = client(2, &relay_addr).await;
+    request(&b_sub, MailboxOp::Register).await;
+    let b_poll = b_endpoint
+        .connect(relay_addr.clone(), MAILBOX_ALPN)
+        .await
+        .expect("second connection");
+    request(&b_poll, MailboxOp::Register).await;
+    b_poll.close(0u32.into(), b"poll done");
+    drop(b_poll);
+
+    // When: A deposits for B after the poll connection is gone
+    let (_a_endpoint, a) = client(1, &relay_addr).await;
+    request(
+        &a,
+        MailboxOp::Deposit {
+            envelope: Box::new(envelope_from_1_to_2()),
+        },
+    )
+    .await;
+
+    // Then: the still-open subscription connection is nudged (before the
+    // fix, the poll's register+close evicted B's liveness and this hung)
+    tokio::time::timeout(std::time::Duration::from_secs(5), b_sub.accept_uni())
+        .await
+        .expect("subscription nudged despite the poll connection closing")
+        .expect("uni stream accepted");
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
 async fn mailbox__should_return_an_error_response_for_garbage_requests() {
     // Given
     let (_router, relay_addr) = spawn_relay().await;
