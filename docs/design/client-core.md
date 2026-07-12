@@ -58,6 +58,12 @@ client.send_in(conversation, &[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt
                                               // thread into a *given* conversation
                                               // (send-by-contacts uses the participant
                                               // index; this bypasses it)
+// outbox (C4a, live-delivery.md §2): sends ledger per (message, relay) before
+// any network work; one relay failing never aborts the others
+// (SendReceipt.pending_relays; error only if NO relay took it — "queued");
+client.flush_outbox() -> FlushReport          // idempotent re-deposit + re-push;
+                                              // runs before sends and after recv;
+                                              // HistoryMessage.pending flags the rest
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened

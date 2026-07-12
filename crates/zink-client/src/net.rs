@@ -30,14 +30,18 @@ pub(crate) fn parse_relay(spec: &str) -> Result<EndpointAddr, String> {
     Ok(EndpointAddr::new(id).with_ip_addr(sock))
 }
 
+/// Bounded connect: an unreachable relay must fail a send in seconds, not
+/// hang it — graceful failure is what the outbox turns into delivery later.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub(crate) async fn connect(
     endpoint: &Endpoint,
     relay: &str,
     alpn: &[u8],
 ) -> Result<Connection, String> {
-    endpoint
-        .connect(parse_relay(relay)?, alpn)
+    n0_future::time::timeout(CONNECT_TIMEOUT, endpoint.connect(parse_relay(relay)?, alpn))
         .await
+        .map_err(|_| format!("connect to relay {relay}: timed out"))?
         .map_err(|e| format!("connect to relay {relay}: {e}"))
 }
 
@@ -64,6 +68,9 @@ pub(crate) async fn request(
 
 /// Deposit with a fresh connection per attempt. Deposits dedup by message
 /// id on the relay, so retrying after a transport error is always safe.
+/// An *unreachable* relay is not retried here at all — that won't heal in
+/// seconds, and healing over time is the outbox's job (live-delivery.md §2);
+/// in-attempt retries are for transient post-connect stream errors only.
 pub(crate) async fn deposit_with_retry(
     endpoint: &Endpoint,
     relay: &str,
@@ -74,18 +81,14 @@ pub(crate) async fn deposit_with_retry(
         if attempt > 0 {
             eprintln!("deposit to {relay} failed ({last_error}); retrying");
         }
-        let attempt_result = async {
-            let connection = connect(endpoint, relay, MAILBOX_ALPN).await?;
-            request(
-                &connection,
-                MailboxOp::Deposit {
-                    envelope: Box::new(envelope.clone()),
-                },
-            )
-            .await
-        }
-        .await;
-        match attempt_result {
+        let connection = match connect(endpoint, relay, MAILBOX_ALPN).await {
+            Ok(connection) => connection,
+            Err(error) => return Err(error),
+        };
+        let deposit = MailboxOp::Deposit {
+            envelope: Box::new(envelope.clone()),
+        };
+        match request(&connection, deposit).await {
             Ok(MailboxResult::Deposited { .. }) => return Ok(()),
             Ok(other) => return Err(format!("unexpected response from {relay}: {other:?}")),
             Err(error) => last_error = error,

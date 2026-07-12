@@ -16,6 +16,11 @@
 //! - `blobs/<hash-hex>` — cached *encrypted* blobs (ciphertext at rest, like
 //!   the envelopes), so images outlive the relay cache's TTL and the
 //!   sender's own images need no relay at all (C3a).
+//! - `outbox/<message-hex>.<relay-fp>` — the delivery ledger (C4a,
+//!   live-delivery.md §2): one entry per (message, relay) still owed a
+//!   deposit (and its blob pushes). Written before any network work,
+//!   removed on per-relay success; three text lines (relay dial string,
+//!   conversation hex, created-ms).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -169,6 +174,72 @@ impl ClientState {
         self.root.join("blobs").join(hex(&hash.0))
     }
 
+    /// Record that `message` still owes `relay` a deposit (and blob pushes).
+    /// Written *before* any network work, so a crash mid-send leaves the
+    /// ledger honest. Idempotent (same name, same content).
+    pub fn add_outbox(
+        &self,
+        message: MessageId,
+        relay: &str,
+        conversation: MessageId,
+        created_ms: u64,
+    ) -> Result<(), String> {
+        let path = self.outbox_path(message, relay);
+        create_parent(&path)?;
+        let content = format!("{relay}\n{}\n{created_ms}\n", hex(&conversation.0));
+        write_atomic(&path, content.as_bytes()).map_err(|e| format!("write {path:?}: {e}"))
+    }
+
+    /// Delivery to `relay` succeeded — drop the entry. Missing is fine
+    /// (already cleared).
+    pub fn clear_outbox(&self, message: MessageId, relay: &str) {
+        let _ = std::fs::remove_file(self.outbox_path(message, relay));
+    }
+
+    /// Every outstanding delivery, oldest first. Damaged entries are
+    /// removed with a warning — an unparseable ledger line can't be
+    /// retried anyway.
+    pub fn outbox(&self) -> Vec<OutboxEntry> {
+        let dir = self.root.join("outbox");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut outbox = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match parse_outbox_entry(&path) {
+                Some(entry) => outbox.push(entry),
+                None => {
+                    eprintln!("warning: dropping damaged outbox entry {path:?}");
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        outbox.sort_by_key(|entry| entry.created_ms);
+        outbox
+    }
+
+    /// Message ids with at least one outstanding delivery — the `pending`
+    /// flag of history.
+    pub fn pending_messages(&self) -> BTreeSet<MessageId> {
+        self.outbox()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect()
+    }
+
+    /// One entry per (message, relay): the relay part of the name is a
+    /// fingerprint (dial strings hold `@`/`:`), the full string lives in
+    /// the file.
+    fn outbox_path(&self, message: MessageId, relay: &str) -> PathBuf {
+        let fingerprint = blake3::hash(relay.as_bytes()).to_hex();
+        self.root.join("outbox").join(format!(
+            "{}.{}",
+            hex(&message.0),
+            &fingerprint.as_str()[..16]
+        ))
+    }
+
     pub fn save_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {
         let name_path = self.root.join("profile.name");
         create_parent(&name_path)?;
@@ -253,6 +324,34 @@ impl ClientState {
             .join("participants")
             .join(hasher.finalize().to_hex().as_str())
     }
+}
+
+/// One outstanding delivery: `message` (of `conversation`) still owes
+/// `relay` a deposit and any blob pushes.
+#[derive(Debug, Clone)]
+pub struct OutboxEntry {
+    pub message: MessageId,
+    pub relay: String,
+    pub conversation: MessageId,
+    pub created_ms: u64,
+}
+
+/// Filename carries the message id; the file body is three lines:
+/// relay dial string, conversation hex, created-ms.
+fn parse_outbox_entry(path: &std::path::Path) -> Option<OutboxEntry> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let message = MessageId(crate::hex::parse32(name.split('.').next()?).ok()?);
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut lines = content.lines();
+    let relay = lines.next()?.to_string();
+    let conversation = MessageId(crate::hex::parse32(lines.next()?).ok()?);
+    let created_ms = lines.next()?.parse().ok()?;
+    Some(OutboxEntry {
+        message,
+        relay,
+        conversation,
+        created_ms,
+    })
 }
 
 fn create_parent(path: &std::path::Path) -> Result<(), String> {

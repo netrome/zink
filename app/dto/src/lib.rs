@@ -51,6 +51,9 @@ pub struct Message {
     /// Referenced blobs, in envelope order (thumbnails first by our send
     /// convention, but don't rely on it — filter by `kind`).
     pub blobs: Vec<BlobInfo>,
+    /// True while ≥1 relay is still owed this message (outbox, C4a) —
+    /// delivery will be retried; render a "not yet delivered" cue.
+    pub pending: bool,
 }
 
 /// One blob reference of a message.

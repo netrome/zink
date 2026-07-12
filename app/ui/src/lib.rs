@@ -418,9 +418,15 @@ fn ChatView(
                                     }
                                 })
                                 .collect::<Vec<_>>();
+                            let delivery = message
+                                .pending
+                                .then_some(" · ⏳ not delivered yet")
+                                .unwrap_or_default();
                             view! {
                                 <div class=class>
-                                    <span class="dim">{message.sender} " · " {time_of(message.timestamp_ms)}</span>
+                                    <span class="dim">
+                                        {message.sender} " · " {time_of(message.timestamp_ms)} {delivery}
+                                    </span>
                                     {images}
                                     {body.map(|text| view! { <div>{text}</div> })}
                                     {unopenable.then(|| view! { <div class="dim">"<unopenable>"</div> })}

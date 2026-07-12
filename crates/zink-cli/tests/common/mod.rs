@@ -1,4 +1,8 @@
 //! Shared helpers for zink-cli end-to-end tests.
+//!
+//! Each test binary compiles this module independently and uses a subset,
+//! so per-binary dead-code warnings are expected noise.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -40,7 +44,24 @@ pub fn key_path(dir: &Path, name: &str) -> String {
 /// relay) and its dial string. Default bind, not loopback: iroh only dials
 /// loopback from loopback-bound endpoints, and the CLI binds default.
 pub async fn spawn_relay() -> (iroh::protocol::Router, String) {
+    spawn_relay_at(iroh::SecretKey::generate(), 0).await
+}
+
+/// A relay with a caller-controlled identity and port — restartable at the
+/// *same dial string* (drop the router, spawn again with the same key and
+/// port), the way the deployed relay's persisted `relay.key` + stable port
+/// behave across restarts. `port` 0 = pick one.
+pub async fn spawn_relay_at(
+    secret: iroh::SecretKey,
+    port: u16,
+) -> (iroh::protocol::Router, String) {
     let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(secret)
+        .bind_addr(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::UNSPECIFIED,
+            port,
+        )))
+        .expect("valid bind addr")
         .bind()
         .await
         .expect("bind relay endpoint");

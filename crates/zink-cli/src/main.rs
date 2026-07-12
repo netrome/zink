@@ -179,14 +179,24 @@ async fn send(args: &[String]) -> Result<(), String> {
         .send(&contacts, text.clone().into_bytes(), blobs)
         .await?;
     println!(
-        "deposited {} (conv {}, seq {}) ({} blob(s)) to {} relay(s)",
+        "deposited {} (conv {}, seq {}) ({} blob(s)) to {} relay(s){}",
         hex::encode(&receipt.id.0),
         &hex::encode(&receipt.conversation.0)[..8],
         receipt.seq,
         receipt.blob_count,
-        receipt.relay_count
+        receipt.relay_count,
+        pending_note(receipt.pending_relays)
     );
     Ok(())
+}
+
+/// Suffix for a partially-delivered send (the outbox will retry).
+fn pending_note(pending_relays: usize) -> String {
+    if pending_relays == 0 {
+        String::new()
+    } else {
+        format!(" — {pending_relays} queued for retry")
+    }
 }
 
 async fn recv(args: &[String]) -> Result<(), String> {
@@ -296,9 +306,10 @@ async fn history(args: &[String]) -> Result<(), String> {
         } else {
             label(&contacts, &message.sender)
         };
+        let pending = if message.pending { " [pending]" } else { "" };
         match &message.body {
-            Ok(plaintext) => println!("{from}: {}", String::from_utf8_lossy(plaintext)),
-            Err(e) => println!("{from}: <unopenable: {e}>"),
+            Ok(plaintext) => println!("{from}: {}{pending}", String::from_utf8_lossy(plaintext)),
+            Err(e) => println!("{from}: <unopenable: {e}>{pending}"),
         }
         match &blobs_dir {
             Some(dir) => {
@@ -349,10 +360,11 @@ async fn reply(args: &[String]) -> Result<(), String> {
         )
         .await?;
     println!(
-        "replied in {} (seq {}) to {} relay(s)",
+        "replied in {} (seq {}) to {} relay(s){}",
         &hex::encode(&receipt.conversation.0)[..8],
         receipt.seq,
-        receipt.relay_count
+        receipt.relay_count,
+        pending_note(receipt.pending_relays)
     );
     Ok(())
 }

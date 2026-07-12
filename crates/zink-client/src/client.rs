@@ -15,6 +15,11 @@ use zink_protocol::{
 use crate::state::ClientState;
 use crate::{blobs, hex, keystore, net};
 
+/// Outbox entries older than this stop being retried (but stay surfaced):
+/// mirrors the relay's default mailbox retention — past it, recipients'
+/// cursors have moved on and the message is socially dead.
+const OUTBOX_GIVE_UP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
 pub struct Client {
     device: DeviceKey,
     endpoint: Endpoint,
@@ -160,9 +165,12 @@ impl Client {
         })
     }
 
-    /// The shared send tail: seal, persist (envelope + own-blob cache +
-    /// optionally the participant mapping), deposit once per distinct
-    /// relay, push blobs.
+    /// The shared send tail: flush older queued deliveries, seal, persist
+    /// (envelope + own-blob cache + outbox ledger + optionally the
+    /// participant mapping), then deliver per distinct relay. One relay
+    /// failing never aborts the others; what failed stays in the outbox.
+    /// Errors only when *no* relay took the deposit — the message is still
+    /// stored and queued, so the error means "queued", not "lost".
     async fn finish_send(
         &self,
         mut draft: MessageDraft,
@@ -171,6 +179,10 @@ impl Client {
         contacts: &[Contact],
         record_mapping: Option<&BTreeSet<PublicKey>>,
     ) -> Result<SendReceipt, String> {
+        // Older queued messages first — not for correctness (the DAG
+        // orders), just so delivery order tends to match send order.
+        let _ = self.flush_outbox().await;
+
         draft.plaintext = plaintext;
         draft.blobs = blob_drafts;
         let seq = draft.seq;
@@ -190,13 +202,34 @@ impl Client {
             self.state.save_blob(&blob.hash, &blob.bytes)?;
         }
 
+        // Ledger before network (live-delivery.md §2): a crash or failure
+        // from here on leaves entries a later flush retries idempotently.
         let relays = distinct_relays(contacts.iter().map(|c| c.relays.clone()));
-        let staging = blobs::stage(&sealed.blobs).await?;
+        let now = now_ms();
         for relay in &relays {
-            net::deposit_with_retry(&self.endpoint, relay, &sealed.envelope).await?;
-            if !sealed.blobs.is_empty() {
-                blobs::push_blobs(&self.endpoint, relay, &staging, &sealed.blobs).await?;
+            self.state.add_outbox(id, relay, conversation, now)?;
+        }
+
+        let staging = blobs::stage(&sealed.blobs).await?;
+        let mut pending_relays = 0;
+        let mut last_error = String::new();
+        for relay in &relays {
+            match self
+                .deliver_to_relay(relay, &sealed.envelope, &sealed.blobs, &staging)
+                .await
+            {
+                Ok(()) => self.state.clear_outbox(id, relay),
+                Err(error) => {
+                    eprintln!("delivery to {relay} failed ({error}); queued for retry");
+                    pending_relays += 1;
+                    last_error = error;
+                }
             }
+        }
+        if pending_relays == relays.len() && !relays.is_empty() {
+            return Err(format!(
+                "no relay took the deposit — message queued for retry ({last_error})"
+            ));
         }
         Ok(SendReceipt {
             id,
@@ -204,7 +237,82 @@ impl Client {
             seq,
             blob_count: sealed.blobs.len(),
             relay_count: relays.len(),
+            pending_relays,
         })
+    }
+
+    /// One relay's full delivery: deposit (idempotent retry inside), then
+    /// every blob push. Only a fully-served relay counts as delivered.
+    async fn deliver_to_relay(
+        &self,
+        relay: &str,
+        envelope: &MessageEnvelope,
+        encrypted_blobs: &[zink_protocol::EncryptedBlob],
+        staging: &iroh_blobs::store::mem::MemStore,
+    ) -> Result<(), String> {
+        net::deposit_with_retry(&self.endpoint, relay, envelope).await?;
+        if !encrypted_blobs.is_empty() {
+            blobs::push_blobs(&self.endpoint, relay, staging, encrypted_blobs).await?;
+        }
+        Ok(())
+    }
+
+    /// Retry every outstanding delivery (idempotent: deposits dedup by id,
+    /// blob pushes by hash). Entries older than the give-up window are left
+    /// in place unretried — the relay's retention has expired, the message
+    /// stays surfaced as pending/undelivered (deleting it is not our call).
+    pub async fn flush_outbox(&self) -> Result<FlushReport, String> {
+        let mut report = FlushReport::default();
+        let now = now_ms();
+        for entry in self.state.outbox() {
+            if now.saturating_sub(entry.created_ms) > OUTBOX_GIVE_UP_MS {
+                report.expired += 1;
+                continue;
+            }
+            let envelope = match self.state.load_envelope(entry.conversation, entry.message) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    // No stored envelope — nothing a retry could ever send.
+                    eprintln!("warning: dropping unfulfillable outbox entry: {error}");
+                    self.state.clear_outbox(entry.message, &entry.relay);
+                    continue;
+                }
+            };
+            // Re-stage owed blobs from the local cache (put there at send).
+            let encrypted: Vec<zink_protocol::EncryptedBlob> = envelope
+                .core
+                .blob_refs
+                .iter()
+                .filter_map(|blob_ref| {
+                    let bytes = self.state.load_blob(&blob_ref.hash);
+                    if bytes.is_none() {
+                        eprintln!(
+                            "warning: blob {} missing from cache; delivering without it",
+                            hex::encode(&blob_ref.hash.0)
+                        );
+                    }
+                    Some(zink_protocol::EncryptedBlob {
+                        hash: blob_ref.hash,
+                        bytes: bytes?,
+                    })
+                })
+                .collect();
+            let staging = blobs::stage(&encrypted).await?;
+            match self
+                .deliver_to_relay(&entry.relay, &envelope, &encrypted, &staging)
+                .await
+            {
+                Ok(()) => {
+                    self.state.clear_outbox(entry.message, &entry.relay);
+                    report.delivered += 1;
+                }
+                Err(error) => {
+                    eprintln!("outbox retry to {} failed: {error}", entry.relay);
+                    report.pending += 1;
+                }
+            }
+        }
+        Ok(report)
     }
 
     /// Drain every relay: register, then fetch page-by-page (the relay caps
@@ -269,6 +377,10 @@ impl Client {
                 after = page_cursor;
             }
         }
+        // Post-drain flush (live-delivery.md §2): we're evidently online,
+        // so retry anything still owed. Best-effort — a recv must not fail
+        // because a *different* relay is down.
+        let _ = self.flush_outbox().await;
         Ok(received)
     }
 
@@ -380,16 +492,21 @@ impl Client {
             .map(|envelope| (envelope.id(), envelope))
             .collect();
         let dag = self.state.load_dag(conversation)?;
+        let pending = self.state.pending_messages();
         Ok(dag
             .linearize()
             .iter()
             .filter_map(|id| by_id.get(id))
-            .map(|envelope| HistoryMessage {
-                id: envelope.id(),
-                sender: envelope.core.sender,
-                timestamp_ms: envelope.core.timestamp_ms,
-                body: envelope.open(&self.device),
-                blob_refs: envelope.core.blob_refs.clone(),
+            .map(|envelope| {
+                let id = envelope.id();
+                HistoryMessage {
+                    id,
+                    sender: envelope.core.sender,
+                    timestamp_ms: envelope.core.timestamp_ms,
+                    body: envelope.open(&self.device),
+                    blob_refs: envelope.core.blob_refs.clone(),
+                    pending: pending.contains(&id),
+                }
             })
             .collect())
     }
@@ -549,6 +666,18 @@ pub struct SendReceipt {
     pub seq: u64,
     pub blob_count: usize,
     pub relay_count: usize,
+    /// Relays that did not take the delivery — queued in the outbox for a
+    /// later flush. `0` = fully delivered.
+    pub pending_relays: usize,
+}
+
+/// What one outbox flush accomplished.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FlushReport {
+    pub delivered: usize,
+    pub pending: usize,
+    /// Entries past the give-up window: left in place, no longer retried.
+    pub expired: usize,
 }
 
 /// One fetched envelope: opened if this device could decrypt it. The edge
@@ -587,6 +716,9 @@ pub struct HistoryMessage {
     pub timestamp_ms: u64,
     pub body: Result<Vec<u8>, OpenError>,
     pub blob_refs: Vec<BlobRef>,
+    /// True while ≥1 relay is still owed this message (outbox entry
+    /// present) — including entries past the give-up window (undelivered).
+    pub pending: bool,
 }
 
 fn now_ms() -> u64 {

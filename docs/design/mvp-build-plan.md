@@ -215,16 +215,26 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   service; decisions resolved 2026-07-12. Risk spike: background delivery vs
   Android Doze/battery optimization — the successor to the retired Web Push
   spike, isolated in C4c.)*
-- [ ] **C4a · Outbox.** The per-relay delivery ledger fixing the store-first
+- [x] **C4a · Outbox.** The per-relay delivery ledger fixing the store-first
   send hole from the A1–C2 review (a failed deposit left a phantom message in
   the local DAG and a permanent seq gap for recipients): entry per
   (message, relay) persisted before any network work, cleared per relay on
   success (blob pushes owed tracked too); flush pass (idempotent re-deposit +
-  re-push) on client open / before send / after recv / on reconnect; entries
-  past the retention window stop retrying but stay surfaced as undelivered;
-  `pending` flag on history messages, rendered in the UI. *Done when:* e2e —
-  send with the relay down shows pending, relay back up + any flush trigger
-  delivers, recipient gets it, pending clears.
+  re-push) before send / after recv / on reconnect (C4b); entries past the
+  retention window stop retrying but stay surfaced as undelivered; `pending`
+  flag on history messages, rendered in the UI. *Done when:* e2e — send with
+  the relay down shows pending, relay back up + any flush trigger delivers,
+  recipient gets it, pending clears.
+  ✅ *(2026-07-12: `outbox/` ledger in the client state dir; one relay
+  failing no longer aborts the rest of the fan-out
+  (`SendReceipt.pending_relays`; send errors only when *zero* relays took
+  it — "queued", not "lost"); blob re-push re-stages from the C3a cache.
+  Flush-on-open dropped (network before first render) — recv-on-open covers
+  it. Also: client `connect` now has a 10 s timeout, and an unreachable
+  relay is no longer retried in-send at all (that's the outbox's job) — a
+  down relay costs a send seconds, not minutes. e2e: queue→flush→deliver
+  with blobs across a relay restart at the same dial string, plus the
+  give-up window (aged entries skip retry, stay `[pending]`).)*
 - [ ] **C4b · Nudge + subscription loop.** Relay keeps a live-connection map
   per registered mailbox and, on deposit, opens a zero-length uni stream to
   each hosted recipient's connection (the nudge — additive to

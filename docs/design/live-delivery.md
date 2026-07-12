@@ -47,9 +47,12 @@ mailbox exists because that can't be assumed).
   relay's entry. A send that fully succeeds touches the outbox only twice
   (create, delete) — the common case stays cheap.
 - **Flush pass** (idempotent — deposits dedup by id, blob pushes by hash):
-  walk the outbox, retry each entry. Triggered on: client open, before every
-  send, after every `recv`, and on every reconnect of the live connection
-  (§4). No timer of its own — those hooks fire often enough at MVP scale.
+  walk the outbox, retry each entry. Triggered on: before every send, after
+  every `recv`, and on every reconnect of the live connection (§4). *(C4a
+  note: flush-on-client-open was dropped — it would put network timeouts in
+  front of the first UI render; the app's refresh-on-open recv covers it,
+  and C4b's subscription loop flushes on every (re)connect anyway.)* No
+  timer of its own — those hooks fire often enough at MVP scale.
 - **Surfacing:** `history()`/`Message` gain a `pending` flag (outbox entry
   exists for the message on ≥1 relay). The UI renders it (clock/`…` cue) —
   client policy. `send` still returns an error when *zero* relays took the

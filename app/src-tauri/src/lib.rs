@@ -140,6 +140,7 @@ async fn messages(
                 .ok()
                 .map(|body| String::from_utf8_lossy(&body).into_owned()),
             timestamp_ms: message.timestamp_ms,
+            pending: message.pending,
             blobs: message
                 .blob_refs
                 .iter()
