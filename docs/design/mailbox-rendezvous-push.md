@@ -67,6 +67,12 @@ Sender (Bob)                 Alice's relay R              Alice's device A (clos
 "Online" = a live connection draining the mailbox in real time. "Offline" = woken by
 push, then drains. Same path; the only difference is forward-now vs. push-then-fetch.
 
+*(Shipped shape, C4b: "forward now" is implemented as **nudge-and-fetch** — the relay
+signals the live connection with a zero-length uni stream and the client runs its
+normal fetch/ack drain, rather than the envelope being pushed down the live
+connection. Same user-visible result, no second delivery path. See
+[live-delivery.md](./live-delivery.md) §3 and the wire doc.)*
+
 ---
 
 ## 4. Rendezvous — finding where to deliver

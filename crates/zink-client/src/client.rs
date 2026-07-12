@@ -2,10 +2,10 @@
 //! send/recv flows over them. Edges (CLI, app) stay presentation-only.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iroh::Endpoint;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, FORMAT_VERSION,
     MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
@@ -315,10 +315,9 @@ impl Client {
         Ok(report)
     }
 
-    /// Drain every relay: register, then fetch page-by-page (the relay caps
-    /// each response, so a large mailbox needs several rounds), dedup by
+    /// Drain every relay: register, then fetch page-by-page, dedup by
     /// message id, open, and remember what verified; ack each page at its
-    /// own cursor so storage is released as we go.
+    /// own cursor.
     pub async fn recv(&self, relays: &[String]) -> Result<Vec<Received>, String> {
         let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
         let mut received = Vec::new();
@@ -326,61 +325,134 @@ impl Client {
             let connection =
                 net::connect(&self.endpoint, relay, zink_protocol::MAILBOX_ALPN).await?;
             net::request(&connection, MailboxOp::Register).await?;
-            // Cursors are relay-local: page through this relay, acking each
-            // page's high-water mark, until a page comes back empty.
-            let mut after = 0u64;
-            loop {
-                let items = match net::request(&connection, MailboxOp::Fetch { after }).await? {
-                    MailboxResult::Envelopes { items } => items,
-                    other => return Err(format!("unexpected response from {relay}: {other:?}")),
-                };
-                if items.is_empty() {
-                    break;
-                }
-                let page_cursor = items
-                    .iter()
-                    .map(|item| item.cursor)
-                    .max()
-                    .expect("non-empty");
-                // Relays are untrusted (tenet 5). An honest page always
-                // advances (the store yields only `cursor > after`); a
-                // non-advancing page is a hostile/buggy relay trying to spin
-                // this drain forever. Abandon it — don't loop on its input.
-                if page_cursor <= after {
-                    eprintln!("relay {relay} returned a non-advancing fetch page; abandoning it");
-                    break;
-                }
-                for item in items {
-                    if item.envelope.version != zink_protocol::FORMAT_VERSION
-                        || item.envelope.core.version != zink_protocol::FORMAT_VERSION
-                    {
-                        // A future protocol version this client can't parse
-                        // (SPEC §10: surfaced, never misparsed). Skipped, and
-                        // acked with the page so it doesn't wedge the drain.
-                        eprintln!("skipping message with unsupported version");
-                        continue;
-                    }
-                    if !seen.insert(item.envelope.id().0) {
-                        continue; // already drained via another relay
-                    }
-                    let body = item.envelope.open(&self.device);
-                    if body.is_ok() {
-                        self.remember(&item.envelope)?;
-                    }
-                    received.push(Received {
-                        envelope: item.envelope,
-                        relay: relay.clone(),
-                        body,
-                    });
-                }
-                net::request(&connection, MailboxOp::Ack { up_to: page_cursor }).await?;
-                after = page_cursor;
-            }
+            received.extend(self.drain_connection(relay, &connection, &mut seen).await?);
         }
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
         let _ = self.flush_outbox().await;
+        Ok(received)
+    }
+
+    /// Live delivery (live-delivery.md §4): one relay's subscription loop —
+    /// connect, register (a registered live connection is what the relay
+    /// nudges), flush the outbox, drain, then drain again on every nudge.
+    /// Reconnects forever with jittered exponential backoff; ends only when
+    /// the edge drops the future. `on_new` fires per non-empty drain.
+    ///
+    /// One loop per relay: with several home relays, a message may arrive
+    /// through more than one, so `on_new` can repeat a message another
+    /// loop already delivered — storage dedups by id; edges that alert
+    /// should dedup by `envelope.id()`.
+    pub async fn subscribe(&self, relay: &str, mut on_new: impl FnMut(Vec<Received>)) {
+        let initial = Duration::from_secs(1);
+        let mut backoff = initial;
+        loop {
+            match self.subscribe_once(relay, &mut on_new, &mut backoff).await {
+                Ok(()) => {}
+                Err(error) => eprintln!("subscription to {relay} dropped: {error}"),
+            }
+            // ±50% jitter so a relay restart doesn't get a thundering herd.
+            let jitter = 0.5 + f64::from(OsRng.next_u32()) / f64::from(u32::MAX);
+            n0_future::time::sleep(backoff.mul_f64(jitter)).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+        }
+    }
+
+    /// One subscription session: lives until the connection dies. Resets
+    /// `backoff` once registered (the relay is demonstrably healthy).
+    async fn subscribe_once(
+        &self,
+        relay: &str,
+        on_new: &mut impl FnMut(Vec<Received>),
+        backoff: &mut Duration,
+    ) -> Result<(), String> {
+        let connection = net::connect(&self.endpoint, relay, zink_protocol::MAILBOX_ALPN).await?;
+        net::request(&connection, MailboxOp::Register).await?;
+        *backoff = Duration::from_secs(1);
+        // Reconnect = the network is back: flush queued sends (§2), then
+        // catch up on whatever arrived while we were away.
+        let _ = self.flush_outbox().await;
+        let received = self
+            .drain_connection(relay, &connection, &mut BTreeSet::new())
+            .await?;
+        if !received.is_empty() {
+            on_new(received);
+        }
+        loop {
+            // A nudge is a zero-length uni stream — accepting it IS the
+            // signal; a failed accept means the connection is gone.
+            connection
+                .accept_uni()
+                .await
+                .map_err(|e| format!("connection lost: {e}"))?;
+            let received = self
+                .drain_connection(relay, &connection, &mut BTreeSet::new())
+                .await?;
+            if !received.is_empty() {
+                on_new(received);
+            }
+        }
+    }
+
+    /// Page through one registered connection's mailbox (the relay caps
+    /// each response, so a large mailbox needs several rounds), acking each
+    /// page's high-water mark, until a page comes back empty.
+    async fn drain_connection(
+        &self,
+        relay: &str,
+        connection: &iroh::endpoint::Connection,
+        seen: &mut BTreeSet<[u8; 32]>,
+    ) -> Result<Vec<Received>, String> {
+        let mut received = Vec::new();
+        let mut after = 0u64;
+        loop {
+            let items = match net::request(connection, MailboxOp::Fetch { after }).await? {
+                MailboxResult::Envelopes { items } => items,
+                other => return Err(format!("unexpected response from {relay}: {other:?}")),
+            };
+            if items.is_empty() {
+                break;
+            }
+            let page_cursor = items
+                .iter()
+                .map(|item| item.cursor)
+                .max()
+                .expect("non-empty");
+            // Relays are untrusted (tenet 5). An honest page always
+            // advances (the store yields only `cursor > after`); a
+            // non-advancing page is a hostile/buggy relay trying to spin
+            // this drain forever. Abandon it — don't loop on its input.
+            if page_cursor <= after {
+                eprintln!("relay {relay} returned a non-advancing fetch page; abandoning it");
+                break;
+            }
+            for item in items {
+                if item.envelope.version != zink_protocol::FORMAT_VERSION
+                    || item.envelope.core.version != zink_protocol::FORMAT_VERSION
+                {
+                    // A future protocol version this client can't parse
+                    // (SPEC §10: surfaced, never misparsed). Skipped, and
+                    // acked with the page so it doesn't wedge the drain.
+                    eprintln!("skipping message with unsupported version");
+                    continue;
+                }
+                if !seen.insert(item.envelope.id().0) {
+                    continue; // already drained via another relay
+                }
+                let body = item.envelope.open(&self.device);
+                if body.is_ok() {
+                    self.remember(&item.envelope)?;
+                }
+                received.push(Received {
+                    envelope: item.envelope,
+                    relay: relay.to_string(),
+                    body,
+                });
+            }
+            net::request(connection, MailboxOp::Ack { up_to: page_cursor }).await?;
+            after = page_cursor;
+        }
         Ok(received)
     }
 

@@ -64,6 +64,10 @@ client.send_in(conversation, &[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt
 client.flush_outbox() -> FlushReport          // idempotent re-deposit + re-push;
                                               // runs before sends and after recv;
                                               // HistoryMessage.pending flags the rest
+// live delivery (C4b): one loop per relay, spawned by the edge (no runtime
+// in the lib); connect → register → flush → drain → drain-per-nudge,
+// reconnecting forever with jittered backoff; `on_new` per non-empty drain
+client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened

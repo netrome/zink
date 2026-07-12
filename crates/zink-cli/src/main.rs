@@ -13,6 +13,7 @@
 //! zink-cli conversations --key <file>
 //! zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
 //! zink-cli reply --key <file> <conversation-id | prefix> <text>
+//! zink-cli listen --key <file> [--relay <relay> …]
 //! ```
 //!
 //! `<relay>` is a dial string `<endpoint-id>@<ip:port>` as printed by
@@ -38,6 +39,7 @@ async fn main() -> ExitCode {
         Some("conversations") => conversations(&args[1..]).await,
         Some("history") => history(&args[1..]).await,
         Some("reply") => reply(&args[1..]).await,
+        Some("listen") => listen(&args[1..]).await,
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -61,8 +63,9 @@ const USAGE: &str = "usage:
   zink-cli conversations --key <file>
   zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
   zink-cli reply --key <file> <conversation-id | prefix> <text>
-(<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay; recv defaults
- to the home relays set via my-record)";
+  zink-cli listen --key <file> [--relay <relay> ...]
+(<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay; recv and listen
+ default to the home relays set via my-record)";
 
 fn keygen(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
@@ -366,6 +369,63 @@ async fn reply(args: &[String]) -> Result<(), String> {
         receipt.relay_count,
         pending_note(receipt.pending_relays)
     );
+    Ok(())
+}
+
+/// Live delivery: subscribe to every relay and print messages as they are
+/// nudged in. Runs until killed — the dev-tool sibling of the app's
+/// subscription tasks.
+async fn listen(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    if !positionals.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let client = std::sync::Arc::new(Client::open(&single(&flags, "--key")?).await?);
+    let relays = {
+        let given = values(&flags, "--relay");
+        if given.is_empty() {
+            client.home_relays()
+        } else {
+            given
+        }
+    };
+    if relays.is_empty() {
+        return Err(format!(
+            "no relays: pass --relay or set home relays via my-record\n{USAGE}"
+        ));
+    }
+    let contacts = std::sync::Arc::new(client.contacts()?);
+    println!("listening on {} relay(s)…", relays.len());
+    let mut loops = Vec::new();
+    for relay in relays {
+        let (client, contacts) = (client.clone(), contacts.clone());
+        loops.push(tokio::spawn(async move {
+            client
+                .subscribe(&relay, |messages| {
+                    for message in &messages {
+                        let from = label(&contacts, &message.envelope.core.sender);
+                        match &message.body {
+                            Ok(plaintext) => {
+                                println!("{from}: {}", String::from_utf8_lossy(plaintext))
+                            }
+                            Err(e) => println!("{from}: <unopenable: {e}>"),
+                        }
+                        if !message.envelope.core.blob_refs.is_empty() {
+                            println!(
+                                "  ({} blob(s) attached; fetch via history --blobs-dir)",
+                                message.envelope.core.blob_refs.len()
+                            );
+                        }
+                    }
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush(); // piped stdout buffers
+                })
+                .await;
+        }));
+    }
+    for task in loops {
+        let _ = task.await;
+    }
     Ok(())
 }
 

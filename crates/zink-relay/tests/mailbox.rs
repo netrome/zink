@@ -153,6 +153,70 @@ async fn mailbox__should_dedup_a_retried_deposit_over_the_wire() {
 
 #[tokio::test]
 #[allow(non_snake_case)]
+async fn nudge__should_reach_a_live_registered_recipient_on_deposit() {
+    // Given: B registered and holding its connection open (= live)
+    let (_router, relay_addr) = spawn_relay().await;
+    let (_b_endpoint, b) = client(2, &relay_addr).await;
+    request(&b, MailboxOp::Register).await;
+
+    // When: A deposits an envelope addressed to B
+    let (_a_endpoint, a) = client(1, &relay_addr).await;
+    let envelope = envelope_from_1_to_2();
+    request(
+        &a,
+        MailboxOp::Deposit {
+            envelope: Box::new(envelope.clone()),
+        },
+    )
+    .await;
+
+    // Then: the relay nudges B — a zero-length uni stream on B's own
+    // connection — and the nudged fetch finds the envelope
+    tokio::time::timeout(std::time::Duration::from_secs(5), b.accept_uni())
+        .await
+        .expect("nudged within the timeout")
+        .expect("uni stream accepted");
+    let MailboxResult::Envelopes { items } = request(&b, MailboxOp::Fetch { after: 0 }).await
+    else {
+        panic!("expected Envelopes");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].envelope, envelope);
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn nudge__should_go_to_the_newest_connection_when_a_device_reconnects() {
+    // Given: B registers, drops that connection, and registers anew
+    let (_router, relay_addr) = spawn_relay().await;
+    let (b_endpoint, b_old) = client(2, &relay_addr).await;
+    request(&b_old, MailboxOp::Register).await;
+    b_old.close(0u32.into(), b"reconnect");
+    drop(b_old);
+    drop(b_endpoint);
+    let (_b_endpoint, b) = client(2, &relay_addr).await;
+    request(&b, MailboxOp::Register).await;
+
+    // When: A deposits for B
+    let (_a_endpoint, a) = client(1, &relay_addr).await;
+    request(
+        &a,
+        MailboxOp::Deposit {
+            envelope: Box::new(envelope_from_1_to_2()),
+        },
+    )
+    .await;
+
+    // Then: the live (newest) connection is the one nudged — the stale
+    // connection's cleanup must not have evicted it
+    tokio::time::timeout(std::time::Duration::from_secs(5), b.accept_uni())
+        .await
+        .expect("nudged within the timeout")
+        .expect("uni stream accepted");
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
 async fn mailbox__should_return_an_error_response_for_garbage_requests() {
     // Given
     let (_router, relay_addr) = spawn_relay().await;

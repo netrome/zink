@@ -29,6 +29,15 @@ Status: **resolved for MVP.**
   iroh connection. `register` / `fetch` / `ack` operate on *the caller's own* mailbox —
   there is no way to name another key's mailbox. `deposit` is open to any connected
   peer (gating deferred; rendezvous doc §5).
+- **The nudge (live delivery, C4b).** The relay MAY open **zero-length uni streams**
+  on a connection whose peer holds a registered mailbox — one per deposit addressed
+  to it. The stream itself is the signal (no payload, no framing); clients SHOULD
+  treat one as a fetch hint and run their normal `fetch`/`ack` drain. Additive:
+  clients that never `accept_uni` are unaffected. Best-effort: a lost nudge costs
+  nothing — the mailbox holds the envelope and fetch-on-foreground remains the
+  backstop. A malicious relay can at worst nudge spuriously (= a fetch that finds
+  nothing). Rationale and the rejected envelope-push alternative:
+  live-delivery.md §3.
 - **Untrusted relay, bounded client.** The client drives the drain loop, so it must
   assume a hostile relay: it abandons a relay that returns a non-advancing `fetch`
   page (cursor ≤ the one requested), rather than looping on its input forever. (A

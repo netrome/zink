@@ -3,23 +3,30 @@
 //! (`zink-app-dto`) rendered from the *stored DAG*; the webview owns only
 //! presentation. Images render in C3c; live delivery is C4.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use data_encoding::BASE64;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{AppState, BlobInfo, Conversation, Message, OutgoingImage, QrPayload};
 use zink_client::{Client, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
 
 /// The one `Client` for the app's lifetime, created on first use. A single
 /// instance means a single endpoint and no two commands racing first-run
-/// key creation or the state dir.
-struct ManagedClient(tokio::sync::OnceCell<Client>);
+/// key creation or the state dir. `subscribed` tracks which home relays
+/// already have a live-delivery task, so re-checks are idempotent.
+struct ManagedClient {
+    client: tokio::sync::OnceCell<Arc<Client>>,
+    subscribed: Mutex<HashSet<String>>,
+}
 
-async fn client<'a>(
+async fn client(
     app: &AppHandle,
-    managed: &'a State<'_, ManagedClient>,
-) -> Result<&'a Client, String> {
-    managed
-        .0
+    managed: &State<'_, ManagedClient>,
+) -> Result<Arc<Client>, String> {
+    let client = managed
+        .client
         .get_or_try_init(|| async {
             let data_dir = app
                 .path()
@@ -27,9 +34,37 @@ async fn client<'a>(
                 .map_err(|e| format!("app data dir: {e}"))?;
             std::fs::create_dir_all(&data_dir).map_err(|e| format!("create data dir: {e}"))?;
             let key_path = data_dir.join("device.key");
-            Client::open_or_create(&key_path.to_string_lossy()).await
+            Client::open_or_create(&key_path.to_string_lossy())
+                .await
+                .map(Arc::new)
         })
-        .await
+        .await?
+        .clone();
+    spawn_subscriptions(app, managed, &client);
+    Ok(client)
+}
+
+/// One live-delivery task per home relay (C4b): the subscription loop
+/// drains on nudges and reconnects forever; each non-empty drain raises a
+/// `new-messages` event and the webview re-renders from the store. Called
+/// on every command — the `subscribed` set makes it spawn-once, and relays
+/// added later (set_profile) get picked up on the next call.
+fn spawn_subscriptions(app: &AppHandle, managed: &State<'_, ManagedClient>, client: &Arc<Client>) {
+    for relay in client.home_relays() {
+        let mut subscribed = managed.subscribed.lock().expect("subscribed lock");
+        if !subscribed.insert(relay.clone()) {
+            continue;
+        }
+        drop(subscribed);
+        let (app, client) = (app.clone(), client.clone());
+        tauri::async_runtime::spawn(async move {
+            client
+                .subscribe(&relay, |messages| {
+                    let _ = app.emit("new-messages", messages.len());
+                })
+                .await;
+        });
+    }
 }
 
 #[tauri::command]
@@ -63,6 +98,8 @@ async fn set_profile(
     let client = client(&app, &managed).await?;
     client.set_profile(&name, &[relay])?;
     client.register_at_home_relays().await?;
+    // The relay may be new — give it its live-delivery task right away.
+    spawn_subscriptions(&app, &managed, &client);
     qr_payload(&client.my_record()?)
 }
 
@@ -274,7 +311,10 @@ fn qr_payload(record: &ContactRecord) -> Result<QrPayload, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().manage(ManagedClient(tokio::sync::OnceCell::new()));
+    let builder = tauri::Builder::default().manage(ManagedClient {
+        client: tokio::sync::OnceCell::new(),
+        subscribed: Mutex::default(),
+    });
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder

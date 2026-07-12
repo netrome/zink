@@ -28,6 +28,7 @@ web-sys = { version = "0.3", features = [
     "HtmlInputElement",
     "ImageBitmap",
     "Window",
+    "console",
 ] }
 zink-app-dto = { path = "../dto" }
 

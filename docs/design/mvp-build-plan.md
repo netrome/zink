@@ -235,7 +235,7 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   down relay costs a send seconds, not minutes. e2e: queue→flush→deliver
   with blobs across a relay restart at the same dial string, plus the
   give-up window (aged entries skip retry, stay `[pending]`).)*
-- [ ] **C4b · Nudge + subscription loop.** Relay keeps a live-connection map
+- [x] **C4b · Nudge + subscription loop.** Relay keeps a live-connection map
   per registered mailbox and, on deposit, opens a zero-length uni stream to
   each hosted recipient's connection (the nudge — additive to
   `zink-mailbox/1`, old clients unaffected); client subscription loop in
@@ -243,6 +243,18 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   jittered-backoff reconnect), spawned by the edges; the desktop app delivers
   live, and the foreground poll stretches to a backstop. *Done when:* e2e —
   a deposit from A drains at B's subscription without B polling.
+  ✅ *(2026-07-12: live map is session-numbered so a stale connection's
+  cleanup never evicts its replacement (tested); nudges are spawned +
+  timeout-bounded so a peer that never accepts uni streams can't park the
+  depositor's loop on exhausted stream credit. `Client::subscribe` per relay,
+  spawned by the edge; CLI grew `listen` (the dev-tool sibling of the app's
+  subscription tasks). App: `new-messages` Tauri event → webview re-renders
+  from the store; poll stretched 7 s → 60 s backstop. e2e: a listener
+  receives a pre-existing message via the catch-up drain, then a second
+  message with *zero* client-side action — deposit → nudge → drain. Wire doc
+  + rendezvous doc + client-core.md updated. Note: with multiple home
+  relays, `on_new` can repeat a message another loop already delivered —
+  storage dedups; C4c's notification path dedups by id.)*
 - [ ] **C4c · 🚩 Foreground service + notifications.** The Doze risk spike,
   then the plumbing: minimal Kotlin FGS shell (`specialUse` type +
   battery-optimization exemption) whose only job is keeping the process — and

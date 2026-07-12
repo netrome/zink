@@ -1,9 +1,16 @@
 //! iroh edge: serves the mailbox ALPN. Thin — extract bytes, call the
 //! domain, write the response. Auth is the connection: the caller's key is
 //! the connection's verified remote id.
+//!
+//! Also owns the **nudge** (live-delivery.md §3): a map of live registered
+//! connections, and a zero-length uni stream to each hosted recipient on
+//! deposit. Transport-level by nature, so it lives here and never enters
+//! `MailboxService`.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
@@ -11,7 +18,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh_blobs::BlobsProtocol;
 use iroh_blobs::provider::events::{EventMask, EventSender, ProviderMessage, RequestMode};
 use zink_protocol::{
-    MAILBOX_ALPN, MAX_REQUEST_BYTES, MailboxErrorCode, MailboxRequest, MailboxResponse,
+    MAILBOX_ALPN, MAX_REQUEST_BYTES, MailboxErrorCode, MailboxOp, MailboxRequest, MailboxResponse,
     MailboxResult, PublicKey,
 };
 
@@ -32,7 +39,13 @@ pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, W: WallClock>(
     wall_clock: W,
 ) -> Router {
     Router::builder(endpoint)
-        .accept(MAILBOX_ALPN, MailboxHandler(Arc::new(service)))
+        .accept(
+            MAILBOX_ALPN,
+            MailboxHandler {
+                service: Arc::new(service),
+                live: Arc::default(),
+            },
+        )
         .accept(
             iroh_blobs::ALPN,
             BlobsProtocol::new(
@@ -76,36 +89,120 @@ fn blob_cache_events<W: WallClock>(
     EventSender::new(tx, mask)
 }
 
+/// The nudge must not wedge on a peer that never accepts uni streams (a
+/// pre-nudge client eventually exhausts its stream credit): bounded, and
+/// spawned so the depositor's request loop never waits on it either.
+const NUDGE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Live registered connections, newest `register` wins. Sessions are
+/// numbered so a stale connection's cleanup can never evict its
+/// replacement.
+#[derive(Debug, Default)]
+struct LiveConnections {
+    next_session: u64,
+    by_key: HashMap<PublicKey, (u64, Connection)>,
+}
+
 #[derive(Debug)]
-struct MailboxHandler<S>(Arc<MailboxService<S>>);
+struct MailboxHandler<S> {
+    service: Arc<MailboxService<S>>,
+    live: Arc<Mutex<LiveConnections>>,
+}
 
 impl<S> Clone for MailboxHandler<S> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            service: self.service.clone(),
+            live: self.live.clone(),
+        }
     }
 }
 
 impl<S: MailboxStore + fmt::Debug> ProtocolHandler for MailboxHandler<S> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let caller = PublicKey(*connection.remote_id().as_bytes());
+        let mut session = None;
         // One request per bi-stream; serve until the peer closes.
         loop {
             let Ok((mut send, mut recv)) = connection.accept_bi().await else {
-                return Ok(());
+                break;
             };
-            let response = match recv.read_to_end(MAX_REQUEST_BYTES).await {
-                Ok(bytes) => match MailboxRequest::try_from_bytes(&bytes) {
-                    Ok(request) => self.0.handle(caller, request).await,
-                    Err(_) => malformed(),
-                },
-                Err(_) => malformed(),
+            let request = match recv.read_to_end(MAX_REQUEST_BYTES).await {
+                Ok(bytes) => MailboxRequest::try_from_bytes(&bytes).ok(),
+                Err(_) => None,
             };
+            // Recipients to nudge, noted before the request moves on.
+            let deposited_for: BTreeSet<PublicKey> = match &request {
+                Some(MailboxRequest {
+                    op: MailboxOp::Deposit { envelope },
+                    ..
+                }) => envelope.core.recipients.iter().copied().collect(),
+                _ => BTreeSet::new(),
+            };
+            let response = match request {
+                Some(request) => self.service.handle(caller, request).await,
+                None => malformed(),
+            };
+            match response.result {
+                // A registered, still-connected peer is "live": deliveries
+                // for it get a nudge instead of waiting for its next poll.
+                MailboxResult::Registered => {
+                    let mut live = self.live.lock().expect("live map lock");
+                    live.next_session += 1;
+                    let this_session = live.next_session;
+                    session = Some(this_session);
+                    live.by_key
+                        .insert(caller, (this_session, connection.clone()));
+                }
+                MailboxResult::Deposited { .. } => {
+                    for recipient in &deposited_for {
+                        let target = {
+                            let live = self.live.lock().expect("live map lock");
+                            live.by_key
+                                .get(recipient)
+                                .map(|(_, connection)| connection.clone())
+                        };
+                        if let Some(target) = target {
+                            nudge(target);
+                        }
+                    }
+                }
+                _ => {}
+            }
             send.write_all(&response.to_bytes())
                 .await
                 .map_err(AcceptError::from_err)?;
             send.finish().map_err(AcceptError::from_err)?;
         }
+        // Connection gone — drop its liveness, unless something newer for
+        // the same key already replaced it.
+        if let Some(session) = session {
+            let mut live = self.live.lock().expect("live map lock");
+            if live
+                .by_key
+                .get(&caller)
+                .is_some_and(|(live_session, _)| *live_session == session)
+            {
+                live.by_key.remove(&caller);
+            }
+        }
+        Ok(())
     }
+}
+
+/// Fire one nudge: a zero-length uni stream — the stream itself is the
+/// signal (live-delivery.md §3). Best-effort by design: the mailbox holds
+/// the envelope and fetch-on-foreground remains the backstop, so failures
+/// are ignored.
+fn nudge(connection: Connection) {
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(NUDGE_TIMEOUT, async {
+            if let Ok(mut stream) = connection.open_uni().await {
+                let _ = stream.finish();
+            }
+        })
+        .await;
+    });
 }
 
 fn malformed() -> MailboxResponse {

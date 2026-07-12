@@ -83,17 +83,24 @@ fn App() -> impl IntoView {
     load_state();
     load_conversations();
 
-    // The C3b delivery loop: coarse foreground poll → recv into the store →
-    // re-render from the store. C4 replaces the poll with forward-now.
-    invoke::every(7_000, move || {
+    // Live delivery (C4b): the Rust side's subscription loops emit
+    // `new-messages` per nudged drain; re-render from the store.
+    let on_arrival = move || {
+        load_conversations();
+        if let View::Chat { id, .. } = view.get_untracked() {
+            load_messages(id);
+        }
+    };
+    invoke::on_event("new-messages", move |_| on_arrival());
+
+    // …and the old poll stays as a coarse backstop (rendezvous doc §8:
+    // belt & suspenders — covers a wedged subscription).
+    invoke::every(60_000, move || {
         spawn_local(async move {
             if let Ok(new_count) = invoke::invoke::<usize>("refresh", &NoArgs {}).await
                 && new_count > 0
             {
-                load_conversations();
-                if let View::Chat { id, .. } = view.get_untracked() {
-                    load_messages(id);
-                }
+                on_arrival();
             }
         });
     });
