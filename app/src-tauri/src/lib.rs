@@ -305,6 +305,15 @@ async fn send_message(
         }
         (None, None) => return Err("no conversation or contact given".into()),
     };
+    // A successful send proves the network is up: retry any backlog now, but
+    // off the command's path so this send's latency doesn't wait on it.
+    // (`zink-client` stays runtime-free; the edge owns the spawn.)
+    if receipt.pending_relays == 0 {
+        let client = client.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = client.flush_outbox().await;
+        });
+    }
     Ok(hex::encode(&receipt.conversation.0))
 }
 

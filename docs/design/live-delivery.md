@@ -39,20 +39,24 @@ mailbox exists because that can't be assumed).
 
 - On send, *before* any network work, persist an outbox entry per distinct
   relay: `outbox/<relay-fingerprint>/<msg-id>` under the client state dir,
-  holding the relay dial string + whether blobs are still owed. (The envelope
-  itself is already stored under its conversation; the entry is a pointer,
-  not a copy. Blob ciphertext is already in the local blob cache — C3a — so
-  a later blob push re-stages from there.)
+  holding the relay dial string + conversation id. (The envelope itself is
+  already stored under its conversation; the entry is a pointer, not a copy.
+  Blob ciphertext is already in the local blob cache — C3a — and a retry
+  unconditionally re-pushes all of the message's blobs, idempotent by hash,
+  so the entry needs no per-blob "owed" bookkeeping.)
 - Deposit + blob push per relay exactly as today; on success, delete that
   relay's entry. A send that fully succeeds touches the outbox only twice
   (create, delete) — the common case stays cheap.
 - **Flush pass** (idempotent — deposits dedup by id, blob pushes by hash):
-  walk the outbox, retry each entry. Triggered on: before every send, after
-  every `recv`, and on every reconnect of the live connection (§4). *(C4a
-  note: flush-on-client-open was dropped — it would put network timeouts in
-  front of the first UI render; the app's refresh-on-open recv covers it,
-  and C4b's subscription loop flushes on every (re)connect anyway.)* No
-  timer of its own — those hooks fire often enough at MVP scale.
+  walk the outbox, retry each entry. Triggered on: after every `recv`, on
+  every reconnect of the live connection (§4), and — off the send path, so a
+  fresh send never waits on the backlog — a fire-and-forget flush the *edge*
+  spawns after a fully-successful send. *(Flushing synchronously **before**
+  each send was the original plan but was dropped in the C4-latency pass: it
+  coupled a new message's latency to the health of stuck queued deliveries.
+  Flush-on-client-open was likewise dropped — network timeouts in front of
+  the first UI render.)* No timer of its own — those hooks fire often enough
+  at MVP scale.
 - **Surfacing:** `history()`/`Message` gain a `pending` flag (outbox entry
   exists for the message on ≥1 relay). The UI renders it (clock/`…` cue) —
   client policy. `send` still returns an error when *zero* relays took the

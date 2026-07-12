@@ -359,10 +359,23 @@ fn create_parent(path: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(parent).map_err(|e| format!("create {parent:?}: {e}"))
 }
 
+/// Monotonic per-process counter so each `write_atomic` gets its own temp
+/// file (see below).
+static WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Temp file + rename: a crash mid-write never leaves a truncated file.
+/// The temp name is unique per *write*, not just per process: C4 made
+/// `ClientState` concurrently accessible (subscription loops + command
+/// handlers in one process), so two tasks can write the same target path at
+/// once. A pid-only suffix made them collide on one temp file — the first
+/// rename removed it and the second got ENOENT, surfacing as a spurious
+/// drain failure and reconnect. The atomic counter gives each write its own
+/// temp file; whichever renames last wins (the bytes are identical —
+/// content-addressed — so the winner is immaterial).
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let seq = WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = path.to_path_buf();
-    tmp.set_extension(format!("tmp{}", std::process::id()));
+    tmp.set_extension(format!("tmp{}.{seq}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }

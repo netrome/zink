@@ -211,10 +211,12 @@ impl Client {
         contacts: &[Contact],
         record_mapping: Option<&BTreeSet<PublicKey>>,
     ) -> Result<SendReceipt, String> {
-        // Older queued messages first — not for correctness (the DAG
-        // orders), just so delivery order tends to match send order.
-        let _ = self.flush_outbox().await;
-
+        // NOTE: the outbox is NOT flushed here. Flushing on the send path
+        // coupled a new message's latency to the health of the *backlog* —
+        // a slow/stuck queued delivery delayed every fresh send. The backlog
+        // is retried off this path (recv, subscription reconnect, and the
+        // edge's post-send background flush), so a fresh send pays only for
+        // its own delivery.
         draft.plaintext = plaintext;
         draft.blobs = blob_drafts;
         let seq = draft.seq;
@@ -420,13 +422,18 @@ impl Client {
         )
         .await?;
         net::request(&connection, MailboxOp::Register).await?;
-        *backoff = Duration::from_secs(1);
         // Reconnect = the network is back: flush queued sends (§2), then
         // catch up on whatever arrived while we were away.
         let _ = self.flush_outbox().await;
         let received = self
             .drain_connection(relay, &connection, &mut BTreeSet::new())
             .await?;
+        // Reset backoff only now — a full register+drain proves the relay is
+        // actually usable, not merely willing to accept `Register`. A relay
+        // that registers then fails the drain must NOT reset backoff, or it
+        // pins reconnects at the 1s floor forever (a phone radio wake every
+        // second — tenet 5: relays are untrusted, and a buggy one does this).
+        *backoff = Duration::from_secs(1);
         if !received.is_empty() {
             on_new(received);
         }
