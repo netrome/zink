@@ -130,9 +130,27 @@ Notes:
 
 ### 3.7 Deploying to a phone
 
-Enable *Developer options → USB debugging* on the phone, then `adb devices`
-over USB (or `adb pair` for wireless debugging). APK install: `adb install <apk>`
-— or serve the APK over HTTP and download it on the phone.
+Two ways to get the APK onto a device:
+
+**Over USB (adb):** enable *Developer options → USB debugging* on the phone,
+then `adb devices` (or `adb pair` for wireless debugging), and
+`adb install <apk>`.
+
+**Over HTTP (no cable — how it's been done in dev):** serve the APK from the
+build machine and download it on the phone's browser. From the repo root:
+
+```sh
+APK=app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+# serve just that file's directory on :8080 (Ctrl-C to stop — don't leave it running)
+python3 -m http.server 8080 --directory "$(dirname "$APK")"
+# on the phone, browse to http://<build-machine-ip>:8080/app-universal-debug.apk
+```
+
+Android warns about installing from an unknown source (debug builds are
+sideloadable; "install anyway"). Reinstalling a newer build over the same
+`identifier` upgrades in place — device key and data survive. **Stop the
+server when done** (`Ctrl-C`, or `pkill -f 'http.server 8080'`) rather than
+leaving a stray listener bound.
 
 ## 4. Optional
 
