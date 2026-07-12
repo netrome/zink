@@ -147,8 +147,10 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   its mailboxes (kills the register-before-first-deposit footgun); CLI renders
   terminal QRs via `my-record --qr`. **C3 follow-up:** the scanner view has no
   cancel/back affordance if no QR is in sight.)*
-- [ ] **C3 · Messaging UI (Leptos).** Split into three runnable sub-slices below.
+- [x] **C3 · Messaging UI (Leptos).** Split into three runnable sub-slices below.
   *Done when:* usable text + image chat between two phones.
+  ✅ *(2026-07-12: verified live phone ↔ laptop — text + images both ways, both
+  MVP platforms covered.)*
   *(Decision, 2026-07-12 — **self-wrap convention**: `seal` always adds a key-wrap
   for the sender's own key, *without* listing self in `core.recipients` or
   depositing to self. Senders can then reopen their own stored envelopes, so
@@ -188,22 +190,24 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   *(2026-07-12: code complete — `reply_contacts`/`send_in` in `zink-client` with
   a CLI `reply` command e2e-testing the unknown-participant skip; `app/dto`
   crate = one set of command wire types both sides compile against; C2 flows
-  (QR/scan/paste/petnames) ported into the Leptos contacts view. Desktop
-  crate check-compiles for aarch64-linux-android; **awaiting the two-desktop
-  chat run** — this box ticks when that passes.)*
-- [ ] **C3c · Images + mobile polish.** Image pick → thumbnail via webview canvas
+  (QR/scan/paste/petnames) ported into the Leptos contacts view. Verified with
+  two desktop instances chatting through the deployed relay — note: two
+  instances on *one machine* need distinct app identifiers (separate data
+  dirs) and `--no-watch` on the first, else they fight over the state dir.)*
+- [x] **C3c · Images + mobile polish.** Image pick → thumbnail via webview canvas
   (keeps the `image` crate off the Rust side); send full + thumb as the existing
   `BlobDraft` pair; render thumbnails, tap to fetch/decrypt full-res through the
   blob cache; scanner cancel/back affordance (C2 footgun); Android build + the
   two-phone acceptance run. *Done when:* C3's overall criterion.
+  ✅ *(verified live phone ↔ laptop, 2026-07-12.)*
   *(2026-07-12: code complete — canvas downscale in `app/ui/src/image.rs`
   (thumb ≤320px, full ≤1600px, JPEG re-encode: bounded size whatever was
   picked); images ride the JSON IPC as base64 (`data-encoding`, already in the
   tree); thumbnails fetch lazily through the client blob cache, tap opens
   full-res in an overlay; scan now runs `windowed: true` with a cancel overlay
   (page transparent behind, `barcode-scanner:allow-cancel` was already
-  granted). **Awaiting the two-phone text+image run** — that ticks this box
-  and the C3 milestone.)*
+  granted). Known nit for later: a thumbnail whose fetch fails sticks on
+  "loading…" — tap-to-retry is a cheap C4-adjacent polish.)*
 - [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
   connection (rendezvous doc §3 — specified, never implemented); the app holds a
   persistent connection via an Android foreground service; local notification on
