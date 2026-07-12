@@ -196,6 +196,14 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   `BlobDraft` pair; render thumbnails, tap to fetch/decrypt full-res through the
   blob cache; scanner cancel/back affordance (C2 footgun); Android build + the
   two-phone acceptance run. *Done when:* C3's overall criterion.
+  *(2026-07-12: code complete — canvas downscale in `app/ui/src/image.rs`
+  (thumb ≤320px, full ≤1600px, JPEG re-encode: bounded size whatever was
+  picked); images ride the JSON IPC as base64 (`data-encoding`, already in the
+  tree); thumbnails fetch lazily through the client blob cache, tap opens
+  full-res in an overlay; scan now runs `windowed: true` with a cancel overlay
+  (page transparent behind, `barcode-scanner:allow-cancel` was already
+  granted). **Awaiting the two-phone text+image run** — that ticks this box
+  and the C3 milestone.)*
 - [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
   connection (rendezvous doc §3 — specified, never implemented); the app holds a
   persistent connection via an Android foreground service; local notification on

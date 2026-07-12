@@ -2,13 +2,16 @@
 //! layout — naming, ordering, threading, crypto — happens on the other side
 //! of `invoke`, in the command layer and `zink-client` beneath it.
 
+mod image;
 mod invoke;
+
+use std::collections::HashMap;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use wasm_bindgen::prelude::wasm_bindgen;
-use zink_app_dto::{AppState, Conversation, Message, QrPayload};
+use zink_app_dto::{AppState, Conversation, Message, OutgoingImage, QrPayload};
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -247,7 +250,25 @@ fn ChatsView(
     }
 }
 
-/// One conversation: linearized messages plus a reply box.
+/// Fetch one blob of a stored message as a display-ready data URL.
+async fn blob_data_url(conversation: &str, message: &str, hash: &str) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        conversation: &'a str,
+        message: &'a str,
+        hash: &'a str,
+    }
+    let args = Args {
+        conversation,
+        message,
+        hash,
+    };
+    let b64 = invoke::invoke::<String>("fetch_blob", &args).await?;
+    Ok(image::data_url(&b64))
+}
+
+/// One conversation: linearized messages (text + image thumbnails, tap for
+/// full-res) plus a reply box with an optional image attachment.
 #[component]
 fn ChatView(
     id: String,
@@ -257,11 +278,69 @@ fn ChatView(
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let draft = RwSignal::new(String::new());
+    let attachment = RwSignal::new(None::<(OutgoingImage, String)>);
+    /// hash → data URL; present-but-empty marks an in-flight fetch.
+    let thumbs = RwSignal::new(HashMap::<String, String>::new());
+    /// Full-res overlay: `Some("")` = loading, `Some(url)` = showing.
+    let viewer = RwSignal::new(None::<String>);
     let conversation = StoredValue::new(id);
+
+    // Fetch (cache-backed) every visible thumbnail not yet loaded.
+    Effect::new(move |_| {
+        for message in messages.get() {
+            for blob in message.blobs.iter().filter(|blob| blob.kind == "thumbnail") {
+                let known = thumbs.with_untracked(|thumbs| thumbs.contains_key(&blob.hash));
+                if known {
+                    continue;
+                }
+                thumbs.update(|thumbs| {
+                    thumbs.insert(blob.hash.clone(), String::new());
+                });
+                let (message_id, hash) = (message.id.clone(), blob.hash.clone());
+                spawn_local(async move {
+                    let conversation = conversation.get_value();
+                    match blob_data_url(&conversation, &message_id, &hash).await {
+                        Ok(url) => thumbs.update(|thumbs| {
+                            thumbs.insert(hash, url);
+                        }),
+                        Err(e) => err(e),
+                    }
+                });
+            }
+        }
+    });
+
+    let open_full = move |message_id: String, hash: String| {
+        viewer.set(Some(String::new())); // loading
+        spawn_local(async move {
+            let conversation = conversation.get_value();
+            match blob_data_url(&conversation, &message_id, &hash).await {
+                Ok(url) => viewer.set(Some(url)),
+                Err(e) => {
+                    viewer.set(None);
+                    err(e);
+                }
+            }
+        });
+    };
+
+    let attach = move |ev: leptos::ev::Event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&ev);
+        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        spawn_local(async move {
+            match image::prepare(&file).await {
+                Ok(prepared) => attachment.set(Some(prepared)),
+                Err(e) => err(e),
+            }
+        });
+    };
 
     let send = move |_| {
         let body = draft.get_untracked();
-        if body.trim().is_empty() {
+        let image = attachment.get_untracked().map(|(image, _)| image);
+        if body.trim().is_empty() && image.is_none() {
             return;
         }
         let id = conversation.get_value();
@@ -271,15 +350,18 @@ fn ChatView(
                 conversation: Option<&'a str>,
                 to: Option<&'a str>,
                 text: &'a str,
+                image: Option<OutgoingImage>,
             }
             let args = Args {
                 conversation: Some(&id),
                 to: None,
                 text: &body,
+                image,
             };
             match invoke::invoke::<String>("send_message", &args).await {
                 Ok(_) => {
                     draft.set(String::new());
+                    attachment.set(None);
                     reload_messages(id);
                 }
                 Err(e) => err(e),
@@ -297,16 +379,51 @@ fn ChatView(
                         .into_iter()
                         .map(|message| {
                             let class = if message.mine { "msg mine" } else { "msg" };
-                            let body = message
-                                .text
-                                .unwrap_or_else(|| "<unopenable>".to_string());
-                            let attachments = (message.blob_count > 0)
-                                .then(|| format!(" 📎{}", message.blob_count))
-                                .unwrap_or_default();
+                            let body = message.text.clone().filter(|text| !text.is_empty());
+                            let unopenable = message.text.is_none();
+                            let full_hash = message
+                                .blobs
+                                .iter()
+                                .find(|blob| blob.kind == "full")
+                                .map(|blob| blob.hash.clone());
+                            let images = message
+                                .blobs
+                                .iter()
+                                .filter(|blob| blob.kind == "thumbnail")
+                                .map(|blob| {
+                                    let hash = blob.hash.clone();
+                                    // Tap: full-res if the message has one, else the thumbnail itself.
+                                    let target = full_hash.clone().unwrap_or_else(|| hash.clone());
+                                    let message_id = message.id.clone();
+                                    view! {
+                                        {move || {
+                                            let url = thumbs.with(|thumbs| thumbs.get(&hash).cloned());
+                                            let (target, message_id) = (target.clone(), message_id.clone());
+                                            match url.filter(|url| !url.is_empty()) {
+                                                Some(url) => view! {
+                                                    <img
+                                                        class="thumb"
+                                                        src=url
+                                                        on:click=move |_| open_full(
+                                                            message_id.clone(),
+                                                            target.clone(),
+                                                        )
+                                                    />
+                                                }
+                                                    .into_any(),
+                                                None => view! { <span class="dim">"📎 loading…"</span> }
+                                                    .into_any(),
+                                            }
+                                        }}
+                                    }
+                                })
+                                .collect::<Vec<_>>();
                             view! {
                                 <div class=class>
                                     <span class="dim">{message.sender} " · " {time_of(message.timestamp_ms)}</span>
-                                    <div>{body} {attachments}</div>
+                                    {images}
+                                    {body.map(|text| view! { <div>{text}</div> })}
+                                    {unopenable.then(|| view! { <div class="dim">"<unopenable>"</div> })}
                                 </div>
                             }
                         })
@@ -314,6 +431,21 @@ fn ChatView(
                 }}
             </div>
             <div class="compose">
+                {move || {
+                    attachment
+                        .get()
+                        .map(|(_, preview)| {
+                            view! {
+                                <div class="pending">
+                                    <img class="thumb" src=preview />
+                                    <button class="secondary" on:click=move |_| attachment.set(None)>
+                                        "remove image"
+                                    </button>
+                                </div>
+                            }
+                        })
+                }}
+                <input type="file" accept="image/*" on:change=attach />
                 <textarea
                     rows="2"
                     placeholder="message"
@@ -322,6 +454,21 @@ fn ChatView(
                 />
                 <button on:click=send>"send"</button>
             </div>
+            {move || {
+                viewer
+                    .get()
+                    .map(|url| {
+                        view! {
+                            <div class="viewer" on:click=move |_| viewer.set(None)>
+                                {if url.is_empty() {
+                                    view! { <span>"loading…"</span> }.into_any()
+                                } else {
+                                    view! { <img src=url /> }.into_any()
+                                }}
+                            </div>
+                        }
+                    })
+            }}
         </main>
     }
 }
@@ -395,7 +542,19 @@ fn ContactsView(
         });
     };
 
+    // Scanning state drives the cancel overlay AND page transparency: with
+    // `windowed: true` the camera renders *behind* the webview, so html/body
+    // must go transparent (the `scanning` class) for it to show through —
+    // and our own overlay stays on top with a way out (the C2 footgun).
+    let scanning = RwSignal::new(false);
+    Effect::new(move |_| {
+        if let Some(root) = document().document_element() {
+            root.set_class_name(if scanning.get() { "scanning" } else { "" });
+        }
+    });
+
     let scan = move |_| {
+        scanning.set(true);
         spawn_local(async move {
             #[derive(Serialize)]
             struct ScanArgs {
@@ -412,16 +571,31 @@ fn ContactsView(
             )
             .await
             {
+                scanning.set(false);
                 return err(e);
             }
             let args = ScanArgs {
-                windowed: false,
+                windowed: true,
                 formats: vec!["QR_CODE"],
             };
-            match invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await {
+            let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
+            scanning.set(false);
+            match result {
                 Ok(scanned) => add(scanned.content),
+                // A cancelled scan also lands here — worth no red banner.
                 Err(e) => err(e),
             }
+        });
+    };
+
+    let cancel_scan = move |_| {
+        spawn_local(async move {
+            // Rejects the pending scan invoke, which resets `scanning`.
+            let _ = invoke::invoke::<serde::de::IgnoredAny>(
+                "plugin:barcode-scanner|cancel",
+                &NoArgs {},
+            )
+            .await;
         });
     };
 
@@ -470,6 +644,20 @@ fn ContactsView(
                     .into_iter()
                     .map(|petname| view! { <div class="row">{petname}</div> })
                     .collect::<Vec<_>>()
+            }}
+            {move || {
+                scanning
+                    .get()
+                    .then(|| {
+                        view! {
+                            <div class="scan-overlay">
+                                <span>"point the camera at a zink QR"</span>
+                                <button class="secondary" on:click=cancel_scan>
+                                    "cancel"
+                                </button>
+                            </div>
+                        }
+                    })
             }}
         </main>
     }

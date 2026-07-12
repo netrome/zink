@@ -3,10 +3,11 @@
 //! (`zink-app-dto`) rendered from the *stored DAG*; the webview owns only
 //! presentation. Images render in C3c; live delivery is C4.
 
+use data_encoding::BASE64;
 use tauri::{AppHandle, Manager, State};
-use zink_app_dto::{AppState, Conversation, Message, QrPayload};
+use zink_app_dto::{AppState, BlobInfo, Conversation, Message, OutgoingImage, QrPayload};
 use zink_client::{Client, hex};
-use zink_protocol::{ContactRecord, MessageId, PublicKey};
+use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
 
 /// The one `Client` for the app's lifetime, created on first use. A single
 /// instance means a single endpoint and no two commands racing first-run
@@ -127,6 +128,7 @@ async fn messages(
         .into_iter()
         .map(|message| Message {
             id: hex::encode(&message.id.0),
+            conversation: hex::encode(&conversation.0),
             sender: if message.sender == me {
                 "me".to_string()
             } else {
@@ -138,9 +140,40 @@ async fn messages(
                 .ok()
                 .map(|body| String::from_utf8_lossy(&body).into_owned()),
             timestamp_ms: message.timestamp_ms,
-            blob_count: message.blob_refs.len(),
+            blobs: message
+                .blob_refs
+                .iter()
+                .map(|blob_ref| BlobInfo {
+                    hash: hex::encode(&blob_ref.hash.0),
+                    kind: match blob_ref.kind {
+                        BlobKind::Thumbnail => "thumbnail".to_string(),
+                        BlobKind::Full => "full".to_string(),
+                    },
+                })
+                .collect(),
         })
         .collect())
+}
+
+/// Fetch + verify + decrypt one blob of a stored message (local cache
+/// first, then the home relays); returned base64 for the JSON IPC.
+#[tauri::command]
+async fn fetch_blob(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    conversation: String,
+    message: String,
+    hash: String,
+) -> Result<String, String> {
+    let client = client(&app, &managed).await?;
+    let bytes = client
+        .fetch_stored_blob(
+            parse_id(&conversation)?,
+            parse_id(&message)?,
+            &BlobHash(hex::parse32(&hash)?),
+        )
+        .await?;
+    Ok(BASE64.encode(&bytes))
 }
 
 /// Send text — into an existing conversation (reply: participants resolve
@@ -154,10 +187,15 @@ async fn send_message(
     conversation: Option<String>,
     to: Option<String>,
     text: String,
+    image: Option<OutgoingImage>,
 ) -> Result<String, String> {
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && image.is_none() {
         return Err("nothing to send".into());
     }
+    let blobs = match image {
+        Some(image) => blob_drafts(&image)?,
+        None => vec![],
+    };
     let client = client(&app, &managed).await?;
     let receipt = match (conversation, to) {
         (Some(conversation), _) => {
@@ -167,16 +205,35 @@ async fn send_message(
                 return Err("no reachable participants — add their contacts first".into());
             }
             client
-                .send_in(conversation, &resolved.contacts, text.into_bytes(), vec![])
+                .send_in(conversation, &resolved.contacts, text.into_bytes(), blobs)
                 .await?
         }
         (None, Some(petname)) => {
             let contact = client.resolve_contact(&petname)?;
-            client.send(&[contact], text.into_bytes(), vec![]).await?
+            client.send(&[contact], text.into_bytes(), blobs).await?
         }
         (None, None) => return Err("no conversation or contact given".into()),
     };
     Ok(hex::encode(&receipt.conversation.0))
+}
+
+/// Decode a webview-prepared image into the thumbnail + full-res blob pair.
+fn blob_drafts(image: &OutgoingImage) -> Result<Vec<BlobDraft>, String> {
+    let decode = |b64: &str, what: &str| {
+        BASE64
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("decode {what}: {e}"))
+    };
+    Ok(vec![
+        BlobDraft {
+            kind: BlobKind::Thumbnail,
+            plaintext: decode(&image.thumb_b64, "thumbnail")?,
+        },
+        BlobDraft {
+            kind: BlobKind::Full,
+            plaintext: decode(&image.full_b64, "full image")?,
+        },
+    ])
 }
 
 /// Drain the home relays into the store; the UI re-renders from the stored
@@ -227,6 +284,7 @@ pub fn run() {
             conversations,
             messages,
             send_message,
+            fetch_blob,
             refresh
         ])
         .run(tauri::generate_context!())

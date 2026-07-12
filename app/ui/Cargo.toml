@@ -17,6 +17,18 @@ serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+# Already a leptos transitive — this line only turns on the canvas/file
+# features the image module needs.
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "CanvasRenderingContext2d",
+    "File",
+    "FileList",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "ImageBitmap",
+    "Window",
+] }
 zink-app-dto = { path = "../dto" }
 
 [profile.release]

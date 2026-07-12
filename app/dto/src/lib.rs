@@ -37,8 +37,10 @@ pub struct Conversation {
 /// One message-view row, in linearized DAG order.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
-    /// Message id, hex.
+    /// Message id, hex — the handle for `fetch_blob`.
     pub id: String,
+    /// Conversation id, hex (carried so a blob fetch needs no extra state).
+    pub conversation: String,
     /// Sender label ("me", a petname, or short hex).
     pub sender: String,
     pub mine: bool,
@@ -46,6 +48,25 @@ pub struct Message {
     pub text: Option<String>,
     /// Sender's wall-clock hint (ms) — display only.
     pub timestamp_ms: u64,
-    /// Attachment count (rendering blobs lands in C3c).
-    pub blob_count: usize,
+    /// Referenced blobs, in envelope order (thumbnails first by our send
+    /// convention, but don't rely on it — filter by `kind`).
+    pub blobs: Vec<BlobInfo>,
+}
+
+/// One blob reference of a message.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BlobInfo {
+    /// Blob hash, hex — the handle for `fetch_blob`.
+    pub hash: String,
+    /// "thumbnail" | "full".
+    pub kind: String,
+}
+
+/// An image to attach to an outgoing message, prepared by the webview
+/// (canvas-downscaled): base64 of the encoded image bytes, no data-URL
+/// prefix. Base64 because Tauri's IPC is JSON — raw bytes don't survive it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OutgoingImage {
+    pub thumb_b64: String,
+    pub full_b64: String,
 }

@@ -5,8 +5,8 @@
   "identifier": "org.nearone.zink",
   "build": {
     "frontendDist": "../dist",
-    "beforeDevCommand": "sh ../ui/build.sh",
-    "beforeBuildCommand": "sh ../ui/build.sh"
+    "beforeDevCommand": "sh -c 'sh \"$(git rev-parse --show-toplevel)/app/ui/build.sh\"'",
+    "beforeBuildCommand": "sh -c 'sh \"$(git rev-parse --show-toplevel)/app/ui/build.sh\"'"
   },
   "app": {
     "windows": [
