@@ -297,10 +297,20 @@ on `keys.first()` needs revisiting at D2.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
-- [ ] **D0 · Sync primitives.** `get` / `get-successors` (SPEC §5.2) over a peer ALPN,
-  served at each peer's discretion. Fixes the known late-joiner hole (a client without a
-  conversation's genesis cannot reply — noted in B5); prerequisite for D2 backfill and
-  D4's backlog serving.
+- [ ] **D0 · Sync primitives.** 🎯 `get` / `get-successors` (SPEC §5.2) over a peer
+  ALPN, served at each peer's discretion. Fixes the known late-joiner hole (a client
+  without a conversation's genesis cannot reply — noted in B5); prerequisite for D2
+  backfill and D4's backlog serving. *(The peer ALPN it stands up is also the substrate
+  for D5 direct delivery.)* Design: [sync-primitives.md](./sync-primitives.md).
+  - [ ] **D0a · Serve + backward-fill.** `SYNC_ALPN` + sync wire types in
+    `zink-protocol`; the client runs an *accepting* router (first time — it's been
+    dial-only) serving `MessageCore`s at discretion; `Client::backfill(conversation,
+    from)` walks `parents` back to the genesis. *Done when:* headless e2e — A builds an
+    N-message conversation, B holds only the latest, B backfills from A to the genesis,
+    B's `load_dag` succeeds and B threads a reply. Non-goals: re-wrap-to-*read* old
+    bodies (D2), auto-backfill-on-orphan, forward auto-sync.
+  - [ ] **D0b · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
+    from the message `sender`); forward catch-up via `get-successors`.
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
   petnames; `who-is-this` pull; client-side trust ranking.
 - [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
@@ -311,6 +321,18 @@ on `keys.first()` needs revisiting at D2.
   fan-out; this is mostly membership *presentation* — client UX).
 - [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?" answers
   from contacts; concurrency-aware message views.
+- [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
+  device is online and dialable (iroh discovery), deliver the envelope peer-to-peer
+  over the D0 peer ALPN (a `Deliver` op + durable-store ack) instead of the relay
+  mailbox; fall back to the mailbox on any failure, discharge the C4 outbox entry
+  either way, dedup by id (free). Closes the SPEC §5.1/§5.3 intent-vs-implementation
+  gap: the relay sees no metadata for online conversations, and two reachable peers
+  don't need a working relay. **Depends on D0's peer ALPN; off the social-features
+  critical path** (schedule when p2p/metadata-minimization is prioritized). Design:
+  [direct-delivery.md](./direct-delivery.md) (⚠️ skip-mailbox-on-direct-ack vs
+  always-deposit — resolve after first on-device test). *Done when:* two CLI clients
+  online with the relay unreachable exchange a message directly; killing the receiver
+  falls back to a mailbox deposit fetched on its return.
 
 ---
 
@@ -322,9 +344,11 @@ on `keys.first()` needs revisiting at D2.
   Expect to learn by building; keep them small and isolated.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages ✅, B1 DAG store ✅,
   C1 client-core split ✅, C4 live delivery / foreground service ✅
-  ([live-delivery.md](./live-delivery.md)). The app shell (C3) needed no design
-  doc — it assembled resolved decisions; its as-built map lives in
-  `app/README.md`.
+  ([live-delivery.md](./live-delivery.md)), D0 sync primitives 📝
+  ([sync-primitives.md](./sync-primitives.md)), D5 direct delivery 📝
+  ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0). The app
+  shell (C3) needed no design doc — it assembled resolved decisions; its
+  as-built map lives in `app/README.md`.
 - **Async ports, sync core.** Ports are async traits from A4 onward; the pure
   `zink-protocol` core stays synchronous (no async runtime, no threads) so it ports to
   single-threaded WASM cleanly. This keeps Stage C a re-plumbing, not a rewrite.

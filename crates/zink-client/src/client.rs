@@ -9,7 +9,7 @@ use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, FORMAT_VERSION,
     MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
-    SignedAttestation, distinct_relays,
+    SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
 };
 
 use crate::state::ClientState;
@@ -41,6 +41,9 @@ pub struct Client {
     endpoint: Endpoint,
     state: ClientState,
     config: ClientConfig,
+    /// The client is also a server: this router serves `SYNC_ALPN` (peer
+    /// history sync, D0) for as long as the client lives. Held, not called.
+    _sync_router: iroh::protocol::Router,
 }
 
 impl Client {
@@ -70,12 +73,27 @@ impl Client {
         config: ClientConfig,
     ) -> Result<Self, String> {
         let endpoint = net::bind_endpoint(&device).await?;
+        let state = ClientState::open(key_path);
+        // Serve peer history sync on our own endpoint (D0). The endpoint is a
+        // cheap handle to clone; the router keeps the serve loop alive.
+        let sync_router = crate::sync::spawn_sync_router(endpoint.clone(), state.clone());
         Ok(Self {
             device,
             endpoint,
-            state: ClientState::open(key_path),
+            state,
             config,
+            _sync_router: sync_router,
         })
+    }
+
+    /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
+    /// device reaches us on `SYNC_ALPN` to backfill history. (In a real
+    /// deployment iroh discovery resolves a key to its address; this is the
+    /// explicit form the CLI and tests use.)
+    pub fn sync_address(&self) -> Result<String, String> {
+        let addr = self.endpoint.addr();
+        let sock = addr.ip_addrs().next().ok_or("no bound address yet")?;
+        Ok(format!("{}@{}", self.endpoint.id(), sock))
     }
 
     pub fn public_key(&self) -> PublicKey {
@@ -771,6 +789,66 @@ impl Client {
 
     /// Persist a verified envelope and its participant→conversation mapping,
     /// so a later `send` to the same people threads into this conversation.
+    /// Pull the missing ancestors of a partially-known conversation from a
+    /// peer, walking `parents` back until the genesis is reached (SPEC §5.2
+    /// `get`). This is what lets a device added mid-conversation build the DAG
+    /// and reply: without the genesis, `load_dag` can't even start
+    /// (state.rs — "a missing genesis is unrecoverable"). `from` is the peer's
+    /// `<endpoint-id>@<ip:port>`.
+    ///
+    /// Best-effort (tenet 6): an unreachable peer, or one that declines to
+    /// serve an ancestor, just stops the walk — we never fabricate a root.
+    /// A served peer is trusted no more than a relay: every envelope is
+    /// verified and checked to be the id we asked for before it's stored.
+    /// Returns the number of newly-stored messages.
+    pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, String> {
+        // A hostile peer could feed an unbounded fake chain; bound the walk.
+        const MAX_BACKFILL: usize = 10_000;
+        let connection =
+            net::connect(&self.endpoint, from, SYNC_ALPN, self.config.connect_timeout).await?;
+        let mut fetched = 0usize;
+        loop {
+            let frontier = self.state.missing_ancestors(conversation);
+            if frontier.is_empty() {
+                break; // ancestor-closed: the genesis (parents=[]) is reachable
+            }
+            let mut progressed = false;
+            for id in frontier {
+                if fetched >= MAX_BACKFILL {
+                    tracing::warn!("backfill hit the fetch cap; stopping");
+                    return Ok(fetched);
+                }
+                match net::sync_request(&connection, SyncOp::Get { id }).await? {
+                    SyncResult::Envelope { envelope } => {
+                        if envelope.id() != id {
+                            tracing::warn!("peer returned a mismatched id; skipping");
+                            continue;
+                        }
+                        if envelope.version != FORMAT_VERSION
+                            || envelope.core.version != FORMAT_VERSION
+                        {
+                            tracing::warn!("skipping backfilled message with unsupported version");
+                            continue;
+                        }
+                        if envelope.verify().is_err() {
+                            tracing::warn!("peer returned an unverifiable envelope; skipping");
+                            continue;
+                        }
+                        self.remember(&envelope)?;
+                        fetched += 1;
+                        progressed = true;
+                    }
+                    SyncResult::NotHeld => {} // peer doesn't have it / declined
+                    other => return Err(format!("unexpected sync response: {other:?}")),
+                }
+            }
+            if !progressed {
+                break; // this peer can't take us any closer to the genesis
+            }
+        }
+        Ok(fetched)
+    }
+
     fn remember(&self, envelope: &MessageEnvelope) -> Result<(), String> {
         let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
         self.state.store_envelope(conversation, envelope)?;

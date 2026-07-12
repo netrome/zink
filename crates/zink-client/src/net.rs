@@ -7,8 +7,9 @@ use std::str::FromStr;
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use zink_protocol::{
-    DeviceKey, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MailboxOp, MailboxRequest, MailboxResponse,
-    MailboxResult, MessageEnvelope,
+    DeviceKey, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MAX_SYNC_RESPONSE_BYTES, MailboxOp,
+    MailboxRequest, MailboxResponse, MailboxResult, MessageEnvelope, SyncOp, SyncRequest,
+    SyncResponse, SyncResult,
 };
 
 /// The endpoint key IS the device key: mailbox auth is the connection.
@@ -63,6 +64,29 @@ pub(crate) async fn request(
         .await
         .map_err(|e| format!("read response: {e}"))?;
     Ok(MailboxResponse::try_from_bytes(&bytes)
+        .map_err(|e| format!("decode response: {e}"))?
+        .result)
+}
+
+/// One peer sync round-trip on `SYNC_ALPN` (same one-request-per-bi-stream
+/// framing as the mailbox). The connection is to a *peer*, not a relay.
+pub(crate) async fn sync_request(
+    connection: &Connection,
+    op: SyncOp,
+) -> Result<SyncResult, String> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| format!("open stream: {e}"))?;
+    send.write_all(&SyncRequest::new(op).to_bytes())
+        .await
+        .map_err(|e| format!("send request: {e}"))?;
+    send.finish().map_err(|e| format!("finish stream: {e}"))?;
+    let bytes = recv
+        .read_to_end(MAX_SYNC_RESPONSE_BYTES)
+        .await
+        .map_err(|e| format!("read response: {e}"))?;
+    Ok(SyncResponse::try_from_bytes(&bytes)
         .map_err(|e| format!("decode response: {e}"))?
         .result)
 }

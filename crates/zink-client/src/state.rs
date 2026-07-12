@@ -29,6 +29,7 @@ use zink_protocol::{
     BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey,
 };
 
+#[derive(Clone, Debug)]
 pub struct ClientState {
     root: PathBuf,
 }
@@ -153,6 +154,49 @@ impl ClientState {
             }
         }
         Ok(dag)
+    }
+
+    /// One stored envelope by message id, wherever it lives. Content is
+    /// addressed by id alone (SPEC §5.2 `get`), but on disk it's filed under a
+    /// conversation, so this scans conversations — fine at friend/family scale
+    /// (few conversations); an id→conversation index is the optimization if a
+    /// large store ever makes the scan bite.
+    pub fn find_envelope(&self, id: MessageId) -> Option<MessageEnvelope> {
+        self.conversations()
+            .into_iter()
+            .find_map(|conversation| self.load_envelope(conversation, id).ok())
+    }
+
+    /// Ids of held messages whose `parents` include `parent` (SPEC §5.2
+    /// `get-successors`) — known children, for pulling a conversation forward.
+    pub fn successors(&self, parent: MessageId) -> Vec<MessageId> {
+        let mut ids: Vec<MessageId> = self
+            .conversations()
+            .into_iter()
+            .flat_map(|conversation| self.load_envelopes(conversation).unwrap_or_default())
+            .filter(|envelope| envelope.core.parents.contains(&parent))
+            .map(|envelope| envelope.id())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Referenced parents we don't hold for `conversation` — the frontier a
+    /// backfill fetches to walk back toward the genesis. Empty when the stored
+    /// slice is already ancestor-closed (genesis reached, or nothing stored).
+    pub fn missing_ancestors(&self, conversation: MessageId) -> Vec<MessageId> {
+        let envelopes = self.load_envelopes(conversation).unwrap_or_default();
+        let present: BTreeSet<MessageId> = envelopes.iter().map(|e| e.id()).collect();
+        let mut missing: BTreeSet<MessageId> = BTreeSet::new();
+        for envelope in &envelopes {
+            for parent in &envelope.core.parents {
+                if !present.contains(parent) {
+                    missing.insert(*parent);
+                }
+            }
+        }
+        missing.into_iter().collect()
     }
 
     /// Cache a blob as fetched/produced — encrypted, keyed by its hash.

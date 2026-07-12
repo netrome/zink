@@ -12,6 +12,7 @@ mod fanout;
 mod keys;
 mod mailbox;
 mod message;
+mod sync;
 #[cfg(test)]
 mod testutil;
 
@@ -29,6 +30,10 @@ pub use mailbox::{
 pub use message::{
     BlobDraft, BlobHash, BlobKind, BlobRef, EncryptedBlob, KeyCommitment, KeyWrap, MessageCore,
     MessageDraft, MessageEnvelope, MessageId, OpenError, SealedKey, SealedMessage, SealedRef,
+};
+pub use sync::{
+    MAX_SYNC_REQUEST_BYTES, MAX_SYNC_RESPONSE_BYTES, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest,
+    SyncResponse, SyncResult,
 };
 
 /// Format tag every hashed/wire object starts with (SPEC §10).
