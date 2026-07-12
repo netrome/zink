@@ -371,6 +371,12 @@ impl Client {
             net::request(&connection, MailboxOp::Register).await?;
             received.extend(self.drain_connection(relay, &connection, &mut seen).await?);
         }
+        // Distinguishes the *poll* path from the nudge path in the logs: a
+        // message that shows up here but not via "drained (nudge)" arrived
+        // slowly (fell back to the poll) — the signature of a missed nudge.
+        if !received.is_empty() {
+            tracing::info!(count = received.len(), "drained (poll)");
+        }
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
