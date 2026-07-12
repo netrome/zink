@@ -5196,6 +5196,8 @@ dependencies = [
  "iroh-blobs",
  "qrcode",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "zink-client",
  "zink-protocol",
  "zink-relay",
@@ -5210,6 +5212,7 @@ dependencies = [
  "iroh-blobs",
  "n0-future",
  "rand_core 0.6.4",
+ "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "zink-protocol",
@@ -5238,6 +5241,8 @@ dependencies = [
  "iroh-relay",
  "n0-future",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "zink-protocol",
 ]
 

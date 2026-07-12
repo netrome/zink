@@ -373,6 +373,14 @@ fn qr_payload(record: &ContactRecord) -> Result<QrPayload, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Logs to stderr — visible in the `cargo tauri dev` terminal on desktop.
+    // (On Android stderr goes nowhere; a logcat layer is a later add.)
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .try_init()
+        .ok();
     let builder = tauri::Builder::default()
         .manage(ManagedClient {
             client: tokio::sync::OnceCell::new(),

@@ -197,7 +197,7 @@ impl Client {
         })
     }
 
-    /// The shared send tail: flush older queued deliveries, seal, persist
+    /// The shared send tail: seal, persist
     /// (envelope + own-blob cache + outbox ledger + optionally the
     /// participant mapping), then deliver per distinct relay. One relay
     /// failing never aborts the others; what failed stays in the outbox.
@@ -254,7 +254,7 @@ impl Client {
             {
                 Ok(()) => self.state.clear_outbox(id, relay),
                 Err(error) => {
-                    eprintln!("delivery to {relay} failed ({error}); queued for retry");
+                    tracing::warn!(relay, %error, "delivery failed; queued for retry");
                     pending_relays += 1;
                     last_error = error;
                 }
@@ -315,7 +315,7 @@ impl Client {
                 Ok(envelope) => envelope,
                 Err(error) => {
                     // No stored envelope — nothing a retry could ever send.
-                    eprintln!("warning: dropping unfulfillable outbox entry: {error}");
+                    tracing::warn!(%error, "dropping unfulfillable outbox entry");
                     self.state.clear_outbox(entry.message, &entry.relay);
                     continue;
                 }
@@ -328,10 +328,7 @@ impl Client {
                 .filter_map(|blob_ref| {
                     let bytes = self.state.load_blob(&blob_ref.hash);
                     if bytes.is_none() {
-                        eprintln!(
-                            "warning: blob {} missing from cache; delivering without it",
-                            hex::encode(&blob_ref.hash.0)
-                        );
+                        tracing::warn!(blob = %hex::encode(&blob_ref.hash.0), "blob missing from cache; delivering without it");
                     }
                     Some(zink_protocol::EncryptedBlob {
                         hash: blob_ref.hash,
@@ -349,7 +346,7 @@ impl Client {
                     report.delivered += 1;
                 }
                 Err(error) => {
-                    eprintln!("outbox retry to {} failed: {error}", entry.relay);
+                    tracing::warn!(relay = %entry.relay, %error, "outbox retry failed");
                     report.pending += 1;
                 }
             }
@@ -397,17 +394,20 @@ impl Client {
         loop {
             match self.subscribe_once(relay, &mut on_new, &mut backoff).await {
                 Ok(()) => {}
-                Err(error) => eprintln!("subscription to {relay} dropped: {error}"),
+                Err(error) => tracing::warn!(relay, %error, "subscription dropped"),
             }
             // ±50% jitter so a relay restart doesn't get a thundering herd.
             let jitter = 0.5 + f64::from(OsRng.next_u32()) / f64::from(u32::MAX);
-            n0_future::time::sleep(backoff.mul_f64(jitter)).await;
+            let delay = backoff.mul_f64(jitter);
+            tracing::debug!(relay, ?delay, "reconnecting after backoff");
+            n0_future::time::sleep(delay).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     }
 
     /// One subscription session: lives until the connection dies. Resets
-    /// `backoff` once registered (the relay is demonstrably healthy).
+    /// `backoff` only after a full register+drain (see below), not on bare
+    /// `Register`.
     async fn subscribe_once(
         &self,
         relay: &str,
@@ -422,6 +422,7 @@ impl Client {
         )
         .await?;
         net::request(&connection, MailboxOp::Register).await?;
+        tracing::info!(relay, "subscription live (registered)");
         // Reconnect = the network is back: flush queued sends (§2), then
         // catch up on whatever arrived while we were away.
         let _ = self.flush_outbox().await;
@@ -435,6 +436,7 @@ impl Client {
         // second — tenet 5: relays are untrusted, and a buggy one does this).
         *backoff = Duration::from_secs(1);
         if !received.is_empty() {
+            tracing::info!(relay, count = received.len(), "drained (catch-up)");
             on_new(received);
         }
         loop {
@@ -444,9 +446,16 @@ impl Client {
                 .accept_uni()
                 .await
                 .map_err(|e| format!("connection lost: {e}"))?;
+            let started = std::time::Instant::now();
             let received = self
                 .drain_connection(relay, &connection, &mut BTreeSet::new())
                 .await?;
+            tracing::info!(
+                relay,
+                count = received.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "drained (nudge)"
+            );
             if !received.is_empty() {
                 on_new(received);
             }
@@ -482,7 +491,10 @@ impl Client {
             // non-advancing page is a hostile/buggy relay trying to spin
             // this drain forever. Abandon it — don't loop on its input.
             if page_cursor <= after {
-                eprintln!("relay {relay} returned a non-advancing fetch page; abandoning it");
+                tracing::warn!(
+                    relay,
+                    "relay returned a non-advancing fetch page; abandoning it"
+                );
                 break;
             }
             for item in items {
@@ -492,7 +504,7 @@ impl Client {
                     // A future protocol version this client can't parse
                     // (SPEC §10: surfaced, never misparsed). Skipped, and
                     // acked with the page so it doesn't wedge the drain.
-                    eprintln!("skipping message with unsupported version");
+                    tracing::warn!("skipping message with unsupported version");
                     continue;
                 }
                 if !seen.insert(item.envelope.id().0) {

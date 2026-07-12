@@ -81,7 +81,7 @@ pub(crate) async fn deposit_with_retry(
     let mut last_error = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
-            eprintln!("deposit to {relay} failed ({last_error}); retrying");
+            tracing::warn!(relay, attempt, error = %last_error, "deposit failed; retrying");
         }
         let connection = match connect(endpoint, relay, MAILBOX_ALPN, timeout).await {
             Ok(connection) => connection,

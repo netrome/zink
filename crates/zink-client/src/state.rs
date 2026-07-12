@@ -89,7 +89,7 @@ impl ClientState {
                     MessageEnvelope::try_from_bytes(&bytes).map_err(|e| e.to_string())
                 }) {
                 Ok(envelope) => envelopes.push(envelope),
-                Err(e) => eprintln!("warning: skipping damaged {path:?}: {e}"),
+                Err(e) => tracing::warn!(?path, error = %e, "skipping damaged file"),
             }
         }
         Ok(envelopes)
@@ -149,7 +149,7 @@ impl ClientState {
             .map_err(|e| format!("stored genesis invalid: {e}"))?;
         for core in cores {
             if let Err(e) = dag.insert(core) {
-                eprintln!("warning: skipping invalid stored message: {e}");
+                tracing::warn!(error = %e, "skipping invalid stored message");
             }
         }
         Ok(dag)
@@ -210,7 +210,7 @@ impl ClientState {
             match parse_outbox_entry(&path) {
                 Some(entry) => outbox.push(entry),
                 None => {
-                    eprintln!("warning: dropping damaged outbox entry {path:?}");
+                    tracing::warn!(?path, "dropping damaged outbox entry");
                     let _ = std::fs::remove_file(&path);
                 }
             }
@@ -294,10 +294,11 @@ impl ClientState {
             let petname = std::fs::read_to_string(path.with_extension("name"));
             match (record, petname) {
                 (Ok(record), Ok(petname)) => contacts.push((petname.trim().to_string(), record)),
-                (record, petname) => eprintln!(
-                    "warning: skipping damaged contact {path:?}: {:?} {:?}",
-                    record.err(),
-                    petname.err()
+                (record, petname) => tracing::warn!(
+                    ?path,
+                    record_err = ?record.err(),
+                    petname_err = ?petname.err(),
+                    "skipping damaged contact"
                 ),
             }
         }

@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 iroh = { version = "1.0.2", default-features = false, features = ["tls-ring"] }
+tracing = "0.1.44"
 zink-protocol = { path = "../zink-protocol" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

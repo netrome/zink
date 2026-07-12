@@ -27,6 +27,13 @@ use zink_protocol::{BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, Publ
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..]),

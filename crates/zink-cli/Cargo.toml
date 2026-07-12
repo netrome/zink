@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 qrcode = { version = "0.14.1", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zink-client = { path = "../zink-client" }
 zink-protocol = { path = "../zink-protocol" }
 

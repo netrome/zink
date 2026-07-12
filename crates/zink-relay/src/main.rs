@@ -45,6 +45,7 @@ fn version() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    init_tracing();
     let (data_dir, port) = parse_args();
     std::fs::create_dir_all(&data_dir)?;
 
@@ -122,6 +123,19 @@ fn parse_args() -> (PathBuf, Option<u16>) {
         data_dir.unwrap_or_else(|| PathBuf::from("./zink-relay-data")),
         port,
     )
+}
+
+/// Logs to stderr, off unless `RUST_LOG` is set (default `warn` so real
+/// warnings still surface). `RUST_LOG=zink_relay=debug,iroh=info` for the
+/// live-delivery detail.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
 }
 
 fn load_or_create_key(path: &Path) -> Result<SecretKey, Box<dyn std::error::Error + Send + Sync>> {

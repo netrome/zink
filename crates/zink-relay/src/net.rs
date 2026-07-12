@@ -81,7 +81,7 @@ fn blob_cache_events<W: WallClock>(
                 // by hash) to re-tag. A blocking in-process channel makes
                 // this rare, but silence would be a silent delivery hole.
                 if let Err(e) = blob_store.tags().set(tag, hash).await {
-                    eprintln!("warning: failed to tag pushed blob {hash}: {e}");
+                    tracing::warn!(%hash, error = %e, "failed to tag pushed blob");
                 }
             }
         }
@@ -162,8 +162,16 @@ impl<S: MailboxStore + fmt::Debug> ProtocolHandler for MailboxHandler<S> {
                                 .get(recipient)
                                 .map(|(_, connection)| connection.clone())
                         };
-                        if let Some(target) = target {
-                            nudge(target);
+                        let short = &hex_short(recipient);
+                        match target {
+                            Some(target) => {
+                                tracing::debug!(recipient = short, "nudging live recipient");
+                                nudge(target);
+                            }
+                            None => tracing::debug!(
+                                recipient = short,
+                                "deposit for a recipient with no live connection (will poll)"
+                            ),
                         }
                     }
                 }
@@ -209,4 +217,9 @@ fn malformed() -> MailboxResponse {
     MailboxResponse::new(MailboxResult::Error {
         code: MailboxErrorCode::Malformed,
     })
+}
+
+/// First 8 hex chars of a key — enough to follow a recipient in the logs.
+fn hex_short(key: &PublicKey) -> String {
+    key.0.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
