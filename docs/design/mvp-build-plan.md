@@ -172,7 +172,7 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   history on both devices, and blobs still render *after the relay is gone* (cache
   proof). Envelopes stored before the self-wrap show as `<unopenable>` — honest,
   dev-stage data only.)*
-- [ ] **C3b · Managed client + structured commands + Leptos scaffold.** One
+- [x] **C3b · Managed client + structured commands + Leptos scaffold.** One
   long-lived `Client` in Tauri managed state (closes the concurrent-state-dir and
   double-first-run-key races found in the A1–C2 review); commands return
   structured DTOs rendered from the **stored DAG**, not `recv`'s return value
