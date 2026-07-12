@@ -208,17 +208,39 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   (page transparent behind, `barcode-scanner:allow-cancel` was already
   granted). Known nit for later: a thumbnail whose fetch fails sticks on
   "loading…" — tap-to-retry is a cheap C4-adjacent polish.)*
-- [ ] **C4 · 🎯🚩 Live delivery & notifications.** Relay **forward-now** over the live
-  connection (rendezvous doc §3 — specified, never implemented); the app holds a
-  persistent connection via an Android foreground service; local notification on
-  arrival (tauri-plugin-notification); fetch-on-foreground stays the backstop.
-  *Done when:* a backgrounded app on a real phone shows a notification for an
-  incoming message. *(Risk spike: background delivery vs Android Doze/battery
-  optimization — the successor to the retired Web Push spike.)*
-  *(Fold in from the A1–C2 review [MEDIUM-3]: **send is store-first with no
-  re-deposit path** — a failed deposit leaves a phantom message in the local DAG and
-  a permanent seq gap. Fix here where delivery state gets a home: store on first
-  successful deposit, or track per-relay delivery so a later pass re-deposits.)*
+- [ ] **C4 · 🎯🚩 Live delivery & notifications.** Split into three runnable
+  sub-slices below. *Done when:* a backgrounded app on a real phone shows a
+  notification for an incoming message. *(Design:
+  [live-delivery.md](./live-delivery.md) — nudge-and-fetch, outbox, foreground
+  service; decisions resolved 2026-07-12. Risk spike: background delivery vs
+  Android Doze/battery optimization — the successor to the retired Web Push
+  spike, isolated in C4c.)*
+- [ ] **C4a · Outbox.** The per-relay delivery ledger fixing the store-first
+  send hole from the A1–C2 review (a failed deposit left a phantom message in
+  the local DAG and a permanent seq gap for recipients): entry per
+  (message, relay) persisted before any network work, cleared per relay on
+  success (blob pushes owed tracked too); flush pass (idempotent re-deposit +
+  re-push) on client open / before send / after recv / on reconnect; entries
+  past the retention window stop retrying but stay surfaced as undelivered;
+  `pending` flag on history messages, rendered in the UI. *Done when:* e2e —
+  send with the relay down shows pending, relay back up + any flush trigger
+  delivers, recipient gets it, pending clears.
+- [ ] **C4b · Nudge + subscription loop.** Relay keeps a live-connection map
+  per registered mailbox and, on deposit, opens a zero-length uni stream to
+  each hosted recipient's connection (the nudge — additive to
+  `zink-mailbox/1`, old clients unaffected); client subscription loop in
+  `zink-client` (connect → register → flush outbox → drain → await nudge;
+  jittered-backoff reconnect), spawned by the edges; the desktop app delivers
+  live, and the foreground poll stretches to a backstop. *Done when:* e2e —
+  a deposit from A drains at B's subscription without B polling.
+- [ ] **C4c · 🚩 Foreground service + notifications.** The Doze risk spike,
+  then the plumbing: minimal Kotlin FGS shell (`specialUse` type +
+  battery-optimization exemption) whose only job is keeping the process — and
+  the Rust subscription loop in it — alive while backgrounded; petname + text
+  preview local notifications posted after local decrypt
+  (tauri-plugin-notification). *Done when:* overnight on a real phone, screen
+  off and unplugged, an incoming message notifies within minutes at
+  single-digit battery drain — C4's overall criterion.
 
 **🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
 (+ Linux desktop), online and offline, with notifications.
@@ -266,8 +288,10 @@ on `keys.first()` needs revisiting at D2.
   C4 (background delivery vs Android Doze — replaced the retired Web Push spike).
   Expect to learn by building; keep them small and isolated.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages ✅, B1 DAG store ✅,
-  C1 client-core split, C4 live delivery / foreground service. Write these as short
-  `docs/design/<name>.md` when we reach them.
+  C1 client-core split ✅, C4 live delivery / foreground service ✅
+  ([live-delivery.md](./live-delivery.md)). The app shell (C3) needed no design
+  doc — it assembled resolved decisions; its as-built map lives in
+  `app/README.md`.
 - **Async ports, sync core.** Ports are async traits from A4 onward; the pure
   `zink-protocol` core stays synchronous (no async runtime, no threads) so it ports to
   single-threaded WASM cleanly. This keeps Stage C a re-plumbing, not a rewrite.
