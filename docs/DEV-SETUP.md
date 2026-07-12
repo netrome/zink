@@ -179,6 +179,17 @@ sudo loginctl enable-linger $USER     # start on boot without a login session
 journalctl --user -u zink-relay | grep dial:   # the dial string for clients
 ```
 
+⚠️ The unit runs `~/.local/bin/zink-relay` — `cargo install` puts binaries in
+`~/.cargo/bin`, which the service never looks at. Deploy with the `cp` above.
+To verify what's actually deployed vs. built:
+
+```sh
+~/.local/bin/zink-relay --version      # what the service will run
+target/release/zink-relay --version    # what you just built
+journalctl --user -u zink-relay -n 5   # the running relay logs its version
+                                       # + build commit on every start
+```
+
 - Data (mailboxes, blob cache, the relay's identity key) lives in
   `~/zink-relay-data`; the endpoint id and `--port 4400` are stable, so the
   dial string survives restarts and reboots.

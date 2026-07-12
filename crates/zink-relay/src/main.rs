@@ -24,9 +24,28 @@ use zink_relay::fs::FsMailboxStore;
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
 
+const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>]
+
+  data-dir          where mailboxes, the blob cache, and the relay's identity
+                    key live (default: ./zink-relay-data)
+  --port <udp-port> fixed UDP port, so the dial string survives restarts
+                    (default: ephemeral)
+  -h, --help        this text
+  -V, --version     version + build info";
+
+/// Package version + `git describe` (commit, nearest tag, dirty marker),
+/// embedded by build.rs.
+fn version() -> String {
+    format!(
+        "zink-relay {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("ZINK_BUILD_INFO")
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (data_dir, port) = parse_args()?;
+    let (data_dir, port) = parse_args();
     std::fs::create_dir_all(&data_dir)?;
 
     // The endpoint key must survive restarts: it IS the relay's identity —
@@ -37,7 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         builder = builder.bind_addr((Ipv4Addr::UNSPECIFIED, port))?;
     }
     let endpoint = builder.bind().await?;
-    println!("zink-relay listening (data: {})", data_dir.display());
+    // First log line = what's running — `journalctl -u zink-relay` answers
+    // "which build is deployed?" without touching the binary.
+    println!("{} listening (data: {})", version(), data_dir.display());
     println!("  endpoint id: {}", endpoint.id());
     for sock in endpoint.addr().ip_addrs() {
         println!("  dial: {}@{}", endpoint.id(), sock);
@@ -62,20 +83,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-/// `[data-dir] [--port <udp-port>]`, in any order.
-fn parse_args() -> Result<(PathBuf, Option<u16>), Box<dyn std::error::Error + Send + Sync>> {
-    let mut data_dir = PathBuf::from("./zink-relay-data");
+/// `[data-dir] [--port <udp-port>]`, in any order. `-h`/`-V` print and
+/// exit; argument mistakes print usage and exit(2) — never a Debug-dumped
+/// error, and never silently taken as the data dir.
+fn parse_args() -> (PathBuf, Option<u16>) {
+    let bad = |message: &str| -> ! {
+        eprintln!("{message}\n{USAGE}");
+        std::process::exit(2);
+    };
+    let mut data_dir = None;
     let mut port = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--port" {
-            let value = args.next().ok_or("missing value for --port")?;
-            port = Some(value.parse().map_err(|e| format!("--port: {e}"))?);
-        } else {
-            data_dir = PathBuf::from(arg);
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("{}", version());
+                std::process::exit(0);
+            }
+            "--port" => {
+                let Some(value) = args.next() else {
+                    bad("missing value for --port");
+                };
+                match value.parse() {
+                    Ok(value) => port = Some(value),
+                    Err(e) => bad(&format!("--port: {e}")),
+                }
+            }
+            flag if flag.starts_with('-') => bad(&format!("unknown flag {flag}")),
+            _ if data_dir.is_some() => bad("more than one data-dir given"),
+            _ => data_dir = Some(PathBuf::from(arg)),
         }
     }
-    Ok((data_dir, port))
+    (
+        data_dir.unwrap_or_else(|| PathBuf::from("./zink-relay-data")),
+        port,
+    )
 }
 
 fn load_or_create_key(path: &Path) -> Result<SecretKey, Box<dyn std::error::Error + Send + Sync>> {
