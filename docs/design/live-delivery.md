@@ -67,6 +67,20 @@ mailbox exists because that can't be assumed).
   the social moment passed. Keep the entry, stop retrying, surface as
   "undelivered" in history; deleting a message the user wrote is not the
   client's call (tenet: discretion over enforcement).
+- **Known-remaining — no per-entry retry backoff (not yet implemented).** A
+  flush retries *every* not-yet-given-up entry, so one dead relay costs one
+  connect-timeout per flush until the 30-day window. Not painful now that the
+  latency-sensitive paths drain *before* they flush (send doesn't flush at
+  all; recv and reconnect catch up first), but a per-entry `next_retry`
+  (exponential, persisted in the entry) would make flushes cheap even with a
+  long-dead entry. Deferred — worth it if a stuck entry ever bites in
+  practice.
+- **Flush triggers, as shipped:** after a `recv` drain; after a reconnect's
+  catch-up drain (both drain first, flush second — incoming beats backlog);
+  and a fire-and-forget flush the *app* edge spawns after a fully-successful
+  send. The **CLI deliberately does not flush after send** (a one-shot dev
+  command shouldn't eat the backlog's timeouts each invocation); its outbox
+  drains via `recv`/`listen`.
 
 Testable headless end-to-end: send while the relay is down (CLI: deposit fails,
 outbox entry persists, `history` shows pending) → start the relay → any flush

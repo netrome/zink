@@ -182,6 +182,12 @@ impl<W: WallClock> MailboxStore for FsMailboxStore<W> {
 /// Write via temp file + rename so a crash never leaves a truncated item.
 /// (Same-directory rename is atomic on POSIX; the pid suffix keeps two
 /// processes on one data dir from clobbering each other's temp file.)
+///
+/// A pid-only temp name is deliberate and sufficient *here*: every mutation
+/// runs under `FsMailboxStore`'s mutex, so two writes to one path never
+/// overlap within this process. (The client's `write_atomic` needs a
+/// per-write counter because its `ClientState` has no such lock — do not
+/// "sync" the two; that would imply a race this store doesn't have.)
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = path.to_path_buf();
     tmp.set_extension(format!("tmp{}", std::process::id()));

@@ -185,6 +185,9 @@ async fn send(args: &[String]) -> Result<(), String> {
     };
     let blobs = blob_drafts(&flags)?;
 
+    // Note: unlike the app, the CLI does not flush the outbox after a send —
+    // a one-shot dev command shouldn't eat a 10s-per-dead-entry backlog
+    // retry on every invocation. The backlog is retried by `recv`/`listen`.
     let receipt = client
         .send(&contacts, text.clone().into_bytes(), blobs)
         .await?;

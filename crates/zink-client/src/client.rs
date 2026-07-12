@@ -423,9 +423,11 @@ impl Client {
         .await?;
         net::request(&connection, MailboxOp::Register).await?;
         tracing::info!(relay, "subscription live (registered)");
-        // Reconnect = the network is back: flush queued sends (§2), then
-        // catch up on whatever arrived while we were away.
-        let _ = self.flush_outbox().await;
+        // Catch up on what arrived while we were away *first* — incoming
+        // messages take priority over retrying the outbox. Flushing before
+        // the drain would delay catch-up by the backlog's timeouts (10s per
+        // dead entry), the same coupling removed from the send path. Flush
+        // after (the reconnect still means "network is back", §2).
         let received = self
             .drain_connection(relay, &connection, &mut BTreeSet::new())
             .await?;
@@ -439,6 +441,7 @@ impl Client {
             tracing::info!(relay, count = received.len(), "drained (catch-up)");
             on_new(received);
         }
+        let _ = self.flush_outbox().await;
         loop {
             // A nudge is a zero-length uni stream — accepting it IS the
             // signal; a failed accept means the connection is gone.
