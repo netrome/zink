@@ -30,16 +30,17 @@ pub(crate) fn parse_relay(spec: &str) -> Result<EndpointAddr, String> {
     Ok(EndpointAddr::new(id).with_ip_addr(sock))
 }
 
-/// Bounded connect: an unreachable relay must fail a send in seconds, not
-/// hang it — graceful failure is what the outbox turns into delivery later.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
+/// Bounded connect: an unreachable relay must fail a send in bounded time,
+/// not hang it — graceful failure is what the outbox turns into delivery
+/// later. The deadline is `ClientConfig::connect_timeout`, injected by the
+/// edge (iroh itself keeps probing an unreachable address far longer).
 pub(crate) async fn connect(
     endpoint: &Endpoint,
     relay: &str,
     alpn: &[u8],
+    timeout: std::time::Duration,
 ) -> Result<Connection, String> {
-    n0_future::time::timeout(CONNECT_TIMEOUT, endpoint.connect(parse_relay(relay)?, alpn))
+    n0_future::time::timeout(timeout, endpoint.connect(parse_relay(relay)?, alpn))
         .await
         .map_err(|_| format!("connect to relay {relay}: timed out"))?
         .map_err(|e| format!("connect to relay {relay}: {e}"))
@@ -75,13 +76,14 @@ pub(crate) async fn deposit_with_retry(
     endpoint: &Endpoint,
     relay: &str,
     envelope: &MessageEnvelope,
+    timeout: std::time::Duration,
 ) -> Result<(), String> {
     let mut last_error = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
             eprintln!("deposit to {relay} failed ({last_error}); retrying");
         }
-        let connection = match connect(endpoint, relay, MAILBOX_ALPN).await {
+        let connection = match connect(endpoint, relay, MAILBOX_ALPN, timeout).await {
             Ok(connection) => connection,
             Err(error) => return Err(error),
         };

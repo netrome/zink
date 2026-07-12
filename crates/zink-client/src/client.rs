@@ -20,29 +20,61 @@ use crate::{blobs, hex, keystore, net};
 /// cursors have moved on and the message is socially dead.
 const OUTBOX_GIVE_UP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
+/// Tuning the edges inject at construction; `Default` fits production.
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    /// Deadline for reaching a relay. Long enough for a phone on flaky
+    /// cellular; tests exercising down-relay paths shrink it.
+    pub connect_timeout: Duration,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
 pub struct Client {
     device: DeviceKey,
     endpoint: Endpoint,
     state: ClientState,
+    config: ClientConfig,
 }
 
 impl Client {
     /// Open with an existing key (the CLI path — `keygen` created it).
     pub async fn open(key_path: &str) -> Result<Self, String> {
-        Self::with_device(keystore::load(key_path)?, key_path).await
+        Self::open_with(key_path, ClientConfig::default()).await
+    }
+
+    /// `open` with edge-injected tuning.
+    pub async fn open_with(key_path: &str, config: ClientConfig) -> Result<Self, String> {
+        Self::with_device(keystore::load(key_path)?, key_path, config).await
     }
 
     /// Open, creating the key on first run (the app path).
     pub async fn open_or_create(key_path: &str) -> Result<Self, String> {
-        Self::with_device(keystore::load_or_create(key_path)?, key_path).await
+        Self::with_device(
+            keystore::load_or_create(key_path)?,
+            key_path,
+            ClientConfig::default(),
+        )
+        .await
     }
 
-    async fn with_device(device: DeviceKey, key_path: &str) -> Result<Self, String> {
+    async fn with_device(
+        device: DeviceKey,
+        key_path: &str,
+        config: ClientConfig,
+    ) -> Result<Self, String> {
         let endpoint = net::bind_endpoint(&device).await?;
         Ok(Self {
             device,
             endpoint,
             state: ClientState::open(key_path),
+            config,
         })
     }
 
@@ -250,9 +282,17 @@ impl Client {
         encrypted_blobs: &[zink_protocol::EncryptedBlob],
         staging: &iroh_blobs::store::mem::MemStore,
     ) -> Result<(), String> {
-        net::deposit_with_retry(&self.endpoint, relay, envelope).await?;
+        net::deposit_with_retry(&self.endpoint, relay, envelope, self.config.connect_timeout)
+            .await?;
         if !encrypted_blobs.is_empty() {
-            blobs::push_blobs(&self.endpoint, relay, staging, encrypted_blobs).await?;
+            blobs::push_blobs(
+                &self.endpoint,
+                relay,
+                staging,
+                encrypted_blobs,
+                self.config.connect_timeout,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -322,8 +362,13 @@ impl Client {
         let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
         let mut received = Vec::new();
         for relay in relays {
-            let connection =
-                net::connect(&self.endpoint, relay, zink_protocol::MAILBOX_ALPN).await?;
+            let connection = net::connect(
+                &self.endpoint,
+                relay,
+                zink_protocol::MAILBOX_ALPN,
+                self.config.connect_timeout,
+            )
+            .await?;
             net::request(&connection, MailboxOp::Register).await?;
             received.extend(self.drain_connection(relay, &connection, &mut seen).await?);
         }
@@ -367,7 +412,13 @@ impl Client {
         on_new: &mut impl FnMut(Vec<Received>),
         backoff: &mut Duration,
     ) -> Result<(), String> {
-        let connection = net::connect(&self.endpoint, relay, zink_protocol::MAILBOX_ALPN).await?;
+        let connection = net::connect(
+            &self.endpoint,
+            relay,
+            zink_protocol::MAILBOX_ALPN,
+            self.config.connect_timeout,
+        )
+        .await?;
         net::request(&connection, MailboxOp::Register).await?;
         *backoff = Duration::from_secs(1);
         // Reconnect = the network is back: flush queued sends (§2), then
@@ -504,7 +555,9 @@ impl Client {
         }
         let mut last_error = String::from("no relay to fetch from");
         for relay in relays {
-            match blobs::fetch_encrypted(&self.endpoint, relay, hash).await {
+            match blobs::fetch_encrypted(&self.endpoint, relay, hash, self.config.connect_timeout)
+                .await
+            {
                 Ok(bytes) => {
                     let plaintext = envelope
                         .open_blob(&self.device, hash, &bytes)
@@ -633,8 +686,13 @@ impl Client {
     /// a record that names a relay where you have no mailbox is a lie.
     pub async fn register_at_home_relays(&self) -> Result<(), String> {
         for relay in self.state.home_relays() {
-            let connection =
-                net::connect(&self.endpoint, &relay, zink_protocol::MAILBOX_ALPN).await?;
+            let connection = net::connect(
+                &self.endpoint,
+                &relay,
+                zink_protocol::MAILBOX_ALPN,
+                self.config.connect_timeout,
+            )
+            .await?;
             net::request(&connection, MailboxOp::Register).await?;
         }
         Ok(())

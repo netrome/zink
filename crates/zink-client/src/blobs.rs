@@ -17,8 +17,9 @@ pub(crate) async fn push_blobs(
     relay: &str,
     staging: &MemStore,
     blobs: &[EncryptedBlob],
+    timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN).await?;
+    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout).await?;
     for blob in blobs {
         let hash = Hash::from_bytes(blob.hash.0);
         let push = PushRequest::new(hash, ChunkRangesSeq::from_ranges([ChunkRanges::all()]));
@@ -52,9 +53,10 @@ pub(crate) async fn fetch_encrypted(
     endpoint: &Endpoint,
     relay: &str,
     hash: &BlobHash,
+    timeout: std::time::Duration,
 ) -> Result<Vec<u8>, String> {
     let store = MemStore::new();
-    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN).await?;
+    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout).await?;
     let blob_hash = Hash::from_bytes(hash.0);
     store
         .remote()

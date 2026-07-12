@@ -33,6 +33,10 @@ A `Client` owns the device key, one iroh endpoint, and the on-disk state:
 
 ```rust
 Client::open(key_path)                        // load key (CLI keygen creates it)
+Client::open_with(key_path, ClientConfig)     // …with edge-injected tuning (e.g. the
+                                              // relay connect deadline; the CLI maps
+                                              // ZINK_CONNECT_TIMEOUT_MS onto it so the
+                                              // e2e suite's down-relay tests run fast)
 Client::open_or_create(key_path)              // app: silent first-run key creation
 client.send(&[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt  // seal → deposit per
                                               // distinct relay (retry) → push blobs

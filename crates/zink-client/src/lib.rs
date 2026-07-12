@@ -20,8 +20,8 @@ mod state;
 
 #[cfg(not(target_family = "wasm"))]
 pub use client::{
-    Client, Contact, ConversationSummary, FlushReport, HistoryMessage, Received, ReplyContacts,
-    SendReceipt,
+    Client, ClientConfig, Contact, ConversationSummary, FlushReport, HistoryMessage, Received,
+    ReplyContacts, SendReceipt,
 };
 #[cfg(target_family = "wasm")]
 pub use spike::spike_register;

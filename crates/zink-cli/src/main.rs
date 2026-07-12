@@ -22,7 +22,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use zink_client::{Client, Contact, Received, hex, keystore};
+use zink_client::{Client, ClientConfig, Contact, Received, hex, keystore};
 use zink_protocol::{BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey};
 
 #[tokio::main]
@@ -94,7 +94,7 @@ async fn my_record(args: &[String]) -> Result<(), String> {
         })
         .collect();
     let (flags, _) = parse_flags(&args)?;
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let name = optional(&flags, "--name")?.or_else(|| client.profile_name());
     let relays = {
         let given = values(&flags, "--relay");
@@ -128,7 +128,7 @@ async fn contact_add(args: &[String]) -> Result<(), String> {
         return Err(format!("exactly one ZINK:... payload expected\n{USAGE}"));
     };
     let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let petname = client.add_contact(&record, optional(&flags, "--name")?)?;
     println!("added contact {petname:?}");
     Ok(())
@@ -136,7 +136,7 @@ async fn contact_add(args: &[String]) -> Result<(), String> {
 
 async fn contacts(args: &[String]) -> Result<(), String> {
     let (flags, _) = parse_flags(args)?;
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let contacts = client.contacts()?;
     if contacts.is_empty() {
         println!("no contacts");
@@ -158,7 +158,7 @@ async fn contacts(args: &[String]) -> Result<(), String> {
 
 async fn send(args: &[String]) -> Result<(), String> {
     let (flags, positionals) = parse_flags(args)?;
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let contacts: Vec<Contact> = values(&flags, "--to")
         .iter()
         .map(|spec| {
@@ -209,7 +209,7 @@ async fn recv(args: &[String]) -> Result<(), String> {
     }
     let blobs_dir = optional(&flags, "--blobs-dir")?;
 
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let relays = {
         let given = values(&flags, "--relay");
         if given.is_empty() {
@@ -262,7 +262,7 @@ async fn save_blobs(client: &Client, message: &Received, dir: &str) -> Result<()
 /// List every stored conversation, labelled with the other participants.
 async fn conversations(args: &[String]) -> Result<(), String> {
     let (flags, _) = parse_flags(args)?;
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let summaries = client.conversations()?;
     if summaries.is_empty() {
         println!("no conversations");
@@ -299,7 +299,7 @@ async fn history(args: &[String]) -> Result<(), String> {
         ));
     };
     let blobs_dir = optional(&flags, "--blobs-dir")?;
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let conversation = resolve_conversation(&client, wanted)?;
     let contacts = client.contacts()?;
     let me = client.public_key();
@@ -342,7 +342,7 @@ async fn reply(args: &[String]) -> Result<(), String> {
             "exactly one conversation id (or prefix) and one text expected\n{USAGE}"
         ));
     };
-    let client = Client::open(&single(&flags, "--key")?).await?;
+    let client = open_client(&flags).await?;
     let conversation = resolve_conversation(&client, wanted)?;
     let resolved = client.reply_contacts(conversation)?;
     for key in &resolved.unknown {
@@ -380,7 +380,7 @@ async fn listen(args: &[String]) -> Result<(), String> {
     if !positionals.is_empty() {
         return Err(USAGE.to_string());
     }
-    let client = std::sync::Arc::new(Client::open(&single(&flags, "--key")?).await?);
+    let client = std::sync::Arc::new(open_client(&flags).await?);
     let relays = {
         let given = values(&flags, "--relay");
         if given.is_empty() {
@@ -490,6 +490,22 @@ fn blob_drafts(flags: &[(String, String)]) -> Result<Vec<BlobDraft>, String> {
             Ok(blobs)
         }
     }
+}
+
+/// Open the client at `--key`, honoring dev/test knobs from the
+/// environment — the config edge the lib deliberately doesn't have:
+/// `ZINK_CONNECT_TIMEOUT_MS` shrinks the relay-connect deadline (the e2e
+/// suite sets it so down-relay tests fail in milliseconds, not the
+/// production 10 s).
+async fn open_client(flags: &[(String, String)]) -> Result<Client, String> {
+    let mut config = ClientConfig::default();
+    if let Ok(ms) = std::env::var("ZINK_CONNECT_TIMEOUT_MS") {
+        let ms: u64 = ms
+            .parse()
+            .map_err(|e| format!("ZINK_CONNECT_TIMEOUT_MS: {e}"))?;
+        config.connect_timeout = std::time::Duration::from_millis(ms);
+    }
+    Client::open_with(&single(flags, "--key")?, config).await
 }
 
 /// `--flag value` pairs in order, plus positional args.

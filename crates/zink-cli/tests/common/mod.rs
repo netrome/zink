@@ -16,6 +16,10 @@ use zink_relay::store::InMemoryStore;
 pub fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_zink-cli"))
         .args(args)
+        // Down-relay tests should fail in milliseconds, not the production
+        // 10 s connect deadline. In-process relays answer in single-digit ms,
+        // so 500 ms has plenty of headroom for loaded CI.
+        .env("ZINK_CONNECT_TIMEOUT_MS", "500")
         .output()
         .expect("run zink-cli")
 }
