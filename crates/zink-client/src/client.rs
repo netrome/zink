@@ -900,29 +900,31 @@ impl Client {
         conversation: MessageId,
         from: iroh::EndpointAddr,
     ) -> Result<usize, String> {
-        // A hostile peer could feed an unbounded fake chain; bound the walk
-        // (shared across the backward and forward passes).
+        // A hostile peer could feed an unbounded fake chain; one budget
+        // bounds the whole walk — the forward pass gets what the backward
+        // pass didn't spend.
         const MAX_SYNC_FETCH: usize = 10_000;
         let connection =
             net::connect_addr(&self.endpoint, from, SYNC_ALPN, self.config.connect_timeout).await?;
-        let mut fetched = 0usize;
-        self.fill_backward(conversation, &connection, &mut fetched, MAX_SYNC_FETCH)
+        let backward = self
+            .fill_backward(conversation, &connection, MAX_SYNC_FETCH)
             .await?;
-        self.fill_forward(conversation, &connection, &mut fetched, MAX_SYNC_FETCH)
+        let forward = self
+            .fill_forward(conversation, &connection, MAX_SYNC_FETCH - backward)
             .await?;
-        Ok(fetched)
+        Ok(backward + forward)
     }
 
     /// The backward pass: fetch referenced-but-missing parents until the
-    /// stored slice is ancestor-closed (genesis reached) or the peer stops
-    /// yielding.
+    /// stored slice is ancestor-closed (genesis reached), the peer stops
+    /// yielding, or `budget` is spent. Returns the number fetched.
     async fn fill_backward(
         &self,
         conversation: MessageId,
         connection: &iroh::endpoint::Connection,
-        fetched: &mut usize,
-        cap: usize,
-    ) -> Result<(), String> {
+        budget: usize,
+    ) -> Result<usize, String> {
+        let mut fetched = 0usize;
         loop {
             let frontier = self.state.missing_ancestors(conversation);
             if frontier.is_empty() {
@@ -930,12 +932,12 @@ impl Client {
             }
             let mut progressed = false;
             for id in frontier {
-                if *fetched >= cap {
-                    tracing::warn!("sync hit the fetch cap; stopping");
-                    return Ok(());
+                if fetched >= budget {
+                    tracing::warn!("sync hit the fetch budget; stopping");
+                    return Ok(fetched);
                 }
                 if self.fetch_one(connection, id, conversation).await? {
-                    *fetched += 1;
+                    fetched += 1;
                     progressed = true;
                 }
             }
@@ -943,7 +945,7 @@ impl Client {
                 break; // this peer can't take us any closer to the genesis
             }
         }
-        Ok(())
+        Ok(fetched)
     }
 
     /// The forward pass (D0d): `get-successors` to learn children we lack —
@@ -952,13 +954,14 @@ impl Client {
     /// stored id (a fork can hang off any interior message); later rounds
     /// query only what the previous round fetched, so the walk converges.
     /// Chatty at one round-trip per id — fine at friend/family scale.
+    /// Returns the number fetched, at most `budget`.
     async fn fill_forward(
         &self,
         conversation: MessageId,
         connection: &iroh::endpoint::Connection,
-        fetched: &mut usize,
-        cap: usize,
-    ) -> Result<(), String> {
+        budget: usize,
+    ) -> Result<usize, String> {
+        let mut fetched = 0usize;
         let mut stored: BTreeSet<MessageId> = self
             .state
             .load_envelopes(conversation)
@@ -975,9 +978,9 @@ impl Client {
                     other => return Err(format!("unexpected sync response: {other:?}")),
                 };
                 for child in ids {
-                    if *fetched >= cap {
-                        tracing::warn!("sync hit the fetch cap; stopping");
-                        return Ok(());
+                    if fetched >= budget {
+                        tracing::warn!("sync hit the fetch budget; stopping");
+                        return Ok(fetched);
                     }
                     if stored.contains(&child) {
                         continue;
@@ -985,13 +988,13 @@ impl Client {
                     if self.fetch_one(connection, child, conversation).await? {
                         stored.insert(child);
                         learned.push(child);
-                        *fetched += 1;
+                        fetched += 1;
                     }
                 }
             }
             query = learned;
         }
-        Ok(())
+        Ok(fetched)
     }
 
     /// One `get` round-trip: fetch `id`, validate, store. `Ok(true)` iff a

@@ -410,6 +410,28 @@ on `keys.first()` needs revisiting at D2.
     one message from the phone and the drain auto-healed the full history, no
     explicit action. Incidentally also the recovery story for a lost/corrupted
     store: any peer holding the history restores it by messaging you.)*
+- [ ] **De1 · Structured errors in `zink-client` (pre-D1).** Replace the crate's
+  `Result<_, String>` with error enums (per flow or one crate enum with variants —
+  decide at implementation). Flagged in the post-C2 hardening review ("`String`
+  errors will want structured variants once the UI branches on failure kind");
+  the cost is now visible: tests assert on prose (`err.contains("no relay url")`),
+  and D1's UI genuinely branches ("re-exchange records" is a different UX than
+  "peer offline" or "not a contact"). Do it *before* D1 — a cross-cutting
+  conversion gets more expensive with every new caller. *Done when:* no
+  `Result<_, String>` remains in `zink-client`'s public API; error-case tests
+  match variants, not substrings; CLI/app render messages via `Display`.
+- [ ] **De2 · QAD endpoint in `zink-relay`.** The embedded iroh relay serves only
+  HTTP relaying (`quic: None`), so clients' first net-report waits out iroh's full
+  3 s `PROBES_TIMEOUT` before the endpoint reports online (measured: ~3.03 s of
+  the ~3.15 s relay-based e2e tests), and address discovery for holepunching is
+  degraded (disco-only — direct paths may silently fall back to relaying).
+  Enable `ServerConfig.quic` (QUIC address discovery, the STUN replacement):
+  needs a TLS 1.3 rustls config — investigate whether a self-signed cert
+  generated into the relay data dir satisfies iroh's QAD client (no domain/ACME,
+  consistent with the no-TLS-ops stance). Side effects: faster client startup,
+  better holepunch rates, and the two relay-based e2e tests drop to sub-second.
+  *Done when:* a client homing to the relay reports online well under 1 s and
+  the QAD probe succeeds in the net-report.
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
   petnames; `who-is-this` pull *(a peer request/response — depends on D0b connectivity)*;
   client-side trust ranking. *(Profile + petnames are largely already built from Stage C:
