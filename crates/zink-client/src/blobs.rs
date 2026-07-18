@@ -9,6 +9,7 @@ use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
 use zink_protocol::{BlobHash, EncryptedBlob};
 
+use crate::error::Error;
 use crate::net;
 
 /// Push each encrypted blob to one relay's cache, confirming every transfer.
@@ -18,7 +19,7 @@ pub(crate) async fn push_blobs(
     staging: &MemStore,
     blobs: &[EncryptedBlob],
     timeout: std::time::Duration,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout).await?;
     for blob in blobs {
         let hash = Hash::from_bytes(blob.hash.0);
@@ -27,20 +28,20 @@ pub(crate) async fn push_blobs(
             .remote()
             .execute_push(connection.clone(), push)
             .await
-            .map_err(|e| format!("push blob to {relay}: {e}"))?;
+            .map_err(|e| Error::Transport(format!("push blob to {relay}: {e}")))?;
         await_blob_complete(staging, &connection, hash).await?;
     }
     Ok(())
 }
 
 /// Stage encrypted blobs in a local in-memory store, ready for pushing.
-pub(crate) async fn stage(blobs: &[EncryptedBlob]) -> Result<MemStore, String> {
+pub(crate) async fn stage(blobs: &[EncryptedBlob]) -> Result<MemStore, Error> {
     let staging = MemStore::new();
     for blob in blobs {
         staging
             .add_bytes(blob.bytes.clone())
             .await
-            .map_err(|e| format!("stage blob: {e}"))?;
+            .map_err(|e| Error::Storage(format!("stage blob: {e}")))?;
     }
     Ok(staging)
 }
@@ -54,7 +55,7 @@ pub(crate) async fn fetch_encrypted(
     relay: &str,
     hash: &BlobHash,
     timeout: std::time::Duration,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let store = MemStore::new();
     let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout).await?;
     let blob_hash = Hash::from_bytes(hash.0);
@@ -62,13 +63,13 @@ pub(crate) async fn fetch_encrypted(
         .remote()
         .fetch(connection, blob_hash)
         .await
-        .map_err(|e| format!("fetch blob: {e}"))?;
+        .map_err(|e| Error::Transport(format!("fetch blob: {e}")))?;
     store
         .blobs()
         .get_bytes(blob_hash)
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|e| format!("read fetched blob: {e}"))
+        .map_err(|e| Error::Transport(format!("read fetched blob: {e}")))
 }
 
 /// Push completion is not acknowledged in-band (iroh-blobs 0.103), so
@@ -81,7 +82,7 @@ async fn await_blob_complete(
     store: &MemStore,
     connection: &Connection,
     hash: Hash,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut bitfields = std::pin::pin!(
         store
             .remote()
@@ -89,11 +90,13 @@ async fn await_blob_complete(
     );
     let mut current = iroh_blobs::api::proto::Bitfield::empty();
     while let Some(item) = bitfields.next().await {
-        let item = item.map_err(|e| format!("observe blob: {e}"))?;
+        let item = item.map_err(|e| Error::Transport(format!("observe blob: {e}")))?;
         current.update(&item);
         if current.is_complete() {
             return Ok(());
         }
     }
-    Err("relay never confirmed the blob upload".to_string())
+    Err(Error::Transport(
+        "relay never confirmed the blob upload".to_string(),
+    ))
 }

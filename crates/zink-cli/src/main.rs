@@ -582,7 +582,7 @@ async fn open_client(flags: &[(String, String)]) -> Result<Client, String> {
             .map_err(|e| format!("ZINK_CONNECT_TIMEOUT_MS: {e}"))?;
         config.connect_timeout = std::time::Duration::from_millis(ms);
     }
-    Client::open_with(&single(flags, "--key")?, config).await
+    Ok(Client::open_with(&single(flags, "--key")?, config).await?)
 }
 
 /// `--flag value` pairs in order, plus positional args.

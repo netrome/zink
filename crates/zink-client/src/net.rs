@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
+use crate::error::Error;
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
 use zink_protocol::{
@@ -24,7 +25,7 @@ use zink_protocol::{
 pub(crate) async fn bind_endpoint(
     device: &DeviceKey,
     home_relays: &[RelayUrl],
-) -> Result<Endpoint, String> {
+) -> Result<Endpoint, Error> {
     let mut builder =
         Endpoint::builder(presets::Minimal).secret_key(SecretKey::from_bytes(&device.seed()));
     if !home_relays.is_empty() {
@@ -34,20 +35,21 @@ pub(crate) async fn bind_endpoint(
     builder
         .bind()
         .await
-        .map_err(|e| format!("bind endpoint: {e}"))
+        .map_err(|e| Error::Transport(format!("bind endpoint: {e}")))
 }
 
 /// Parse an iroh relay URL from a `RelayEntry.relay_url` value.
-pub(crate) fn parse_relay_url(url: &str) -> Result<RelayUrl, String> {
-    RelayUrl::from_str(url).map_err(|e| format!("relay url {url}: {e}"))
+pub(crate) fn parse_relay_url(url: &str) -> Result<RelayUrl, Error> {
+    RelayUrl::from_str(url).map_err(|e| Error::InvalidInput(format!("relay url {url}: {e}")))
 }
 
 /// A peer address from its device key + its relay URLs (from its
 /// ContactRecord): iroh routes initial signaling via the peer's relay, then
 /// holepunches to a direct path or falls back to relaying. The device key
 /// IS the endpoint key, so no lookup service is involved.
-pub(crate) fn peer_addr(key: &PublicKey, relay_urls: &[RelayUrl]) -> Result<EndpointAddr, String> {
-    let id = EndpointId::from_bytes(&key.0).map_err(|e| format!("peer endpoint id: {e}"))?;
+pub(crate) fn peer_addr(key: &PublicKey, relay_urls: &[RelayUrl]) -> Result<EndpointAddr, Error> {
+    let id = EndpointId::from_bytes(&key.0)
+        .map_err(|e| Error::InvalidInput(format!("peer endpoint id: {e}")))?;
     let mut addr = EndpointAddr::new(id);
     for url in relay_urls {
         addr = addr.with_relay_url(url.clone());
@@ -58,13 +60,15 @@ pub(crate) fn peer_addr(key: &PublicKey, relay_urls: &[RelayUrl]) -> Result<Endp
 /// `<endpoint-id>@<ip:port>`, as printed by `zink-relay`. Tolerates the
 /// full relay spec `<endpoint-id>@<ip:port>#<relay-url>` — mailbox dialing
 /// only needs the part before the `#`.
-pub(crate) fn parse_relay(spec: &str) -> Result<EndpointAddr, String> {
+pub(crate) fn parse_relay(spec: &str) -> Result<EndpointAddr, Error> {
     let spec = spec.split_once('#').map_or(spec, |(dial, _)| dial);
     let (id, sock) = spec
         .split_once('@')
-        .ok_or("relay must be <endpoint-id>@<ip:port>")?;
-    let id = EndpointId::from_str(id).map_err(|e| format!("relay endpoint id: {e}"))?;
-    let sock = SocketAddr::from_str(sock).map_err(|e| format!("relay socket addr: {e}"))?;
+        .ok_or_else(|| Error::InvalidInput("relay must be <endpoint-id>@<ip:port>".into()))?;
+    let id = EndpointId::from_str(id)
+        .map_err(|e| Error::InvalidInput(format!("relay endpoint id: {e}")))?;
+    let sock = SocketAddr::from_str(sock)
+        .map_err(|e| Error::InvalidInput(format!("relay socket addr: {e}")))?;
     Ok(EndpointAddr::new(id).with_ip_addr(sock))
 }
 
@@ -77,10 +81,10 @@ pub(crate) async fn connect(
     relay: &str,
     alpn: &[u8],
     timeout: std::time::Duration,
-) -> Result<Connection, String> {
+) -> Result<Connection, Error> {
     connect_addr(endpoint, parse_relay(relay)?, alpn, timeout)
         .await
-        .map_err(|e| format!("connect to {relay}: {e}"))
+        .map_err(|e| Error::Unreachable(format!("connect to {relay}: {e}")))
 }
 
 /// Connect to an already-resolved `EndpointAddr` — used for peer sync, where a
@@ -91,54 +95,53 @@ pub(crate) async fn connect_addr(
     addr: EndpointAddr,
     alpn: &[u8],
     timeout: std::time::Duration,
-) -> Result<Connection, String> {
+) -> Result<Connection, Error> {
     n0_future::time::timeout(timeout, endpoint.connect(addr, alpn))
         .await
-        .map_err(|_| "timed out".to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|_| Error::Unreachable("timed out".to_string()))?
+        .map_err(|e| Error::Unreachable(e.to_string()))
 }
 
 pub(crate) async fn request(
     connection: &Connection,
     op: MailboxOp,
-) -> Result<MailboxResult, String> {
+) -> Result<MailboxResult, Error> {
     let (mut send, mut recv) = connection
         .open_bi()
         .await
-        .map_err(|e| format!("open stream: {e}"))?;
+        .map_err(|e| Error::Transport(format!("open stream: {e}")))?;
     send.write_all(&MailboxRequest::new(op).to_bytes())
         .await
-        .map_err(|e| format!("send request: {e}"))?;
-    send.finish().map_err(|e| format!("finish stream: {e}"))?;
+        .map_err(|e| Error::Transport(format!("send request: {e}")))?;
+    send.finish()
+        .map_err(|e| Error::Transport(format!("finish stream: {e}")))?;
     let bytes = recv
         .read_to_end(MAX_RESPONSE_BYTES)
         .await
-        .map_err(|e| format!("read response: {e}"))?;
+        .map_err(|e| Error::Transport(format!("read response: {e}")))?;
     Ok(MailboxResponse::try_from_bytes(&bytes)
-        .map_err(|e| format!("decode response: {e}"))?
+        .map_err(Error::Decode)?
         .result)
 }
 
 /// One peer sync round-trip on `SYNC_ALPN` (same one-request-per-bi-stream
 /// framing as the mailbox). The connection is to a *peer*, not a relay.
-pub(crate) async fn sync_request(
-    connection: &Connection,
-    op: SyncOp,
-) -> Result<SyncResult, String> {
+pub(crate) async fn sync_request(connection: &Connection, op: SyncOp) -> Result<SyncResult, Error> {
     let (mut send, mut recv) = connection
         .open_bi()
         .await
-        .map_err(|e| format!("open stream: {e}"))?;
+        .map_err(|e| Error::Transport(format!("open stream: {e}")))?;
     send.write_all(&SyncRequest::new(op).to_bytes())
         .await
-        .map_err(|e| format!("send request: {e}"))?;
-    send.finish().map_err(|e| format!("finish stream: {e}"))?;
+        .map_err(|e| Error::Transport(format!("send request: {e}")))?;
+    send.finish()
+        .map_err(|e| Error::Transport(format!("finish stream: {e}")))?;
     let bytes = recv
         .read_to_end(MAX_SYNC_RESPONSE_BYTES)
         .await
-        .map_err(|e| format!("read response: {e}"))?;
+        .map_err(|e| Error::Transport(format!("read response: {e}")))?;
     Ok(SyncResponse::try_from_bytes(&bytes)
-        .map_err(|e| format!("decode response: {e}"))?
+        .map_err(Error::Decode)?
         .result)
 }
 
@@ -152,7 +155,7 @@ pub(crate) async fn deposit_with_retry(
     relay: &str,
     envelope: &MessageEnvelope,
     timeout: std::time::Duration,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut last_error = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
@@ -167,11 +170,15 @@ pub(crate) async fn deposit_with_retry(
         };
         match request(&connection, deposit).await {
             Ok(MailboxResult::Deposited { .. }) => return Ok(()),
-            Ok(other) => return Err(format!("unexpected response from {relay}: {other:?}")),
-            Err(error) => last_error = error,
+            Ok(other) => {
+                return Err(Error::UnexpectedResponse(format!(
+                    "from {relay}: {other:?}"
+                )));
+            }
+            Err(error) => last_error = error.to_string(),
         }
     }
-    Err(format!(
+    Err(Error::Transport(format!(
         "deposit to {relay} failed after 3 attempts: {last_error}"
-    ))
+    )))
 }

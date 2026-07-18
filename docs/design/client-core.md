@@ -114,6 +114,12 @@ not a contract.
   exchange are C2. Since D0b an entry pairs the mailbox dial string with the same
   service's iroh relay URL (`RelayEntry`); the resolved `Contact` used by sends
   carries the mailbox strings, the relay URL feeds dial-by-key.
+- **Errors are one crate-wide enum (`zink_client::Error`, De1).** Precise variants
+  where an edge or test branches (`NoRelayUrl`, `NotAContact`, `ProfileIncomplete`,
+  …), kind-grouped variants with a human payload elsewhere (`Storage`, `Transport`,
+  …), `#[from]` pass-through for the protocol's typed errors. Edges that speak
+  `Result<_, String>` convert at the boundary via `From<Error> for String`
+  (Display) — presentation stays at the edge.
 - **Blob cache (C3a): ciphertext at rest.** `<key-file>.state/blobs/<hash-hex>` holds
   encrypted blobs exactly as relays do; every read re-verifies against the referencing
   envelope (`open_blob`), so the cache is trusted no more than a relay. Own blobs are

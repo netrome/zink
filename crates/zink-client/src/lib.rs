@@ -8,6 +8,7 @@
 mod blobs;
 #[cfg(not(target_family = "wasm"))]
 mod client;
+mod error;
 pub mod hex;
 #[cfg(not(target_family = "wasm"))]
 pub mod keystore;
@@ -25,5 +26,6 @@ pub use client::{
     Client, ClientConfig, Contact, ConversationSummary, FlushReport, HistoryMessage, Received,
     ReplyContacts, SendReceipt,
 };
+pub use error::Error;
 #[cfg(target_family = "wasm")]
 pub use spike::spike_register;

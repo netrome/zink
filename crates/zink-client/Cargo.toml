@@ -8,6 +8,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 iroh = { version = "1.0.2", default-features = false, features = ["tls-ring"] }
+# Error-enum derive (De1) — derive-only, no runtime deps, wasm-clean.
+thiserror = "2"
 tracing = "0.1.44"
 zink-protocol = { path = "../zink-protocol" }
 

@@ -169,7 +169,7 @@ async fn add_contact(
 ) -> Result<String, String> {
     let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
     let client = client(&app, &managed).await?;
-    client.add_contact(&record, petname.filter(|name| !name.trim().is_empty()))
+    Ok(client.add_contact(&record, petname.filter(|name| !name.trim().is_empty()))?)
 }
 
 /// The conversation list, rendered from the stored DAG (not from a recv).

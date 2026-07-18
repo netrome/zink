@@ -25,6 +25,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use crate::error::Error;
 use zink_protocol::{
     BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey, RelayEntry,
 };
@@ -52,10 +53,11 @@ impl ClientState {
         &self,
         participants: &BTreeSet<PublicKey>,
         conversation: MessageId,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let path = self.participants_file(participants);
         create_parent(&path)?;
-        write_atomic(&path, &conversation.0).map_err(|e| format!("write {path:?}: {e}"))
+        write_atomic(&path, &conversation.0)
+            .map_err(|e| Error::Storage(format!("write {path:?}: {e}")))
     }
 
     /// Persist an envelope under its conversation. Idempotent (the file
@@ -64,20 +66,22 @@ impl ClientState {
         &self,
         conversation: MessageId,
         envelope: &MessageEnvelope,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let path = self
             .conversation_dir(conversation)
             .join(format!("{}.env", hex(&envelope.id().0)));
         create_parent(&path)?;
-        write_atomic(&path, &envelope.to_bytes()).map_err(|e| format!("write {path:?}: {e}"))
+        write_atomic(&path, &envelope.to_bytes())
+            .map_err(|e| Error::Storage(format!("write {path:?}: {e}")))
     }
 
     /// All decodable envelopes stored under a conversation, unordered. A
     /// damaged file is skipped with a warning, never fatal: the DAG then
     /// honestly reports the hole as a missing parent / seq gap.
-    pub fn load_envelopes(&self, conversation: MessageId) -> Result<Vec<MessageEnvelope>, String> {
+    pub fn load_envelopes(&self, conversation: MessageId) -> Result<Vec<MessageEnvelope>, Error> {
         let dir = self.conversation_dir(conversation);
-        let entries = std::fs::read_dir(&dir).map_err(|e| format!("read {dir:?}: {e}"))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| Error::Storage(format!("read {dir:?}: {e}")))?;
         let mut envelopes = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
@@ -101,12 +105,14 @@ impl ClientState {
         &self,
         conversation: MessageId,
         message: MessageId,
-    ) -> Result<MessageEnvelope, String> {
+    ) -> Result<MessageEnvelope, Error> {
         let path = self
             .conversation_dir(conversation)
             .join(format!("{}.env", hex(&message.0)));
-        let bytes = std::fs::read(&path).map_err(|e| format!("read {path:?}: {e}"))?;
-        MessageEnvelope::try_from_bytes(&bytes).map_err(|e| format!("decode {path:?}: {e}"))
+        let bytes =
+            std::fs::read(&path).map_err(|e| Error::Storage(format!("read {path:?}: {e}")))?;
+        MessageEnvelope::try_from_bytes(&bytes)
+            .map_err(|e| Error::Storage(format!("decode {path:?}: {e}")))
     }
 
     /// Every conversation with stored envelopes, sorted by id (the caller
@@ -131,7 +137,7 @@ impl ClientState {
     /// Rebuild the DAG from the stored envelopes. Order on disk is
     /// irrelevant — the store accepts children before parents. Only a
     /// missing genesis is unrecoverable (there is no root to build on).
-    pub fn load_dag(&self, conversation: MessageId) -> Result<ConversationDag, String> {
+    pub fn load_dag(&self, conversation: MessageId) -> Result<ConversationDag, Error> {
         let mut cores: Vec<_> = self
             .load_envelopes(conversation)?
             .into_iter()
@@ -141,13 +147,13 @@ impl ClientState {
             .iter()
             .position(|core| core.conversation.is_none())
             .ok_or_else(|| {
-                format!(
+                Error::Conversation(format!(
                     "conversation {} has no genesis on disk",
                     hex(&conversation.0)
-                )
+                ))
             })?;
         let mut dag = ConversationDag::new(cores.swap_remove(genesis_at))
-            .map_err(|e| format!("stored genesis invalid: {e}"))?;
+            .map_err(|e| Error::Conversation(format!("stored genesis invalid: {e}")))?;
         for core in cores {
             if let Err(e) = dag.insert(core) {
                 tracing::warn!(error = %e, "skipping invalid stored message");
@@ -201,10 +207,10 @@ impl ClientState {
 
     /// Cache a blob as fetched/produced — encrypted, keyed by its hash.
     /// Idempotent (content-addressed: same hash ⇒ same bytes).
-    pub fn save_blob(&self, hash: &BlobHash, bytes: &[u8]) -> Result<(), String> {
+    pub fn save_blob(&self, hash: &BlobHash, bytes: &[u8]) -> Result<(), Error> {
         let path = self.blob_path(hash);
         create_parent(&path)?;
-        write_atomic(&path, bytes).map_err(|e| format!("write {path:?}: {e}"))
+        write_atomic(&path, bytes).map_err(|e| Error::Storage(format!("write {path:?}: {e}")))
     }
 
     /// A cached encrypted blob, if present. The caller verifies + decrypts
@@ -227,11 +233,12 @@ impl ClientState {
         relay: &str,
         conversation: MessageId,
         created_ms: u64,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let path = self.outbox_path(message, relay);
         create_parent(&path)?;
         let content = format!("{relay}\n{}\n{created_ms}\n", hex(&conversation.0));
-        write_atomic(&path, content.as_bytes()).map_err(|e| format!("write {path:?}: {e}"))
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write {path:?}: {e}")))
     }
 
     /// Delivery to `relay` succeeded — drop the entry. Missing is fine
@@ -284,16 +291,17 @@ impl ClientState {
         ))
     }
 
-    pub fn save_profile(&self, name: &str, relays: &[RelayEntry]) -> Result<(), String> {
+    pub fn save_profile(&self, name: &str, relays: &[RelayEntry]) -> Result<(), Error> {
         let name_path = self.root.join("profile.name");
         create_parent(&name_path)?;
-        write_atomic(&name_path, name.as_bytes()).map_err(|e| format!("write profile: {e}"))?;
+        write_atomic(&name_path, name.as_bytes())
+            .map_err(|e| Error::Storage(format!("write profile: {e}")))?;
         let specs: Vec<String> = relays.iter().map(RelayEntry::to_spec).collect();
         write_atomic(
             &self.root.join("profile.relays"),
             specs.join("\n").as_bytes(),
         )
-        .map_err(|e| format!("write relays: {e}"))
+        .map_err(|e| Error::Storage(format!("write relays: {e}")))
     }
 
     pub fn profile_name(&self) -> Option<String> {
@@ -322,17 +330,22 @@ impl ClientState {
 
     /// Store a contact under a petname. The record is kept in wire form;
     /// the petname is a sibling file (local convention, never protocol).
-    pub fn save_contact(&self, petname: &str, record: &ContactRecord) -> Result<(), String> {
-        let stem = self.contact_stem(record.keys.first().ok_or("record has no keys")?);
+    pub fn save_contact(&self, petname: &str, record: &ContactRecord) -> Result<(), Error> {
+        let stem = self.contact_stem(
+            record
+                .keys
+                .first()
+                .ok_or_else(|| Error::InvalidRecord("record has no keys".into()))?,
+        );
         create_parent(&stem.with_extension("record"))?;
         write_atomic(&stem.with_extension("record"), &record.to_bytes())
-            .map_err(|e| format!("write contact: {e}"))?;
+            .map_err(|e| Error::Storage(format!("write contact: {e}")))?;
         write_atomic(&stem.with_extension("name"), petname.as_bytes())
-            .map_err(|e| format!("write petname: {e}"))
+            .map_err(|e| Error::Storage(format!("write petname: {e}")))
     }
 
     /// All stored contacts as `(petname, record)`, petname-sorted.
-    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, String> {
+    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, Error> {
         let dir = self.root.join("contacts");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return Ok(Vec::new());
@@ -410,9 +423,9 @@ fn parse_outbox_entry(path: &std::path::Path) -> Option<OutboxEntry> {
     })
 }
 
-fn create_parent(path: &std::path::Path) -> Result<(), String> {
+fn create_parent(path: &std::path::Path) -> Result<(), Error> {
     let parent = path.parent().expect("state paths always have a parent");
-    std::fs::create_dir_all(parent).map_err(|e| format!("create {parent:?}: {e}"))
+    std::fs::create_dir_all(parent).map_err(|e| Error::Storage(format!("create {parent:?}: {e}")))
 }
 
 /// Monotonic per-process counter so each `write_atomic` gets its own temp

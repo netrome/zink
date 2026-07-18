@@ -6,21 +6,24 @@
 use rand_core::{OsRng, RngCore};
 use zink_protocol::DeviceKey;
 
+use crate::error::Error;
 use crate::hex;
 
-pub fn load(path: &str) -> Result<DeviceKey, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("read key file {path}: {e}"))?;
-    Ok(DeviceKey::from_seed(hex::parse32(content.trim())?))
+pub fn load(path: &str) -> Result<DeviceKey, Error> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| Error::Keystore(format!("read key file {path}: {e}")))?;
+    let seed = hex::parse32(content.trim())
+        .map_err(|e| Error::Keystore(format!("key file {path}: {e}")))?;
+    Ok(DeviceKey::from_seed(seed))
 }
 
 /// Generate a fresh key and write it owner-only. Overwrites — the CLI's
 /// `keygen` is an explicit act.
-pub fn create(path: &str) -> Result<DeviceKey, String> {
+pub fn create(path: &str) -> Result<DeviceKey, Error> {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     write_private(path.as_ref(), hex::encode(&seed).as_bytes())
-        .map_err(|e| format!("write {path}: {e}"))?;
+        .map_err(|e| Error::Keystore(format!("write {path}: {e}")))?;
     Ok(DeviceKey::from_seed(seed))
 }
 
@@ -47,7 +50,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// First-run-friendly: load if present, silently create otherwise (the app
 /// path — a phone has no `keygen` step).
-pub fn load_or_create(path: &str) -> Result<DeviceKey, String> {
+pub fn load_or_create(path: &str) -> Result<DeviceKey, Error> {
     if std::path::Path::new(path).exists() {
         load(path)
     } else {

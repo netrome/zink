@@ -304,8 +304,8 @@ content-addressing pinned, no panics on hostile input. Fixed in this pass:
   unsupported-version envelopes (SPEC §10).
 Deferred with homes above: MEDIUM-3 → C4, MEDIUM-4 + render-from-DAG → C3. Also noted:
 `zink-client` has no unit tests of its own (only e2e coverage); `String` errors will
-want structured variants once the UI branches on failure kind; contact identity keyed
-on `keys.first()` needs revisiting at D2.
+want structured variants once the UI branches on failure kind (✅ resolved — De1,
+2026-07-19); contact identity keyed on `keys.first()` needs revisiting at D2.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
@@ -410,7 +410,7 @@ on `keys.first()` needs revisiting at D2.
     one message from the phone and the drain auto-healed the full history, no
     explicit action. Incidentally also the recovery story for a lost/corrupted
     store: any peer holding the history restores it by messaging you.)*
-- [ ] **De1 · Structured errors in `zink-client` (pre-D1).** Replace the crate's
+- [x] **De1 · Structured errors in `zink-client` (pre-D1).** Replace the crate's
   `Result<_, String>` with error enums (per flow or one crate enum with variants —
   decide at implementation). Flagged in the post-C2 hardening review ("`String`
   errors will want structured variants once the UI branches on failure kind");
@@ -420,6 +420,18 @@ on `keys.first()` needs revisiting at D2.
   conversion gets more expensive with every new caller. *Done when:* no
   `Result<_, String>` remains in `zink-client`'s public API; error-case tests
   match variants, not substrings; CLI/app render messages via `Display`.
+  ✅ *(2026-07-19: one crate-wide `zink_client::Error` (thiserror v2 — new dep,
+  user-approved: derive-only, wasm-clean). Shape: precise variants for what
+  edges/tests branch on (`NoRelayUrl`, `NotAContact`, `PetnameCollision`,
+  `ProfileIncomplete`, `NoRecipients`, `AllRelaysPending`, `InvalidRecord`),
+  kind-grouped variants with human payloads for the rest (`Keystore`, `Storage`,
+  `Conversation`, `InvalidInput`, `Unreachable`, `Transport`,
+  `UnexpectedResponse`, `BlobUnavailable`), `#[from]` pass-through for the
+  protocol's typed errors (`CryptoError`/`OpenError`/`DecodeError`). Edge shim:
+  `From<Error> for String` renders via `Display`, so the CLI's and app's
+  `Result<_, String>` command boundaries kept working with `?` — only two
+  tail-position returns needed `Ok(…?)`. The NoRelayUrl test now matches the
+  variant. Note: `Received.body` already carried typed `OpenError` — unchanged.)*
 - [ ] **De2 · QAD endpoint in `zink-relay`.** The embedded iroh relay serves only
   HTTP relaying (`quic: None`), so clients' first net-report waits out iroh's full
   3 s `PROBES_TIMEOUT` before the endpoint reports online (measured: ~3.03 s of

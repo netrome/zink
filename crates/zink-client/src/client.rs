@@ -12,6 +12,7 @@ use zink_protocol::{
     RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
 };
 
+use crate::error::Error;
 use crate::state::ClientState;
 use crate::{blobs, hex, keystore, net};
 
@@ -48,17 +49,17 @@ pub struct Client {
 
 impl Client {
     /// Open with an existing key (the CLI path — `keygen` created it).
-    pub async fn open(key_path: &str) -> Result<Self, String> {
+    pub async fn open(key_path: &str) -> Result<Self, Error> {
         Self::open_with(key_path, ClientConfig::default()).await
     }
 
     /// `open` with edge-injected tuning.
-    pub async fn open_with(key_path: &str, config: ClientConfig) -> Result<Self, String> {
+    pub async fn open_with(key_path: &str, config: ClientConfig) -> Result<Self, Error> {
         Self::with_device(keystore::load(key_path)?, key_path, config).await
     }
 
     /// Open, creating the key on first run (the app path).
-    pub async fn open_or_create(key_path: &str) -> Result<Self, String> {
+    pub async fn open_or_create(key_path: &str) -> Result<Self, Error> {
         Self::with_device(
             keystore::load_or_create(key_path)?,
             key_path,
@@ -71,7 +72,7 @@ impl Client {
         device: DeviceKey,
         key_path: &str,
         config: ClientConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Error> {
         // State first: the endpoint homes to the profile's relay URLs (D0b),
         // and iroh fixes the relay transport at bind time — so a relay added
         // to the profile takes effect for the peer layer on the next open.
@@ -110,9 +111,12 @@ impl Client {
     /// device reaches us on `SYNC_ALPN` to backfill history when it knows
     /// our address explicitly (same-LAN / dev tooling). The deployment path
     /// is dial-by-key via our home relay (`backfill_by_key`, D0b).
-    pub fn sync_address(&self) -> Result<String, String> {
+    pub fn sync_address(&self) -> Result<String, Error> {
         let addr = self.endpoint.addr();
-        let sock = addr.ip_addrs().next().ok_or("no bound address yet")?;
+        let sock = addr
+            .ip_addrs()
+            .next()
+            .ok_or_else(|| Error::Transport("no bound address yet".into()))?;
         Ok(format!("{}@{}", self.endpoint.id(), sock))
     }
 
@@ -128,9 +132,9 @@ impl Client {
         contacts: &[Contact],
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
-    ) -> Result<SendReceipt, String> {
+    ) -> Result<SendReceipt, Error> {
         if contacts.is_empty() {
-            return Err("at least one recipient required".into());
+            return Err(Error::NoRecipients);
         }
         let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
         let participants: BTreeSet<PublicKey> = recipients
@@ -166,9 +170,9 @@ impl Client {
         contacts: &[Contact],
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
-    ) -> Result<SendReceipt, String> {
+    ) -> Result<SendReceipt, Error> {
         if contacts.is_empty() {
-            return Err("at least one recipient required".into());
+            return Err(Error::NoRecipients);
         }
         let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
         let draft = self.threaded_draft(conversation, recipients)?;
@@ -181,7 +185,7 @@ impl Client {
     /// no stored record are returned as `unknown` — there is no relay to
     /// reach them at, so a reply is best-effort by design (the edge decides
     /// how loudly to say so).
-    pub fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, String> {
+    pub fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, Error> {
         let me = self.device.public();
         let participants: BTreeSet<PublicKey> = self
             .state
@@ -221,7 +225,7 @@ impl Client {
         &self,
         conversation: MessageId,
         recipients: Vec<PublicKey>,
-    ) -> Result<MessageDraft, String> {
+    ) -> Result<MessageDraft, Error> {
         let dag = self.state.load_dag(conversation)?;
         Ok(MessageDraft {
             conversation: Some(conversation),
@@ -248,7 +252,7 @@ impl Client {
         blob_drafts: Vec<BlobDraft>,
         contacts: &[Contact],
         record_mapping: Option<&BTreeSet<PublicKey>>,
-    ) -> Result<SendReceipt, String> {
+    ) -> Result<SendReceipt, Error> {
         // NOTE: the outbox is NOT flushed here. Flushing on the send path
         // coupled a new message's latency to the health of the *backlog* —
         // a slow/stuck queued delivery delayed every fresh send. The backlog
@@ -259,8 +263,8 @@ impl Client {
         draft.blobs = blob_drafts;
         let seq = draft.seq;
         let existing = draft.conversation;
-        let sealed = MessageEnvelope::seal(draft, &self.device, &mut OsRng)
-            .map_err(|e| format!("seal message: {e}"))?;
+        let sealed =
+            MessageEnvelope::seal(draft, &self.device, &mut OsRng).map_err(Error::Crypto)?;
         let id = sealed.envelope.id();
         let conversation = existing.unwrap_or(id);
         self.state.store_envelope(conversation, &sealed.envelope)?;
@@ -294,14 +298,12 @@ impl Client {
                 Err(error) => {
                     tracing::warn!(relay, %error, "delivery failed; queued for retry");
                     pending_relays += 1;
-                    last_error = error;
+                    last_error = error.to_string();
                 }
             }
         }
         if pending_relays == relays.len() && !relays.is_empty() {
-            return Err(format!(
-                "no relay took the deposit — message queued for retry ({last_error})"
-            ));
+            return Err(Error::AllRelaysPending(last_error));
         }
         Ok(SendReceipt {
             id,
@@ -321,7 +323,7 @@ impl Client {
         envelope: &MessageEnvelope,
         encrypted_blobs: &[zink_protocol::EncryptedBlob],
         staging: &iroh_blobs::store::mem::MemStore,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         net::deposit_with_retry(&self.endpoint, relay, envelope, self.config.connect_timeout)
             .await?;
         if !encrypted_blobs.is_empty() {
@@ -341,7 +343,7 @@ impl Client {
     /// blob pushes by hash). Entries older than the give-up window are left
     /// in place unretried — the relay's retention has expired, the message
     /// stays surfaced as pending/undelivered (deleting it is not our call).
-    pub async fn flush_outbox(&self) -> Result<FlushReport, String> {
+    pub async fn flush_outbox(&self) -> Result<FlushReport, Error> {
         let mut report = FlushReport::default();
         let now = now_ms();
         for entry in self.state.outbox() {
@@ -395,7 +397,7 @@ impl Client {
     /// Drain every relay: register, then fetch page-by-page, dedup by
     /// message id, open, and remember what verified; ack each page at its
     /// own cursor.
-    pub async fn recv(&self, relays: &[String]) -> Result<Vec<Received>, String> {
+    pub async fn recv(&self, relays: &[String]) -> Result<Vec<Received>, Error> {
         let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
         let mut received = Vec::new();
         for relay in relays {
@@ -461,7 +463,7 @@ impl Client {
         relay: &str,
         on_new: &mut impl FnMut(Vec<Received>),
         backoff: &mut Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let connection = net::connect(
             &self.endpoint,
             relay,
@@ -499,7 +501,7 @@ impl Client {
             connection
                 .accept_uni()
                 .await
-                .map_err(|e| format!("connection lost: {e}"))?;
+                .map_err(|e| Error::Transport(format!("connection lost: {e}")))?;
             let started = std::time::Instant::now();
             let received = self
                 .drain_connection(relay, &connection, &mut BTreeSet::new())
@@ -528,13 +530,17 @@ impl Client {
         relay: &str,
         connection: &iroh::endpoint::Connection,
         seen: &mut BTreeSet<[u8; 32]>,
-    ) -> Result<Vec<Received>, String> {
+    ) -> Result<Vec<Received>, Error> {
         let mut received = Vec::new();
         let mut after = 0u64;
         loop {
             let items = match net::request(connection, MailboxOp::Fetch { after }).await? {
                 MailboxResult::Envelopes { items } => items,
-                other => return Err(format!("unexpected response from {relay}: {other:?}")),
+                other => {
+                    return Err(Error::UnexpectedResponse(format!(
+                        "from {relay}: {other:?}"
+                    )));
+                }
             };
             if items.is_empty() {
                 break;
@@ -587,11 +593,7 @@ impl Client {
     /// Fetch + verify + decrypt one blob referenced by a received message:
     /// the local cache first, then the relay it arrived through (caching
     /// the ciphertext for the next time).
-    pub async fn fetch_blob(
-        &self,
-        received: &Received,
-        hash: &BlobHash,
-    ) -> Result<Vec<u8>, String> {
+    pub async fn fetch_blob(&self, received: &Received, hash: &BlobHash) -> Result<Vec<u8>, Error> {
         self.open_cached_or_fetch(
             &received.envelope,
             hash,
@@ -608,7 +610,7 @@ impl Client {
         conversation: MessageId,
         message: MessageId,
         hash: &BlobHash,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, Error> {
         let envelope = self.state.load_envelope(conversation, message)?;
         self.open_cached_or_fetch(&envelope, hash, &self.state.home_relays())
             .await
@@ -624,7 +626,7 @@ impl Client {
         envelope: &MessageEnvelope,
         hash: &BlobHash,
         relays: &[String],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, Error> {
         if let Some(bytes) = self.state.load_blob(hash)
             && let Ok(plaintext) = envelope.open_blob(&self.device, hash, &bytes)
         {
@@ -638,19 +640,19 @@ impl Client {
                 Ok(bytes) => {
                     let plaintext = envelope
                         .open_blob(&self.device, hash, &bytes)
-                        .map_err(|e| format!("decrypt blob: {e}"))?;
+                        .map_err(Error::Open)?;
                     self.state.save_blob(hash, &bytes)?;
                     return Ok(plaintext);
                 }
-                Err(error) => last_error = error,
+                Err(error) => last_error = error.to_string(),
             }
         }
-        Err(format!("blob fetch failed: {last_error}"))
+        Err(Error::BlobUnavailable(last_error))
     }
 
     /// Every stored conversation, newest first (by wall-clock hint — a
     /// display ordering, like everything timestamp-based).
-    pub fn conversations(&self) -> Result<Vec<ConversationSummary>, String> {
+    pub fn conversations(&self) -> Result<Vec<ConversationSummary>, Error> {
         let mut summaries = Vec::new();
         for id in self.state.conversations() {
             let envelopes = self.state.load_envelopes(id)?;
@@ -687,7 +689,7 @@ impl Client {
     /// Bodies are opened per message and never fail the whole history — an
     /// envelope this device cannot open (e.g. sealed before the self-wrap
     /// convention) surfaces as `Err`, honestly, like `Received` does.
-    pub fn history(&self, conversation: MessageId) -> Result<Vec<HistoryMessage>, String> {
+    pub fn history(&self, conversation: MessageId) -> Result<Vec<HistoryMessage>, Error> {
         let envelopes = self.state.load_envelopes(conversation)?;
         let by_id: BTreeMap<MessageId, &MessageEnvelope> = envelopes
             .iter()
@@ -719,9 +721,9 @@ impl Client {
     /// mailbox dial string, plus the same service's iroh relay URL, which
     /// makes this device reachable by key (D0b; applied at the next open,
     /// since the endpoint's relay transport is fixed at bind time).
-    pub fn set_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {
+    pub fn set_profile(&self, name: &str, relays: &[String]) -> Result<(), Error> {
         if name.trim().is_empty() {
-            return Err("name must not be empty".into());
+            return Err(Error::ProfileIncomplete("name must not be empty"));
         }
         let entries: Vec<RelayEntry> = relays.iter().map(|s| RelayEntry::from_spec(s)).collect();
         for entry in &entries {
@@ -757,14 +759,14 @@ impl Client {
 
     /// This device's ContactRecord: key, self-attested name, home relays.
     /// The QR/paste payload is `record.to_qr_string()`.
-    pub fn my_record(&self) -> Result<ContactRecord, String> {
+    pub fn my_record(&self) -> Result<ContactRecord, Error> {
         let name = self
             .state
             .profile_name()
-            .ok_or("set a profile name first")?;
+            .ok_or(Error::ProfileIncomplete("set a profile name first"))?;
         let relays = self.state.home_relay_entries();
         if relays.is_empty() {
-            return Err("set a home relay first".into());
+            return Err(Error::ProfileIncomplete("set a home relay first"));
         }
         let me = self.device.public();
         let attestation = SignedAttestation::new(
@@ -783,7 +785,7 @@ impl Client {
     /// Ensure a mailbox exists on every home relay. Called when publishing
     /// a record: anyone who scans it must be able to deposit immediately —
     /// a record that names a relay where you have no mailbox is a lie.
-    pub async fn register_at_home_relays(&self) -> Result<(), String> {
+    pub async fn register_at_home_relays(&self) -> Result<(), Error> {
         for relay in self.state.home_relays() {
             let connection = net::connect(
                 &self.endpoint,
@@ -804,21 +806,27 @@ impl Client {
         &self,
         record: &ContactRecord,
         petname: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         if record.keys.is_empty() {
-            return Err("record has no keys".into());
+            return Err(Error::InvalidRecord("record has no keys".into()));
         }
         if record.relays.is_empty() {
-            return Err("record has no relays — no way to reach them".into());
+            return Err(Error::InvalidRecord(
+                "record has no relays — no way to reach them".into(),
+            ));
         }
         let petname = petname
             .or_else(|| record.self_claimed_name().map(str::to_string))
-            .ok_or("record has no valid self-claimed name; provide a petname")?;
+            .ok_or_else(|| {
+                Error::InvalidRecord(
+                    "record has no valid self-claimed name; provide a petname".into(),
+                )
+            })?;
         // A petname must resolve to one person: reject collisions with a
         // *different* key; re-adding the same person updates their record.
         for (existing_name, existing) in self.state.contacts()? {
             if existing_name == petname && existing.keys.first() != record.keys.first() {
-                return Err(format!("a different contact is already named {petname:?}"));
+                return Err(Error::PetnameCollision(petname));
             }
         }
         self.state.save_contact(&petname, record)?;
@@ -826,18 +834,18 @@ impl Client {
     }
 
     /// All stored contacts as `(petname, record)`.
-    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, String> {
+    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, Error> {
         self.state.contacts()
     }
 
     /// Petname → the Contact to send to.
-    pub fn resolve_contact(&self, petname: &str) -> Result<Contact, String> {
+    pub fn resolve_contact(&self, petname: &str) -> Result<Contact, Error> {
         self.state
             .contacts()?
             .into_iter()
             .find(|(name, _)| name == petname)
             .map(|(_, record)| Contact::from_record(&record))
-            .ok_or_else(|| format!("no contact named {petname:?}"))
+            .ok_or_else(|| Error::NotAContact(format!("no contact named {petname:?}")))
     }
 
     /// Sync a partially-known conversation with a peer (SPEC §5.2): walk
@@ -853,7 +861,7 @@ impl Client {
     /// is trusted no more than a relay: every envelope is verified, checked
     /// to be the id we asked for, and checked to belong to this conversation
     /// before it's stored. Returns the number of newly-stored messages.
-    pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, String> {
+    pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, Error> {
         self.backfill_addr(conversation, net::parse_relay(from)?)
             .await
     }
@@ -868,13 +876,13 @@ impl Client {
         &self,
         conversation: MessageId,
         peer: PublicKey,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, Error> {
         let records = self.state.contacts()?;
         let record = records
             .iter()
             .find(|(_, record)| record.keys.contains(&peer))
             .map(|(_, record)| record)
-            .ok_or("no stored contact record for that key")?;
+            .ok_or_else(|| Error::NotAContact("no stored contact record for that key".into()))?;
         let relay_urls: Vec<iroh::RelayUrl> = record
             .relays
             .iter()
@@ -882,10 +890,7 @@ impl Client {
             .map(net::parse_relay_url)
             .collect::<Result<_, _>>()?;
         if relay_urls.is_empty() {
-            return Err(
-                "contact record has no relay url — re-exchange records to enable dial-by-key"
-                    .into(),
-            );
+            return Err(Error::NoRelayUrl);
         }
         self.backfill_addr(conversation, net::peer_addr(&peer, &relay_urls)?)
             .await
@@ -899,7 +904,7 @@ impl Client {
         &self,
         conversation: MessageId,
         from: iroh::EndpointAddr,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, Error> {
         // A hostile peer could feed an unbounded fake chain; one budget
         // bounds the whole walk — the forward pass gets what the backward
         // pass didn't spend.
@@ -923,7 +928,7 @@ impl Client {
         conversation: MessageId,
         connection: &iroh::endpoint::Connection,
         budget: usize,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, Error> {
         let mut fetched = 0usize;
         loop {
             let frontier = self.state.missing_ancestors(conversation);
@@ -960,7 +965,7 @@ impl Client {
         conversation: MessageId,
         connection: &iroh::endpoint::Connection,
         budget: usize,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, Error> {
         let mut fetched = 0usize;
         let mut stored: BTreeSet<MessageId> = self
             .state
@@ -975,7 +980,7 @@ impl Client {
             for id in query {
                 let ids = match net::sync_request(connection, SyncOp::GetSuccessors { id }).await? {
                     SyncResult::Successors { ids } => ids,
-                    other => return Err(format!("unexpected sync response: {other:?}")),
+                    other => return Err(Error::UnexpectedResponse(format!("sync: {other:?}"))),
                 };
                 for child in ids {
                     if fetched >= budget {
@@ -1008,7 +1013,7 @@ impl Client {
         connection: &iroh::endpoint::Connection,
         id: MessageId,
         conversation: MessageId,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Error> {
         match net::sync_request(connection, SyncOp::Get { id }).await? {
             SyncResult::Envelope { envelope } => {
                 if envelope.id() != id {
@@ -1031,7 +1036,7 @@ impl Client {
                 Ok(true)
             }
             SyncResult::NotHeld => Ok(false), // peer doesn't have it / declined
-            other => Err(format!("unexpected sync response: {other:?}")),
+            other => Err(Error::UnexpectedResponse(format!("sync: {other:?}"))),
         }
     }
 
@@ -1075,7 +1080,7 @@ impl Client {
 
     /// Persist a verified envelope and its participant→conversation mapping,
     /// so a later `send` to the same people threads into this conversation.
-    fn remember(&self, envelope: &MessageEnvelope) -> Result<(), String> {
+    fn remember(&self, envelope: &MessageEnvelope) -> Result<(), Error> {
         let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
         self.state.store_envelope(conversation, envelope)?;
         let participants: BTreeSet<PublicKey> = envelope
@@ -1100,10 +1105,10 @@ impl Contact {
     /// `<pubkey-hex>@<relay>[,<relay>…]` — hex contains no `@`, so the
     /// first `@` splits key from relay list. The raw escape hatch next to
     /// named contacts.
-    pub fn parse(spec: &str) -> Result<Self, String> {
-        let (key_hex, relay_list) = spec
-            .split_once('@')
-            .ok_or("contact must be <pubkey>@<relay>[,<relay>...]")?;
+    pub fn parse(spec: &str) -> Result<Self, Error> {
+        let (key_hex, relay_list) = spec.split_once('@').ok_or_else(|| {
+            Error::InvalidInput("contact must be <pubkey>@<relay>[,<relay>...]".into())
+        })?;
         let relays: Vec<String> = relay_list.split(',').map(str::to_string).collect();
         for relay in &relays {
             net::parse_relay(relay)?; // validate early, before any network work
@@ -1551,7 +1556,7 @@ mod tests {
             .backfill_by_key(MessageId([1; 32]), peer)
             .await
             .expect_err("no relay url to rendezvous through");
-        assert!(err.contains("no relay url"), "got: {err}");
+        assert!(matches!(err, Error::NoRelayUrl), "got: {err}");
 
         let _ = std::fs::remove_dir_all(temp_root("nourl"));
     }
