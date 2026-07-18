@@ -1,4 +1,4 @@
-package org.nearone.zink
+package se.blankfors.zink
 
 import android.content.Intent
 import android.net.Uri

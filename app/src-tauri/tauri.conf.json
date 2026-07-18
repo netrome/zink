@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "zink",
   "version": "0.1.0",
-  "identifier": "org.nearone.zink",
+  "identifier": "se.blankfors.zink",
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "sh -c 'sh \"$(git rev-parse --show-toplevel)/app/ui/build.sh\"'",

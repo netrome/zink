@@ -1,4 +1,4 @@
-package org.nearone.zink
+package se.blankfors.zink
 
 import android.app.Notification
 import android.app.NotificationChannel
