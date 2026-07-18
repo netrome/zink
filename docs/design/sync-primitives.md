@@ -52,15 +52,19 @@ thing; *willingness to re-wrap* is a separate, later gate.
   §5.2's named primitive pair, cheap to serve, and defining + serving it now
   spares a later wire addition — other client implementations may drive forward
   sync before we do. Served + round-trip tested here; our client starts driving
-  it in D0b. (Serving it scans conversations — fine at friend/family scale.)
+  it in D0d. (Serving it scans conversations — fine at friend/family scale.)
 
 **Serving is discretionary** (SPEC §5.2): a peer serves what it has and what it
 *chooses* to. Backlog privacy is "don't serve the parents." **MVP policy —
-resolved (2026-07-12): permissive, serve-what-you-hold.** Answer any
-authenticated caller for any message you hold. It's the simplest correct start,
-and restrictions are easy to add later: a contacts-only or per-conversation gate
-is pure client policy, layered on without any protocol change. A policy knob,
-never baked into the wire.
+resolved (2026-07-12, tightened 2026-07-18): permissive serve-what-you-hold for
+D0a only; a contacts-only gate lands as its own slice (D0c) right after D0b.**
+Permissive was the simplest correct start while reaching a peer required knowing
+its explicit `ip:port`; D0b's dial-by-key widens reachability to anyone holding
+the key + relay URL, so that's the moment the default flips: `SyncHandler`
+answers `NotHeld` to callers not in the contact store (indistinguishable from
+not-holding — declining and not-having look the same). Pure client policy,
+layered on without any protocol change — a policy knob, never baked into the
+wire.
 
 ---
 
@@ -142,10 +146,16 @@ a discovery service**:
     a direct P2P path**, **falling back to relaying** the (encrypted) QUIC
     through the relay if the punch fails. Two peers on *different* relays connect
     fine — the callee's relay is the rendezvous.
-  - **The one additive change:** a relay entry in `ContactRecord` must carry the
-    iroh `RelayUrl`, not just the mailbox dial string — the record already flags
-    that "richer addressing (relay URLs) is a version bump." Shared through the
-    same QR/record flow (relays need not be invisible — users/clients may know
+  - **The one record change:** a relay entry in `ContactRecord` must carry the
+    iroh `RelayUrl` alongside the mailbox dial string — **as one structured
+    relay entry, not parallel vecs** (both address the same relay service; an
+    index-paired association would drift). **No version bump** (resolved
+    2026-07-18): nothing is deployed, so the field is added in-place at
+    version 1 — existing dev-stage contacts/QRs stop parsing and are simply
+    re-exchanged. (The record's earlier "relay URLs are a version bump" flag
+    predates this; per-type versioning proper is parked in the build plan
+    under *before first external deployment*.) Shared through the same
+    QR/record flow (relays need not be invisible — users/clients may know
     and exchange them).
 
 **Why relay-coordinated beats a discovery service.** A DNS/pkarr/mDNS lookup only
@@ -219,11 +229,16 @@ message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
 - **D0b · Relay-coordinated peer connectivity (§4.1).** iroh relay server in the
   `zink-relay` binary (`tls: None`); clients home to their own relays
   (`RelayMode::Custom`, multi-relay); `RelayUrl` added to `ContactRecord`
-  (version bump); dial a peer by key via their record's relay, holepunching to
-  direct with relay fallback. The foundation for D0c, D1's `who-is-this`, and D5.
+  (in-place at version 1, paired with the mailbox dial string — §4.1); dial a
+  peer by key via their record's relay, holepunching to direct with relay
+  fallback. The foundation for D0c/D0d, D1's `who-is-this`, and D5.
   *Done when:* two NAT'd clients on different relays connect and one backfills
-  from the other by key alone.
-- **D0c · Auto-sync wiring.** Trigger backfill on an orphan receipt; pick the
+  from the other by key alone — headless e2e for by-key dial via relay
+  rendezvous; the cross-NAT holepunch itself is a documented manual run.
+- **D0c · Serving gate (contacts-only, §2).** Right after D0b (independent code,
+  so parallel is fine): `SyncHandler` answers `NotHeld` to callers not in the
+  contact store. Client policy only; no wire change.
+- **D0d · Auto-sync wiring.** Trigger backfill on an orphan receipt; pick the
   peer from `sender` (dialed by key via D0b); forward catch-up via
   `get-successors`. Small, once D0a + D0b are proven.
 

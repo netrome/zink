@@ -274,6 +274,18 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   APK builds. **Awaiting the overnight measurement** — screen off,
   unplugged, message at hour N notifies within minutes, single-digit drain;
   that run ticks this box, C4, and the MVP milestone. 🎉)*
+  *(Status 2026-07-18 — **preliminary field observation, box stays open**:
+  foreground delivery instant with loud notifications, but a backgrounded
+  send typically notifies only when the app is next opened — the
+  stale-connection signature (the subscription loop parks in `accept_uni`
+  and only learns the connection died when that call errors; a NAT-expired
+  or Doze-frozen path can look alive indefinitely). Diagnostic deferred
+  until after D0b **deliberately**: D0b moves clients onto a persistent
+  iroh home-relay connection (`RelayMode::Custom`) with its own keepalive
+  machinery, which changes — and plausibly fixes — the very transport this
+  fails on; debugging the current substrate first would be partly wasted.
+  Revisit on the new substrate: if backgrounded delivery still fails then,
+  the suspect list shifts to Doze/process-death on the Kotlin side.)*
 
 **🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
 (+ Linux desktop), online and offline, with notifications.
@@ -330,14 +342,27 @@ on `keys.first()` needs revisiting at D2.
     via their `RelayUrl`. iroh then **holepunches** to a direct P2P path when it can and
     **falls back to relaying** the (encrypted) QUIC through the relay when it can't — a
     peer stays reachable across NATs without routing plaintext or assuming direct
-    connectivity. Needs a `RelayUrl` in the `ContactRecord` (additive version bump — the
-    record already flags relay-URL addressing as future; shared via the existing
-    QR/record flow, since relays need not be invisible). *Done when:* two NAT'd clients
-    on **different** relays establish a peer connection (direct if holepunched, relayed
-    otherwise) and one backfills from the other **by key alone**. Design:
-    [sync-primitives.md](./sync-primitives.md) §4. **Foundation for D0c, D1's
+    connectivity. Needs a `RelayUrl` in the `ContactRecord`, **paired with its mailbox
+    dial string in one structured relay entry** (they describe the same relay service —
+    parallel vecs would drift). *No version bump:* nothing is deployed yet, so the field
+    is added **in-place at version 1** — existing dev-stage contacts/QRs stop parsing and
+    are re-exchanged (same category as C3a's pre-self-wrap envelopes); shared via the
+    existing QR/record flow, since relays need not be invisible. *Done when:* two NAT'd
+    clients on **different** relays establish a peer connection (direct if holepunched,
+    relayed otherwise) and one backfills from the other **by key alone** — headless e2e
+    covers by-key dial via relay rendezvous; the actual cross-NAT holepunch is a
+    documented manual run (like C-spike/C4c). Design:
+    [sync-primitives.md](./sync-primitives.md) §4. **Foundation for D0c/D0d, D1's
     `who-is-this`, and D5.**
-  - [ ] **D0c · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
+  - [ ] **D0c · Serving gate (contacts-only).** Immediately after D0b — dial-by-key
+    widens who can reach the sync ALPN from "whoever knows my `ip:port`" to "anyone
+    holding my key + relay". Client policy, not protocol: `SyncHandler` checks the
+    connection's remote endpoint id against the contact store and answers `NotHeld`
+    for unknowns (indistinguishable from not-holding — declining and not-having look
+    the same, SPEC §5.2). Independent of D0b's code, so it can also run in parallel.
+    *Done when:* a non-contact peer's `get` for a held id returns `NotHeld`; a
+    contact's succeeds.
+  - [ ] **D0d · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
     from the message `sender`, dialed by key via D0b); forward catch-up via
     `get-successors`.
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
@@ -366,6 +391,22 @@ on `keys.first()` needs revisiting at D2.
   always-deposit — resolve after first on-device test). *Done when:* two CLI clients
   online with the relay unreachable exchange a message directly; killing the receiver
   falls back to a mailbox deposit fetched on its return.
+
+---
+
+## Parked — before first external deployment
+
+Not scheduled into a stage; must land before any build leaves our hands.
+
+- [ ] **Per-type format versions.** One global `FORMAT_VERSION` is stamped into every
+  versioned object and `decode_versioned` accepts only the exact current value — so any
+  single object's version bump forks the whole protocol at once (v1 clients silently
+  skip v2 messages per SPEC §10, and a bumped client can't decode its own v1 on-disk
+  state). Fine while every install is ours (we change structs in-place at v1 and wipe
+  dev data, as in D0b); untenable the moment two builds coexist in the wild. Fix:
+  per-type version constants and a per-type accepted-version set in `decode_versioned`,
+  so e.g. `ContactRecord` can accept `{1, 2}` while `MessageCore` stays at 1 and ids
+  don't move.
 
 ---
 
