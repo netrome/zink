@@ -85,7 +85,9 @@ impl Client {
         let endpoint = net::bind_endpoint(&device, &home_relays).await?;
         // Serve peer history sync on our own endpoint (D0). The endpoint is a
         // cheap handle to clone; the router keeps the serve loop alive.
-        let sync_router = crate::sync::spawn_sync_router(endpoint.clone(), state.clone());
+        // Contacts-only serving gate (D0c) — our key is the always-allowed one.
+        let sync_router =
+            crate::sync::spawn_sync_router(endpoint.clone(), state.clone(), device.public());
         Ok(Self {
             device,
             endpoint,
@@ -413,6 +415,10 @@ impl Client {
         if !received.is_empty() {
             tracing::info!(count = received.len(), "drained (poll)");
         }
+        // Auto-sync (D0d): heal orphaned conversations before returning, so
+        // the caller sees a threadable history. Cheap when nothing is
+        // orphaned (one missing-ancestors scan per touched conversation).
+        self.auto_sync(&received).await;
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
@@ -481,6 +487,9 @@ impl Client {
         *backoff = Duration::from_secs(1);
         if !received.is_empty() {
             tracing::info!(relay, count = received.len(), "drained (catch-up)");
+            // Heal before rendering (D0d): the edge's re-render then shows
+            // the whole conversation, not an unthreadable orphan.
+            self.auto_sync(&received).await;
             on_new(received);
         }
         let _ = self.flush_outbox().await;
@@ -502,6 +511,10 @@ impl Client {
                 "drained (nudge)"
             );
             if !received.is_empty() {
+                // Heal before rendering (D0d). Costs nothing when the
+                // conversation is ancestor-closed (the common case); dials
+                // the sender only on an actual orphan.
+                self.auto_sync(&received).await;
                 on_new(received);
             }
         }
@@ -827,20 +840,19 @@ impl Client {
             .ok_or_else(|| format!("no contact named {petname:?}"))
     }
 
-    /// Persist a verified envelope and its participant→conversation mapping,
-    /// so a later `send` to the same people threads into this conversation.
-    /// Pull the missing ancestors of a partially-known conversation from a
-    /// peer, walking `parents` back until the genesis is reached (SPEC §5.2
-    /// `get`). This is what lets a device added mid-conversation build the DAG
-    /// and reply: without the genesis, `load_dag` can't even start
-    /// (state.rs — "a missing genesis is unrecoverable"). `from` is the peer's
+    /// Sync a partially-known conversation with a peer (SPEC §5.2): walk
+    /// `parents` **backward** to the genesis (what lets a device added
+    /// mid-conversation build the DAG and reply — without the genesis,
+    /// `load_dag` can't even start), then pull **forward** via
+    /// `get-successors` (D0d — catches messages that expired from the
+    /// mailbox or live on concurrent branches). `from` is the peer's
     /// `<endpoint-id>@<ip:port>`.
     ///
     /// Best-effort (tenet 6): an unreachable peer, or one that declines to
-    /// serve an ancestor, just stops the walk — we never fabricate a root.
-    /// A served peer is trusted no more than a relay: every envelope is
-    /// verified and checked to be the id we asked for before it's stored.
-    /// Returns the number of newly-stored messages.
+    /// serve, just stops the walk — we never fabricate a root. A served peer
+    /// is trusted no more than a relay: every envelope is verified, checked
+    /// to be the id we asked for, and checked to belong to this conversation
+    /// before it's stored. Returns the number of newly-stored messages.
     pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, String> {
         self.backfill_addr(conversation, net::parse_relay(from)?)
             .await
@@ -888,11 +900,29 @@ impl Client {
         conversation: MessageId,
         from: iroh::EndpointAddr,
     ) -> Result<usize, String> {
-        // A hostile peer could feed an unbounded fake chain; bound the walk.
-        const MAX_BACKFILL: usize = 10_000;
+        // A hostile peer could feed an unbounded fake chain; bound the walk
+        // (shared across the backward and forward passes).
+        const MAX_SYNC_FETCH: usize = 10_000;
         let connection =
             net::connect_addr(&self.endpoint, from, SYNC_ALPN, self.config.connect_timeout).await?;
         let mut fetched = 0usize;
+        self.fill_backward(conversation, &connection, &mut fetched, MAX_SYNC_FETCH)
+            .await?;
+        self.fill_forward(conversation, &connection, &mut fetched, MAX_SYNC_FETCH)
+            .await?;
+        Ok(fetched)
+    }
+
+    /// The backward pass: fetch referenced-but-missing parents until the
+    /// stored slice is ancestor-closed (genesis reached) or the peer stops
+    /// yielding.
+    async fn fill_backward(
+        &self,
+        conversation: MessageId,
+        connection: &iroh::endpoint::Connection,
+        fetched: &mut usize,
+        cap: usize,
+    ) -> Result<(), String> {
         loop {
             let frontier = self.state.missing_ancestors(conversation);
             if frontier.is_empty() {
@@ -900,41 +930,148 @@ impl Client {
             }
             let mut progressed = false;
             for id in frontier {
-                if fetched >= MAX_BACKFILL {
-                    tracing::warn!("backfill hit the fetch cap; stopping");
-                    return Ok(fetched);
+                if *fetched >= cap {
+                    tracing::warn!("sync hit the fetch cap; stopping");
+                    return Ok(());
                 }
-                match net::sync_request(&connection, SyncOp::Get { id }).await? {
-                    SyncResult::Envelope { envelope } => {
-                        if envelope.id() != id {
-                            tracing::warn!("peer returned a mismatched id; skipping");
-                            continue;
-                        }
-                        if envelope.version != FORMAT_VERSION
-                            || envelope.core.version != FORMAT_VERSION
-                        {
-                            tracing::warn!("skipping backfilled message with unsupported version");
-                            continue;
-                        }
-                        if envelope.verify().is_err() {
-                            tracing::warn!("peer returned an unverifiable envelope; skipping");
-                            continue;
-                        }
-                        self.remember(&envelope)?;
-                        fetched += 1;
-                        progressed = true;
-                    }
-                    SyncResult::NotHeld => {} // peer doesn't have it / declined
-                    other => return Err(format!("unexpected sync response: {other:?}")),
+                if self.fetch_one(connection, id, conversation).await? {
+                    *fetched += 1;
+                    progressed = true;
                 }
             }
             if !progressed {
                 break; // this peer can't take us any closer to the genesis
             }
         }
-        Ok(fetched)
+        Ok(())
     }
 
+    /// The forward pass (D0d): `get-successors` to learn children we lack —
+    /// messages the mailbox never delivered (expired, or sent while we were
+    /// unreachable) and concurrent branches. The first round queries every
+    /// stored id (a fork can hang off any interior message); later rounds
+    /// query only what the previous round fetched, so the walk converges.
+    /// Chatty at one round-trip per id — fine at friend/family scale.
+    async fn fill_forward(
+        &self,
+        conversation: MessageId,
+        connection: &iroh::endpoint::Connection,
+        fetched: &mut usize,
+        cap: usize,
+    ) -> Result<(), String> {
+        let mut stored: BTreeSet<MessageId> = self
+            .state
+            .load_envelopes(conversation)
+            .unwrap_or_default()
+            .iter()
+            .map(|envelope| envelope.id())
+            .collect();
+        let mut query: Vec<MessageId> = stored.iter().copied().collect();
+        while !query.is_empty() {
+            let mut learned: Vec<MessageId> = Vec::new();
+            for id in query {
+                let ids = match net::sync_request(connection, SyncOp::GetSuccessors { id }).await? {
+                    SyncResult::Successors { ids } => ids,
+                    other => return Err(format!("unexpected sync response: {other:?}")),
+                };
+                for child in ids {
+                    if *fetched >= cap {
+                        tracing::warn!("sync hit the fetch cap; stopping");
+                        return Ok(());
+                    }
+                    if stored.contains(&child) {
+                        continue;
+                    }
+                    if self.fetch_one(connection, child, conversation).await? {
+                        stored.insert(child);
+                        learned.push(child);
+                        *fetched += 1;
+                    }
+                }
+            }
+            query = learned;
+        }
+        Ok(())
+    }
+
+    /// One `get` round-trip: fetch `id`, validate, store. `Ok(true)` iff a
+    /// new envelope was stored. A served peer is trusted no more than a
+    /// relay: the envelope must hash to the id we asked for, carry a valid
+    /// sender signature, and belong to the conversation being synced — the
+    /// last check matters for the forward pass, where ids are the *peer's
+    /// claim* rather than parents read from envelopes we already verified.
+    async fn fetch_one(
+        &self,
+        connection: &iroh::endpoint::Connection,
+        id: MessageId,
+        conversation: MessageId,
+    ) -> Result<bool, String> {
+        match net::sync_request(connection, SyncOp::Get { id }).await? {
+            SyncResult::Envelope { envelope } => {
+                if envelope.id() != id {
+                    tracing::warn!("peer returned a mismatched id; skipping");
+                    return Ok(false);
+                }
+                if envelope.version != FORMAT_VERSION || envelope.core.version != FORMAT_VERSION {
+                    tracing::warn!("skipping synced message with unsupported version");
+                    return Ok(false);
+                }
+                if envelope.verify().is_err() {
+                    tracing::warn!("peer returned an unverifiable envelope; skipping");
+                    return Ok(false);
+                }
+                if envelope.core.conversation.unwrap_or_else(|| envelope.id()) != conversation {
+                    tracing::warn!("peer served a message from another conversation; skipping");
+                    return Ok(false);
+                }
+                self.remember(&envelope)?;
+                Ok(true)
+            }
+            SyncResult::NotHeld => Ok(false), // peer doesn't have it / declined
+            other => Err(format!("unexpected sync response: {other:?}")),
+        }
+    }
+
+    /// Auto-sync (D0d): after a drain stores new messages, heal every
+    /// conversation left with missing ancestors by syncing from the received
+    /// message's `sender` — the peer most likely to hold the history
+    /// (sync-primitives.md §5). Runs *before* the edge renders, so a healed
+    /// conversation appears whole. Best-effort and non-fatal: an unreachable
+    /// sender or a missing/mailbox-only record just logs — a drain must
+    /// never fail because a peer can't be dialed. Returns messages fetched.
+    async fn auto_sync(&self, received: &[Received]) -> usize {
+        let me = self.device.public();
+        let mut targets: BTreeMap<MessageId, PublicKey> = BTreeMap::new();
+        for message in received {
+            let sender = message.envelope.core.sender;
+            if sender == me {
+                continue;
+            }
+            let conversation = message
+                .envelope
+                .core
+                .conversation
+                .unwrap_or_else(|| message.envelope.id());
+            targets.entry(conversation).or_insert(sender);
+        }
+        let mut healed = 0usize;
+        for (conversation, sender) in targets {
+            if self.state.missing_ancestors(conversation).is_empty() {
+                continue; // ancestor-closed — nothing to heal
+            }
+            match self.backfill_by_key(conversation, sender).await {
+                Ok(fetched) => {
+                    healed += fetched;
+                    tracing::info!(fetched, "auto-sync healed a conversation");
+                }
+                Err(error) => tracing::debug!(%error, "auto-sync could not reach the sender"),
+            }
+        }
+        healed
+    }
+
+    /// Persist a verified envelope and its participant→conversation mapping,
+    /// so a later `send` to the same people threads into this conversation.
     fn remember(&self, envelope: &MessageEnvelope) -> Result<(), String> {
         let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
         self.state.store_envelope(conversation, envelope)?;
@@ -1108,6 +1245,7 @@ mod tests {
         let b = Client::open_or_create(&temp_key("walk", "client"))
             .await
             .expect("open B");
+        befriend(&a, &b); // the D0c gate serves contacts only
 
         let author = DeviceKey::from_seed([9; 32]);
         let msgs = chain(&author, b.public_key(), 3);
@@ -1155,6 +1293,18 @@ mod tests {
         (server, url)
     }
 
+    /// Store `requester`'s key as a contact of `server`, so the D0c
+    /// contacts-only serving gate lets the requester's sync calls through
+    /// (the minimal record — key only — via the store, skipping
+    /// `add_contact`'s reachability validation, which serving doesn't need).
+    fn befriend(server: &Client, requester: &Client) {
+        let record = ContactRecord::new(vec![requester.public_key()], vec![], vec![]);
+        server
+            .state
+            .save_contact("requester", &record)
+            .expect("save contact");
+    }
+
     /// A profile whose relay entry carries `relay_url` — written straight to
     /// state so the endpoint homes to it at the *next* open (the D0b
     /// restart-to-apply semantics; the mailbox dial string is never used
@@ -1184,6 +1334,7 @@ mod tests {
         let (_relay_b, url_b) = spawn_test_relay().await;
         let a = open_homed("bykey", "server", &url_a).await;
         let b = open_homed("bykey", "client", &url_b).await;
+        befriend(&a, &b); // the D0c gate serves contacts only
         a.endpoint.online().await; // A must be homed before B rendezvouses via its relay
 
         let author = DeviceKey::from_seed([5; 32]);
@@ -1219,6 +1370,158 @@ mod tests {
         assert_eq!(dag.next_logical(), 3);
 
         let _ = std::fs::remove_dir_all(temp_root("bykey"));
+    }
+
+    #[tokio::test]
+    async fn backfill__should_be_refused_until_the_requester_is_a_contact() {
+        // Given: A holds a full conversation; B — NOT in A's contact store —
+        // holds only the latest message. D0b made peers dialable by anyone
+        // holding key + relay URL; the D0c gate is what keeps "dialable"
+        // from meaning "served".
+        let a = Client::open_or_create(&temp_key("gate", "server"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("gate", "client"))
+            .await
+            .expect("open B");
+        let author = DeviceKey::from_seed([8; 32]);
+        let msgs = chain(&author, b.public_key(), 3);
+        let conversation = msgs[0].id();
+        for envelope in &msgs {
+            a.state.store_envelope(conversation, envelope).unwrap();
+        }
+        b.state
+            .store_envelope(conversation, msgs.last().unwrap())
+            .unwrap();
+
+        // When: the stranger backfills — the answers must be
+        // indistinguishable from a peer that holds nothing
+        let fetched = b
+            .backfill_addr(conversation, a.endpoint.addr())
+            .await
+            .expect("gate declines, not errors");
+
+        // Then: nothing served, and the successor view is empty too
+        assert_eq!(fetched, 0, "a non-contact is served nothing");
+        assert!(b.state.load_dag(conversation).is_err());
+        let connection = net::connect_addr(
+            &b.endpoint,
+            a.endpoint.addr(),
+            SYNC_ALPN,
+            b.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let successors = net::sync_request(
+            &connection,
+            SyncOp::GetSuccessors {
+                id: conversation, // the genesis id — A holds its children
+            },
+        )
+        .await
+        .expect("round-trip");
+        assert_eq!(
+            successors,
+            SyncResult::Successors { ids: vec![] },
+            "successors of a held message hide behind the gate too"
+        );
+
+        // When: A stores B's record — B is now a contact and gets served
+        befriend(&a, &b);
+        let fetched = b
+            .backfill_addr(conversation, a.endpoint.addr())
+            .await
+            .expect("backfill as a contact");
+
+        // Then: the walk reaches the genesis
+        assert_eq!(fetched, 2, "genesis + the middle message");
+        assert!(b.state.load_dag(conversation).is_ok());
+
+        let _ = std::fs::remove_dir_all(temp_root("gate"));
+    }
+
+    #[tokio::test]
+    async fn backfill__should_pull_forward_successors_after_the_backward_walk() {
+        // Given: A holds a 5-message chain; B holds only the MIDDLE message —
+        // missing both its ancestors (backward) and everything sent after it
+        // (forward — e.g. expired from B's mailbox before B fetched).
+        let a = Client::open_or_create(&temp_key("forward", "server"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("forward", "client"))
+            .await
+            .expect("open B");
+        befriend(&a, &b);
+        let author = DeviceKey::from_seed([4; 32]);
+        let msgs = chain(&author, b.public_key(), 5);
+        let conversation = msgs[0].id();
+        for envelope in &msgs {
+            a.state.store_envelope(conversation, envelope).unwrap();
+        }
+        b.state.store_envelope(conversation, &msgs[2]).unwrap();
+
+        // When
+        let fetched = b
+            .backfill_addr(conversation, a.endpoint.addr())
+            .await
+            .expect("sync");
+
+        // Then: 2 ancestors + 2 successors, and the DAG ends on the true head
+        assert_eq!(fetched, 4);
+        let dag = b.state.load_dag(conversation).expect("DAG builds");
+        assert_eq!(dag.heads(), vec![msgs[4].id()]);
+        assert_eq!(dag.next_logical(), 5);
+
+        let _ = std::fs::remove_dir_all(temp_root("forward"));
+    }
+
+    #[tokio::test]
+    async fn auto_sync__should_heal_an_orphaned_conversation_from_its_sender() {
+        // Given: A authored a 3-message conversation to B and serves it
+        // (homed to its own relay); B — on a different relay — receives only
+        // the latest message, as a mid-conversation joiner would. B holds
+        // A's record (key + relay URL), as any messageable contact does.
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed("autosync", "server", &url_a).await;
+        let b = open_homed("autosync", "client", &url_b).await;
+        befriend(&a, &b);
+        a.endpoint.online().await;
+
+        let msgs = chain(&a.device, b.public_key(), 3);
+        let conversation = msgs[0].id();
+        for envelope in &msgs {
+            a.state.store_envelope(conversation, envelope).unwrap();
+        }
+        let latest = msgs.last().unwrap();
+        b.state.store_envelope(conversation, latest).unwrap();
+        let record = ContactRecord::new(
+            vec![a.public_key()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "unused@203.0.113.1:1".to_string(),
+                relay_url: Some(url_a.clone()),
+            }],
+        );
+        b.add_contact(&record, Some("a".to_string()))
+            .expect("add contact");
+        assert!(b.state.load_dag(conversation).is_err(), "orphaned before");
+
+        // When: the drain hands the orphan to auto-sync (what recv and the
+        // subscription loops now do) — the sender is dialed by key
+        let healed = b
+            .auto_sync(&[Received {
+                envelope: latest.clone(),
+                relay: String::new(),
+                body: Ok(vec![]),
+            }])
+            .await;
+
+        // Then: the conversation is whole with zero explicit action
+        assert_eq!(healed, 2, "genesis + the middle message");
+        assert!(b.state.load_dag(conversation).is_ok());
+
+        let _ = std::fs::remove_dir_all(temp_root("autosync"));
     }
 
     #[tokio::test]

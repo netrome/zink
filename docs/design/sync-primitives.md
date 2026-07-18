@@ -56,15 +56,17 @@ thing; *willingness to re-wrap* is a separate, later gate.
 
 **Serving is discretionary** (SPEC §5.2): a peer serves what it has and what it
 *chooses* to. Backlog privacy is "don't serve the parents." **MVP policy —
-resolved (2026-07-12, tightened 2026-07-18): permissive serve-what-you-hold for
-D0a only; a contacts-only gate lands as its own slice (D0c) right after D0b.**
-Permissive was the simplest correct start while reaching a peer required knowing
-its explicit `ip:port`; D0b's dial-by-key widens reachability to anyone holding
-the key + relay URL, so that's the moment the default flips: `SyncHandler`
-answers `NotHeld` to callers not in the contact store (indistinguishable from
-not-holding — declining and not-having look the same). Pure client policy,
-layered on without any protocol change — a policy knob, never baked into the
-wire.
+resolved (2026-07-12, tightened 2026-07-18, gate shipped as D0c): contacts-only.**
+Permissive serve-what-you-hold was the simplest correct start while reaching a
+peer required knowing its explicit `ip:port`; D0b's dial-by-key widened
+reachability to anyone holding the key + relay URL, so the default flipped:
+`SyncHandler` answers `NotHeld` / empty successors to callers not in the
+contact store (indistinguishable from not-holding — declining and not-having
+look the same), with the own key always allowed (self-dial; D2 own-device sync).
+Resolved once per connection — the caller's key IS the authenticated connection
+key. Pure client policy, layered on without any protocol change — a policy
+knob, never baked into the wire. (D1's `who-is-this` will want a different
+per-op policy: identity queries from strangers are that op's purpose.)
 
 ---
 
@@ -190,15 +192,23 @@ while frontier not empty and not yet at genesis:
      fabricated root)
 ```
 
-Backward-fill via `Get(parent)` reaches the genesis; `get-successors` is the
-forward complement (catch up on newer messages) and is served + round-trip
-tested in this slice but not yet driven by an auto-sync loop.
+Backward-fill via `Get(parent)` reaches the genesis; the walk then continues
+**forward** via `get-successors` (D0d): the first round queries every stored
+id — a concurrent branch can hang off any interior message, so heads-only
+would miss forks — and later rounds query only what the previous round
+fetched, converging with one round-trip per id (fine at friend/family scale;
+a frontier index is the optimization if it ever bites). Forward ids are the
+*peer's claim* (unlike backward ids, read from envelopes we verified), so
+validation also checks the served envelope belongs to the conversation being
+synced — content-addressing pins everything else.
 
-**Who to ask:** for the reply hole, the natural target is the `sender` of the
-message that arrived (they were in the conversation and likely hold its
-history). First slice: an explicit `from` peer (CLI-testable). Auto-triggering
-backfill on receipt of an orphan message — and choosing the peer from the
-message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
+**Who to ask — shipped (D0d):** the `sender` of the message that arrived
+(they were in the conversation and likely hold its history). `auto_sync`
+runs after every drain (recv / catch-up / nudge), before the edge renders:
+any touched conversation left with missing ancestors triggers a by-key sync
+from its sender — best-effort, non-fatal, one cheap scan when nothing is
+orphaned. The explicit `from` peer form (CLI `backfill`) remains for dev use
+and now also pulls forward.
 
 ---
 
@@ -245,12 +255,16 @@ message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
   `EndpointAddr` — verified in iroh 1.0.2 source); user-facing spec is
   `<dial>#<relay-url>` printed by the relay, tolerated everywhere a dial
   string is accepted.
-- **D0c · Serving gate (contacts-only, §2).** Right after D0b (independent code,
-  so parallel is fine): `SyncHandler` answers `NotHeld` to callers not in the
-  contact store. Client policy only; no wire change.
-- **D0d · Auto-sync wiring.** Trigger backfill on an orphan receipt; pick the
-  peer from `sender` (dialed by key via D0b); forward catch-up via
-  `get-successors`. Small, once D0a + D0b are proven.
+- **D0c · Serving gate (contacts-only, §2) — done (2026-07-18).** `SyncHandler`
+  answers `NotHeld` / empty successors to callers not in the contact store
+  (own key always served); resolved per connection. Client policy only; no
+  wire change. e2e: stranger backfills 0 / sees no successors, succeeds once
+  their record is stored.
+- **D0d · Auto-sync wiring — done (2026-07-19).** Backfill triggers on an
+  orphan receipt after every drain; peer = the message's `sender`, dialed by
+  key; the sync walk gained the forward `get-successors` pass (§5). e2e: a
+  middle-message holder syncs to both ends; an orphaned receipt heals across
+  two relays with zero explicit action. **D0 complete.**
 
 ## 8. Doc touchpoints when this lands
 

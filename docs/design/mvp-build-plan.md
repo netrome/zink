@@ -309,7 +309,7 @@ on `keys.first()` needs revisiting at D2.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
-- [ ] **D0 · Sync primitives & peer connectivity.** 🎯 `get` / `get-successors` (SPEC
+- [x] **D0 · Sync primitives & peer connectivity.** 🎯 `get` / `get-successors` (SPEC
   §5.2) over a peer ALPN, served at each peer's discretion, plus the relay-coordinated
   connectivity that lets a client actually *reach* a peer. Fixes the known late-joiner
   hole (a client without a conversation's genesis cannot reply — noted in B5);
@@ -374,7 +374,7 @@ on `keys.first()` needs revisiting at D2.
     (homing applies at bind — expected, but a "restart to apply" hint in the app
     is cheap polish). Run with the phone on cellular (Wi-Fi off), so the
     cross-NAT criterion is met — **D0b fully done.**)*
-  - [ ] **D0c · Serving gate (contacts-only).** Immediately after D0b — dial-by-key
+  - [x] **D0c · Serving gate (contacts-only).** Immediately after D0b — dial-by-key
     widens who can reach the sync ALPN from "whoever knows my `ip:port`" to "anyone
     holding my key + relay". Client policy, not protocol: `SyncHandler` checks the
     connection's remote endpoint id against the contact store and answers `NotHeld`
@@ -382,9 +382,34 @@ on `keys.first()` needs revisiting at D2.
     the same, SPEC §5.2). Independent of D0b's code, so it can also run in parallel.
     *Done when:* a non-contact peer's `get` for a held id returns `NotHeld`; a
     contact's succeeds.
-  - [ ] **D0d · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
+    ✅ *(2026-07-18: gate resolved once per connection (the caller's key IS the
+    authenticated connection key); non-contacts get `NotHeld` / empty successors;
+    own key always served (self-dial, and D2 own-device sync rides the same
+    allowance). e2e: a stranger backfills 0 and sees no successors of a held
+    genesis, the same requester succeeds after their record is stored. Note for
+    D1: `who-is-this` will want a *different* policy for its own op — identity
+    queries from strangers are the point — so the gate stays per-op, not
+    per-connection-refusal.)*
+  - [x] **D0d · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
     from the message `sender`, dialed by key via D0b); forward catch-up via
     `get-successors`.
+    ✅ *(2026-07-19: the sync walk is now backward (parents → genesis) **then
+    forward** (`get-successors`; first round queries every stored id since forks
+    can hang off interior messages, later rounds only newly-fetched ids — converges,
+    chatty-but-fine at friend scale). Shared validation gained a
+    conversation-membership check: forward ids are the *peer's claim*, not parents
+    read from verified envelopes, so a served envelope must also belong to the
+    conversation being synced. `auto_sync` runs after every drain (recv, catch-up,
+    nudge), *before* the edge renders — a healed conversation appears whole; one
+    scan when nothing is orphaned, dials the sender by key when something is.
+    Best-effort: unreachable sender / mailbox-only record logs and moves on.
+    e2e: middle-message holder syncs to both ends (2 back + 2 forward); an
+    orphaned receipt heals via `auto_sync` across two relays with zero explicit
+    action. Explicit `backfill` (CLI included) now also pulls forward.
+    **Verified live 2026-07-19:** laptop app with its conversation store wiped —
+    one message from the phone and the drain auto-healed the full history, no
+    explicit action. Incidentally also the recovery story for a lost/corrupted
+    store: any peer holding the history restores it by messaging you.)*
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
   petnames; `who-is-this` pull *(a peer request/response — depends on D0b connectivity)*;
   client-side trust ranking. *(Profile + petnames are largely already built from Stage C:

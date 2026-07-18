@@ -77,6 +77,12 @@ client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
 // storage for the client's lifetime. The endpoint homes to the profile's
 // relay URLs (RelayMode::Custom, applied at open — a profile change takes
 // effect on the next open), which keeps this device reachable by key.
+// Serving gate (D0c): contacts-only — non-contacts get NotHeld / empty
+// successors, indistinguishable from not-holding; own key always served.
+// Auto-sync (D0d): every drain (recv / catch-up / nudge) heals orphaned
+// conversations before the edge renders — missing ancestors trigger a
+// by-key sync from the message's sender; the walk also pulls forward via
+// get-successors. Best-effort; a drain never fails on an unreachable peer.
 client.backfill(conversation, "<id>@<ip:port>") -> usize   // explicit peer addr
 client.backfill_by_key(conversation, PublicKey) -> usize   // via the relay_url in
                                               // the peer's stored ContactRecord:
