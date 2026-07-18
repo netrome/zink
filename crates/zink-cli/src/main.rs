@@ -24,7 +24,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use zink_client::{Client, ClientConfig, Contact, Received, hex, keystore};
-use zink_protocol::{BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey};
+use zink_protocol::{
+    BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey, RelayEntry,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -164,11 +166,13 @@ async fn contacts(args: &[String]) -> Result<(), String> {
             .iter()
             .map(|k| hex::encode(&k.0)[..8].to_string())
             .collect();
-        println!(
-            "{petname}  ({}, {} relay(s))",
-            keys.join(","),
-            record.relays.len()
-        );
+        // Full specs, so "does this record enable dial-by-key?" is visible:
+        // an entry without `#<relay-url>` is mailbox-only (D0b).
+        let relays: Vec<String> = record.relays.iter().map(RelayEntry::to_spec).collect();
+        println!("{petname}  ({})", keys.join(","));
+        for spec in relays {
+            println!("  relay: {spec}");
+        }
     }
     client.close().await;
     Ok(())
