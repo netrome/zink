@@ -5,7 +5,8 @@ recipient device directly, deliver the envelope peer-to-peer instead of parking
 it in the recipient's relay mailbox. Downstream of
 [live-delivery.md](./live-delivery.md) (the mailbox path this layers on top of)
 and [mailbox-rendezvous-push.md](./mailbox-rendezvous-push.md). Shares the peer
-ALPN introduced by **D0** (sync primitives).
+ALPN introduced by **D0a** (sync primitives) and the peer connectivity from
+**D0b**.
 
 Status: **draft for discussion.** ⚠️ marks open decisions.
 
@@ -43,24 +44,25 @@ beyond what iroh already gives us.
 
 ---
 
-## 2. The substrate: iroh discovery + the D0 peer ALPN
+## 2. The substrate: D0b connectivity + the D0a peer ALPN
 
 Two pieces already on the roadmap make this cheap:
 
-- **iroh discovery resolves `key → address` for *online* nodes** (SPEC §3.6:
-  "iroh discovery resolves key→address for online nodes, while `relays` is how a
-  sender finds your inbox when you're offline"). So *reachability is the presence
-  signal*: if `endpoint.connect(recipient_device_key)` succeeds within a short
-  timeout, that device is online and dialable; if it doesn't, fall back to the
-  mailbox. No separate presence protocol.
-- **D0 stands up a peer-served ALPN** for `get` / `get-successors`
+- **D0b relay-coordinated connectivity** (sync-primitives.md §4.1) makes a peer
+  reachable by key: dial `EndpointAddr::new(recipient_key).with_relay_url(their
+  relay)` (from the recipient's `ContactRecord`), and iroh holepunches to a
+  direct path or relays as fallback. So *reachability is the presence signal*: if
+  the connect succeeds within a short timeout the device is online and dialable;
+  if not, fall back to the mailbox. No separate presence protocol, and — key
+  point — this is relay-coordinated, **not** a DNS/pkarr discovery service.
+- **D0a stands up a peer-served ALPN** for `get` / `get-successors`
   (request/response pull, SPEC §5.2). Direct delivery adds one **push** op to
   that same ALPN — a client accepting an envelope addressed to it. The client
   becomes, in effect, its own mailbox when online. No new endpoint, no new
-  connection type; a peer that speaks the D0 ALPN gains a `Deliver` op.
+  connection type; a peer that speaks the sync ALPN gains a `Deliver` op.
 
-So direct delivery is a small additive slice *on top of D0*, not a parallel
-stack. It should not be scheduled before D0 exists.
+So direct delivery is a small additive slice *on top of D0a + D0b*, not a
+parallel stack. It should not be scheduled before that connectivity exists.
 
 ---
 
@@ -162,16 +164,17 @@ short dial timeout with mailbox fallback is correct if unoptimized.
 
 ## 6. Slicing & sequencing
 
-- **Prerequisite: D0** (peer ALPN + get/get-successors). Direct delivery is the
-  `Deliver` op on that ALPN plus the send-path decision — do not start it before
-  D0.
+- **Prerequisites: D0a** (peer ALPN + get/get-successors) **and D0b**
+  (relay-coordinated connectivity — how a peer is reached by key). Direct
+  delivery is the `Deliver` op on that ALPN plus the send-path decision — do not
+  start it before both exist.
 - Then a single slice (**D5** in the plan): `Deliver` op + ack, send-path
   dial-then-fallback, outbox discharge, dedup test. CLI-testable headless:
   two clients online with no relay reachable → A `send`s → B receives directly;
   kill B → A `send`s → deposits to mailbox → B fetches on return.
 - **Not on the social-features critical path.** D1–D4 (identity, multi-device,
   groups, web-of-trust) don't depend on this; it's a p2p/metadata optimization
-  scheduled independently, once D0's peer ALPN exists.
+  scheduled independently, once D0a + D0b exist.
 
 ## 7. Doc touchpoints when this lands
 

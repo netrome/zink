@@ -297,11 +297,13 @@ on `keys.first()` needs revisiting at D2.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
-- [ ] **D0 · Sync primitives.** 🎯 `get` / `get-successors` (SPEC §5.2) over a peer
-  ALPN, served at each peer's discretion. Fixes the known late-joiner hole (a client
-  without a conversation's genesis cannot reply — noted in B5); prerequisite for D2
-  backfill and D4's backlog serving. *(The peer ALPN it stands up is also the substrate
-  for D5 direct delivery.)* Design: [sync-primitives.md](./sync-primitives.md).
+- [ ] **D0 · Sync primitives & peer connectivity.** 🎯 `get` / `get-successors` (SPEC
+  §5.2) over a peer ALPN, served at each peer's discretion, plus the relay-coordinated
+  connectivity that lets a client actually *reach* a peer. Fixes the known late-joiner
+  hole (a client without a conversation's genesis cannot reply — noted in B5);
+  prerequisite for D2 backfill and D4's backlog serving. *(The peer ALPN + connectivity
+  it stands up are the substrate for D1's `who-is-this` and D5 direct delivery too.)*
+  Design: [sync-primitives.md](./sync-primitives.md).
   - [x] **D0a · Serve + backward-fill.** `SYNC_ALPN` + sync wire types in
     `zink-protocol`; the client runs an *accepting* router (first time — it's been
     dial-only) serving envelopes at discretion; `Client::backfill(conversation,
@@ -311,17 +313,38 @@ on `keys.first()` needs revisiting at D2.
     bodies (D2), auto-backfill-on-orphan, forward auto-sync.
     ✅ *(2026-07-12: serve full envelopes — not bare cores — so the requester
     verifies authorship for free and reuses `remember`; permissive serve-what-you-hold;
-    peer addressed by dial string now (bare-key discovery deferred to D0b — see
-    sync-primitives.md §4 on the reachability caveat). `get-successors` served +
+    peer addressed by dial string now (dial-by-key deferred to D0b's
+    relay-coordinated connectivity — see sync-primitives.md §4.1). `get-successors` served +
     round-trip tested but not yet driven. Two headless tests: backfill walks a 3-message
     chain to genesis so `load_dag`/`heads`/`next_logical` are reply-ready; and a
     peer-serves-nothing case stops rather than looping. CLI hook: `zink-cli backfill`,
     with `listen` printing its peer sync address. WASM build unaffected — sync gated
     `cfg(not(wasm))`.)*
-  - [ ] **D0b · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
-    from the message `sender`); forward catch-up via `get-successors`.
+  - [ ] **D0b · Relay-coordinated peer connectivity.** 🎯 The reachability layer under
+    the peer ALPN. Today the client is dial-only and reaches a peer only at an explicit
+    `ip:port`, so cross-NAT peer dialing — and therefore auto-sync, `who-is-this`, and
+    direct delivery — can't work. Run the **iroh relay server inside the `zink-relay`**
+    binary (one service = iroh relaying + mailbox/blobs; `tls: None`, so no domain/cert,
+    native clients for now), have clients **home to their own relays** (`RelayMode::
+    Custom` — still **multi-relay**, never a single shared relay), and dial a peer by key
+    via their `RelayUrl`. iroh then **holepunches** to a direct P2P path when it can and
+    **falls back to relaying** the (encrypted) QUIC through the relay when it can't — a
+    peer stays reachable across NATs without routing plaintext or assuming direct
+    connectivity. Needs a `RelayUrl` in the `ContactRecord` (additive version bump — the
+    record already flags relay-URL addressing as future; shared via the existing
+    QR/record flow, since relays need not be invisible). *Done when:* two NAT'd clients
+    on **different** relays establish a peer connection (direct if holepunched, relayed
+    otherwise) and one backfills from the other **by key alone**. Design:
+    [sync-primitives.md](./sync-primitives.md) §4. **Foundation for D0c, D1's
+    `who-is-this`, and D5.**
+  - [ ] **D0c · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
+    from the message `sender`, dialed by key via D0b); forward catch-up via
+    `get-successors`.
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
-  petnames; `who-is-this` pull; client-side trust ranking.
+  petnames; `who-is-this` pull *(a peer request/response — depends on D0b connectivity)*;
+  client-side trust ranking. *(Profile + petnames are largely already built from Stage C:
+  `set_profile`/`my_record`, `add_contact` petnames with collision checks, the app
+  ContactsView + QR add. The unbuilt part is the networked `who-is-this` + ranking.)*
 - [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
   resolution; history backfill via content-key re-wrap. *(Review note: contact
   identity is currently keyed on `record.keys.first()` — revisit so a re-scanned
@@ -331,13 +354,14 @@ on `keys.first()` needs revisiting at D2.
 - [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?" answers
   from contacts; concurrency-aware message views.
 - [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
-  device is online and dialable (iroh discovery), deliver the envelope peer-to-peer
-  over the D0 peer ALPN (a `Deliver` op + durable-store ack) instead of the relay
-  mailbox; fall back to the mailbox on any failure, discharge the C4 outbox entry
-  either way, dedup by id (free). Closes the SPEC §5.1/§5.3 intent-vs-implementation
-  gap: the relay sees no metadata for online conversations, and two reachable peers
-  don't need a working relay. **Depends on D0's peer ALPN; off the social-features
-  critical path** (schedule when p2p/metadata-minimization is prioritized). Design:
+  device is online and reachable (via D0b connectivity — holepunched direct, or
+  relay-routed as fallback), deliver the envelope peer-to-peer over the D0a peer ALPN
+  (a `Deliver` op + durable-store ack) instead of the relay mailbox; fall back to the
+  mailbox on any failure, discharge the C4 outbox entry either way, dedup by id (free).
+  Closes the SPEC §5.1/§5.3 intent-vs-implementation gap: the relay sees no metadata for
+  online conversations, and two reachable peers don't need the mailbox. **Depends on
+  D0a's peer ALPN + D0b connectivity; off the social-features critical path** (schedule
+  when p2p/metadata-minimization is prioritized). Design:
   [direct-delivery.md](./direct-delivery.md) (⚠️ skip-mailbox-on-direct-ack vs
   always-deposit — resolve after first on-device test). *Done when:* two CLI clients
   online with the relay unreachable exchange a message directly; killing the receiver

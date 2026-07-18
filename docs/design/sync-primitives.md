@@ -116,46 +116,56 @@ it is now also a server.
 - **Reachability = presence.** A reachable peer *is* an online, serving peer;
   an unreachable one falls back to the relay/other peers. No presence protocol.
 
-**Addressing the peer — resolved (2026-07-12), robustness principle.** `backfill`
-accepts *both* forms of peer address and picks by shape:
+### 4.1 Addressing & reachability — resolved (2026-07-12)
 
-- **`<endpoint-id>@<ip:port>` — the primary, shipped path.** Deterministic,
-  needs no discovery infrastructure, and is what the CLI and tests use. This is
-  what we expect users to paste/exchange for now.
-- **A bare `<endpoint-id>` — resolved via iroh discovery** (SPEC §3.6: discovery
-  resolves key→address for online nodes). Liberal input for other clients and
-  for later UX, *but not free*: key-only resolution needs discovery **enabled on
-  the client endpoint**, which `presets::Minimal` does not do today. So this is a
-  real endpoint capability, not just a parse branch — it lights up when we wire
-  discovery (alongside D0b), and until then a bare key simply fails to resolve
-  (surfaced, never a silent hang). Accepting the form now keeps the API stable;
-  we don't half-implement the resolution and pretend it works.
+Two shapes, and the settled model for reaching peers is **relay-coordinated, not
+a discovery service**:
 
-**Discovery feasibility (investigated 2026-07-12).** iroh 1.0 renamed discovery
-to `address_lookup`, added à la carte via `Builder::address_lookup(...)`.
-Enabling it is ~2 lines — and crucially `presets::N0DisableRelay` gives n0's
-DNS/pkarr key→address discovery *with n0's relay fleet turned off*, so discovery
-is separable from the relays we deliberately don't want (the original reason we
-picked `Minimal`). In-crate mechanisms (`DnsAddressLookup`, `PkarrPublisher`/
-`PkarrResolver`) need no new dep but lean on n0's public DNS/pkarr server; mDNS
-(`iroh-mdns-address-lookup`, LAN-only) and mainline-DHT
-(`iroh-mainline-address-lookup`, decentralized) are separate crates. **The catch
-is not discovery but reachability:** finding a peer's address ≠ being able to
-connect to it. A phone on cellular/CGNAT usually isn't dialable at a direct
-`ip:port` even once resolved — that needs holepunching via an iroh *transport*
-relay, which we don't run (our mailbox works cross-network only because both
-clients dial its stable public address *outbound*). So key-only discovery is a
-cheap add for *reachable* peers (same-LAN, or one side publicly reachable); full
-cross-NAT peer sync is a larger, later piece (an iroh relay, or routing sync
-through the existing rendezvous). This is why D0a ships the dial string and the
-ContactRecord `relays` stay the rendezvous anchor.
+- **D0a (shipped): explicit dial string `<endpoint-id>@<ip:port>`.** No extra
+  infrastructure, works when the peer has a directly reachable address (same-LAN,
+  or one side public). What the CLI and tests use; the zero-infra path.
+- **D0b (foundation): dial a peer by key, relay-coordinated.** The cross-NAT
+  answer — and it needs **no DNS/pkarr/mDNS discovery service**:
+  - The **`zink-relay` binary also runs the iroh relay server** — one service,
+    iroh relaying + mailbox/blobs (logically separate, operationally one binary).
+    iroh relay TLS is *optional*: `tls: None` runs it over plain HTTP, so no
+    domain/cert for native clients (a browser client would later want HTTPS) —
+    consistent with the "no TLS/domain" stance from C0.
+  - **Clients home to their own relay(s)** (`RelayMode::Custom`) — still
+    **multi-relay**: a device advertises its relays in its `ContactRecord` just
+    as the mailbox already does. **Never a single shared relay** — spinning up
+    more relays must work seamlessly (SPEC §3.6; `fanout::distinct_relays` and
+    the per-relay `recv` loop already assume many).
+  - To reach peer B, dial `EndpointAddr::new(B_key).with_relay_url(B_relay)`,
+    where `B_relay` comes from **B's ContactRecord** (which A already holds as a
+    contact). iroh routes initial signaling via B's relay, then **holepunches to
+    a direct P2P path**, **falling back to relaying** the (encrypted) QUIC
+    through the relay if the punch fails. Two peers on *different* relays connect
+    fine — the callee's relay is the rendezvous.
+  - **The one additive change:** a relay entry in `ContactRecord` must carry the
+    iroh `RelayUrl`, not just the mailbox dial string — the record already flags
+    that "richer addressing (relay URLs) is a version bump." Shared through the
+    same QR/record flow (relays need not be invisible — users/clients may know
+    and exchange them).
+
+**Why relay-coordinated beats a discovery service.** A DNS/pkarr/mDNS lookup only
+resolves key→address; it does *not* make a NATed peer connectable — that still
+needs a relay to coordinate the holepunch. Since we already run a relay and
+already ship each peer's relay set in its record, the relay is *both* the
+rendezvous and the punch coordinator, and key→address falls out of the record for
+free. (iroh's `address_lookup` / `N0DisableRelay` remain available if we ever
+want key dialing without the relay-in-record, but they're not the plan.)
+
+**Metadata** is no worse than today — the mailbox already sees who-talks-to-whom —
+and a successful punch means the relay sees *less* (handshake only, then direct).
 
 ---
 
 ## 5. The backfill loop (fixing the hole)
 
 Requester side, `Client::backfill(conversation, from)` where `from` is a peer
-address (§4 — a dial string now, a bare key once discovery is wired):
+address (§4.1 — an explicit dial string now; dialed by key via the peer's
+`RelayUrl` once D0b's relay-coordinated connectivity lands):
 
 ```
 dial `from` on SYNC_ALPN (short timeout; on failure, give up — caller falls back)
@@ -199,18 +209,23 @@ message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
 
 ## 7. Slicing
 
-- **D0a · Serve + backward-fill (this slice).** `SYNC_ALPN` + wire types in
+- **D0a · Serve + backward-fill (done).** `SYNC_ALPN` + wire types in
   `zink-protocol`; client accepting router + `SyncHandler` serving envelopes;
   `Client::backfill(conversation, from)`; a CLI hook and a headless e2e test:
   A builds a conversation of N messages, B is handed only the latest, B
   backfills from A to the genesis, B `load_dag` succeeds and B can thread a
   reply. Non-goals: re-wrap-to-read (D2), auto-backfill-on-orphan wiring,
-  key-only dialing (needs discovery enabled — dial string only for now),
-  forward auto-sync.
-- **D0b · Auto-sync wiring.** Trigger backfill on an orphan receipt; pick the
-  peer from `sender`; forward catch-up via `get-successors`; wire iroh discovery
-  so a bare `<endpoint-id>` resolves (the key-only address form of §4). Small,
-  once D0a is proven.
+  dial-by-key (D0b), forward auto-sync.
+- **D0b · Relay-coordinated peer connectivity (§4.1).** iroh relay server in the
+  `zink-relay` binary (`tls: None`); clients home to their own relays
+  (`RelayMode::Custom`, multi-relay); `RelayUrl` added to `ContactRecord`
+  (version bump); dial a peer by key via their record's relay, holepunching to
+  direct with relay fallback. The foundation for D0c, D1's `who-is-this`, and D5.
+  *Done when:* two NAT'd clients on different relays connect and one backfills
+  from the other by key alone.
+- **D0c · Auto-sync wiring.** Trigger backfill on an orphan receipt; pick the
+  peer from `sender` (dialed by key via D0b); forward catch-up via
+  `get-successors`. Small, once D0a + D0b are proven.
 
 ## 8. Doc touchpoints when this lands
 
