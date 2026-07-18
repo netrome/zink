@@ -364,9 +364,16 @@ on `keys.first()` needs revisiting at D2.
     use `home_relay_specs()` — feeding `home_relays()` (mailbox-only) back into
     `set_profile` would silently drop the URL. Deploy: unit now passes
     `--relay-port 4401` (tcp) next to `--port 4400` (udp), DEV-SETUP §5 updated.
-    **Remaining for the full done-when: the manual cross-NAT run** — redeploy the
-    relay, re-exchange QR/records (v1 in-place change broke stored dev records as
-    planned), then phone-on-cellular ↔ laptop `backfill <conv> <petname>`.)*
+    **Manual run verified live (2026-07-18):** laptop (app identity via CLI)
+    backfilled a 27-message conversation from the phone **by petname alone** —
+    conversation stashed, one fresh message received, `backfill` walked back to
+    the genesis, full history restored and readable. Field lessons: a stale
+    installed relay binary (the DEV-SETUP §5 `~/.local/bin` footgun) and pre-D0b
+    profiles (bare dial strings → records without relay URLs) are the two traps;
+    the phone had to restart after its profile change before it was dialable
+    (homing applies at bind — expected, but a "restart to apply" hint in the app
+    is cheap polish). *Left to confirm: the same run with the phone on cellular*
+    (Wi-Fi off) for the strict cross-NAT holepunch/relay-fallback claim.)*
   - [ ] **D0c · Serving gate (contacts-only).** Immediately after D0b — dial-by-key
     widens who can reach the sync ALPN from "whoever knows my `ip:port`" to "anyone
     holding my key + relay". Client policy, not protocol: `SyncHandler` checks the
