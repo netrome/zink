@@ -226,8 +226,8 @@ message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
   backfills from A to the genesis, B `load_dag` succeeds and B can thread a
   reply. Non-goals: re-wrap-to-read (D2), auto-backfill-on-orphan wiring,
   dial-by-key (D0b), forward auto-sync.
-- **D0b · Relay-coordinated peer connectivity (§4.1) — code complete
-  (2026-07-18; manual cross-NAT run pending).** iroh relay server in the
+- **D0b · Relay-coordinated peer connectivity (§4.1) — done (2026-07-18;
+  cross-NAT verified live, phone on cellular).** iroh relay server in the
   `zink-relay` binary (`tls: None`, `--relay-port`); clients home to their own
   relays (`RelayMode::Custom`, multi-relay); `RelayEntry { mailbox, relay_url }`
   in `ContactRecord` (in-place at version 1, paired — §4.1); dial a peer by key
@@ -237,7 +237,8 @@ message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
   *Done when:* two NAT'd clients on different relays connect and one backfills
   from the other by key alone — headless e2e for by-key dial via relay
   rendezvous ✅ (`backfill_by_key__should_reach_a_peer_via_its_relay_across_two_relays`);
-  the cross-NAT holepunch itself is a documented manual run (pending).
+  cross-NAT manual run ✅ — phone on cellular backfilled a 27-message
+  conversation to genesis by petname alone.
   As-built notes: iroh's relay transport is fixed at bind, so profile relay
   changes apply at the next open; the dialer needs no entry for the callee's
   relay in its own map (iroh connects to any relay URL in a peer's

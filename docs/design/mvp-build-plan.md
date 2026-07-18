@@ -372,8 +372,8 @@ on `keys.first()` needs revisiting at D2.
     profiles (bare dial strings → records without relay URLs) are the two traps;
     the phone had to restart after its profile change before it was dialable
     (homing applies at bind — expected, but a "restart to apply" hint in the app
-    is cheap polish). *Left to confirm: the same run with the phone on cellular*
-    (Wi-Fi off) for the strict cross-NAT holepunch/relay-fallback claim.)*
+    is cheap polish). Run with the phone on cellular (Wi-Fi off), so the
+    cross-NAT criterion is met — **D0b fully done.**)*
   - [ ] **D0c · Serving gate (contacts-only).** Immediately after D0b — dial-by-key
     widens who can reach the sync ALPN from "whoever knows my `ip:port`" to "anyone
     holding my key + relay". Client policy, not protocol: `SyncHandler` checks the
