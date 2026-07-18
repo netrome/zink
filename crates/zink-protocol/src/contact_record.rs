@@ -14,6 +14,51 @@ use crate::keys::PublicKey;
 /// QR encoders can use the compact alphanumeric mode.
 const QR_PREFIX: &str = "ZINK:";
 
+/// One relay *service* a device uses: the mailbox endpoint and — the same
+/// binary — the iroh relay server coordinating peer connectivity (D0b).
+/// One structured entry, not parallel lists: both fields address the same
+/// service and must never drift apart. No own `version` field — the entry
+/// is plain structure inside the record, governed by the record's version.
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RelayEntry {
+    /// Mailbox dial string `<endpoint-id>@<ip:port>` — where deposits go
+    /// and mailboxes are drained.
+    pub mailbox: String,
+    /// iroh relay URL (`http://host:port/`) of the same relay service —
+    /// what a device homes to (`RelayMode::Custom`) and what a peer dials
+    /// through to reach this device by key (rendezvous + holepunch
+    /// coordination). `None` = mailbox-only knowledge (e.g. a raw contact
+    /// spec): deposits work, dial-by-key doesn't.
+    pub relay_url: Option<String>,
+}
+
+impl RelayEntry {
+    /// Parse the human/CLI spec `<mailbox-dial>[#<relay-url>]` — the form
+    /// `zink-relay` prints and profiles/QR flows pass around. Pure string
+    /// splitting; the parts are validated where they're used (the mailbox
+    /// dial by the dialing edge, the URL by the endpoint builder).
+    pub fn from_spec(spec: &str) -> Self {
+        match spec.split_once('#') {
+            Some((mailbox, url)) if !url.trim().is_empty() => Self {
+                mailbox: mailbox.trim().to_string(),
+                relay_url: Some(url.trim().to_string()),
+            },
+            _ => Self {
+                mailbox: spec.trim().trim_end_matches('#').to_string(),
+                relay_url: None,
+            },
+        }
+    }
+
+    /// The inverse of [`Self::from_spec`].
+    pub fn to_spec(&self) -> String {
+        match &self.relay_url {
+            Some(url) => format!("{}#{url}", self.mailbox),
+            None => self.mailbox.clone(),
+        }
+    }
+}
+
 /// The rendezvous record: whom to fan out to, how to display them, and
 /// where their mailboxes live when they're offline.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -23,17 +68,18 @@ pub struct ContactRecord {
     pub keys: Vec<PublicKey>,
     /// Self-attestations — name now; avatar / same-person-as links later.
     pub attestations: Vec<SignedAttestation>,
-    /// Relay dial strings (`<endpoint-id>@<ip:port>`) hosting the mailboxes.
-    /// A dial string is the MVP wire form of "relay endpoint"; richer
-    /// addressing (relay URLs for browser clients) is a version bump.
-    pub relays: Vec<String>,
+    /// The relay services hosting this person's mailboxes and coordinating
+    /// peer connectivity. (Field added in-place at version 1 pre-deployment,
+    /// 2026-07-18 — replaced bare dial strings; dev-stage records were
+    /// re-exchanged.)
+    pub relays: Vec<RelayEntry>,
 }
 
 impl ContactRecord {
     pub fn new(
         keys: Vec<PublicKey>,
         attestations: Vec<SignedAttestation>,
-        relays: Vec<String>,
+        relays: Vec<RelayEntry>,
     ) -> Self {
         Self {
             version: FORMAT_VERSION,
@@ -116,8 +162,36 @@ mod tests {
         ContactRecord::new(
             vec![device.public()],
             vec![name_attestation(device, device.public(), name)],
-            vec!["someid@203.0.113.7:4400".to_string()],
+            vec![RelayEntry::from_spec(
+                "someid@203.0.113.7:4400#http://203.0.113.7:4401",
+            )],
         )
+    }
+
+    #[test]
+    fn relay_entry_spec__should_roundtrip_with_and_without_a_relay_url() {
+        // Given / When / Then
+        for spec in [
+            "someid@203.0.113.7:4400#http://203.0.113.7:4401",
+            "someid@203.0.113.7:4400",
+        ] {
+            let entry = RelayEntry::from_spec(spec);
+            assert_eq!(entry.to_spec(), spec);
+        }
+        assert_eq!(
+            RelayEntry::from_spec("id@1.2.3.4:5#http://1.2.3.4:6").relay_url,
+            Some("http://1.2.3.4:6".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_entry_spec__should_treat_a_trailing_hash_or_whitespace_as_no_url() {
+        // Given / When
+        let entry = RelayEntry::from_spec("  someid@203.0.113.7:4400#  ");
+
+        // Then
+        assert_eq!(entry.mailbox, "someid@203.0.113.7:4400");
+        assert_eq!(entry.relay_url, None);
     }
 
     #[test]

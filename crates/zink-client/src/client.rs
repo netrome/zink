@@ -9,7 +9,7 @@ use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, FORMAT_VERSION,
     MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
-    SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
+    RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
 };
 
 use crate::state::ClientState;
@@ -72,8 +72,17 @@ impl Client {
         key_path: &str,
         config: ClientConfig,
     ) -> Result<Self, String> {
-        let endpoint = net::bind_endpoint(&device).await?;
+        // State first: the endpoint homes to the profile's relay URLs (D0b),
+        // and iroh fixes the relay transport at bind time — so a relay added
+        // to the profile takes effect for the peer layer on the next open.
         let state = ClientState::open(key_path);
+        let home_relays: Vec<iroh::RelayUrl> = state
+            .home_relay_entries()
+            .iter()
+            .filter_map(|entry| entry.relay_url.as_deref())
+            .map(net::parse_relay_url)
+            .collect::<Result<_, _>>()?;
+        let endpoint = net::bind_endpoint(&device, &home_relays).await?;
         // Serve peer history sync on our own endpoint (D0). The endpoint is a
         // cheap handle to clone; the router keeps the serve loop alive.
         let sync_router = crate::sync::spawn_sync_router(endpoint.clone(), state.clone());
@@ -86,10 +95,19 @@ impl Client {
         })
     }
 
+    /// Graceful shutdown for short-lived edges (the CLI): since the endpoint
+    /// homes to a relay (D0b) it holds a live transport, and dropping that
+    /// without closing makes iroh log an ungraceful-abort error on every
+    /// one-shot command. Long-lived edges (the app) never call this.
+    pub async fn close(self) {
+        let _ = self._sync_router.shutdown().await;
+        self.endpoint.close().await;
+    }
+
     /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
-    /// device reaches us on `SYNC_ALPN` to backfill history. (In a real
-    /// deployment iroh discovery resolves a key to its address; this is the
-    /// explicit form the CLI and tests use.)
+    /// device reaches us on `SYNC_ALPN` to backfill history when it knows
+    /// our address explicitly (same-LAN / dev tooling). The deployment path
+    /// is dial-by-key via our home relay (`backfill_by_key`, D0b).
     pub fn sync_address(&self) -> Result<String, String> {
         let addr = self.endpoint.addr();
         let sock = addr.ip_addrs().next().ok_or("no bound address yet")?;
@@ -187,7 +205,7 @@ impl Client {
             {
                 Some((_, record)) => contacts.push(Contact {
                     keys: vec![key],
-                    relays: record.relays.clone(),
+                    relays: record.relays.iter().map(|r| r.mailbox.clone()).collect(),
                 }),
                 None => unknown.push(key),
             }
@@ -683,23 +701,45 @@ impl Client {
     }
 
     /// Set this device's display name and home relays — what `my_record`
-    /// publishes and what `recv` drains by default.
+    /// publishes and what `recv` drains by default. Each relay is the spec
+    /// `zink-relay` prints: `<endpoint-id>@<ip:port>[#<relay-url>]` — the
+    /// mailbox dial string, plus the same service's iroh relay URL, which
+    /// makes this device reachable by key (D0b; applied at the next open,
+    /// since the endpoint's relay transport is fixed at bind time).
     pub fn set_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {
         if name.trim().is_empty() {
             return Err("name must not be empty".into());
         }
-        for relay in relays {
-            net::parse_relay(relay)?;
+        let entries: Vec<RelayEntry> = relays.iter().map(|s| RelayEntry::from_spec(s)).collect();
+        for entry in &entries {
+            net::parse_relay(&entry.mailbox)?;
+            if let Some(url) = &entry.relay_url {
+                net::parse_relay_url(url)?;
+            }
         }
-        self.state.save_profile(name.trim(), relays)
+        self.state.save_profile(name.trim(), &entries)
     }
 
     pub fn profile_name(&self) -> Option<String> {
         self.state.profile_name()
     }
 
+    /// The home relays' mailbox dial strings — what the mailbox paths
+    /// (recv, subscribe, register) dial.
     pub fn home_relays(&self) -> Vec<String> {
         self.state.home_relays()
+    }
+
+    /// The home relays as full specs (`dial[#relay-url]`) — the round-trip
+    /// form: what an edge shows in a profile form and feeds back into
+    /// `set_profile`. Using `home_relays` there instead would silently drop
+    /// the relay URL on a re-save.
+    pub fn home_relay_specs(&self) -> Vec<String> {
+        self.state
+            .home_relay_entries()
+            .iter()
+            .map(RelayEntry::to_spec)
+            .collect()
     }
 
     /// This device's ContactRecord: key, self-attested name, home relays.
@@ -709,7 +749,7 @@ impl Client {
             .state
             .profile_name()
             .ok_or("set a profile name first")?;
-        let relays = self.state.home_relays();
+        let relays = self.state.home_relay_entries();
         if relays.is_empty() {
             return Err("set a home relay first".into());
         }
@@ -803,6 +843,39 @@ impl Client {
     /// Returns the number of newly-stored messages.
     pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, String> {
         self.backfill_addr(conversation, net::parse_relay(from)?)
+            .await
+    }
+
+    /// `backfill` reaching the peer **by key alone** (D0b): the peer's relay
+    /// URLs come from their stored ContactRecord, iroh routes the initial
+    /// signaling via their relay and holepunches to a direct path (relaying
+    /// the encrypted QUIC as fallback). The device key IS the endpoint key —
+    /// no lookup service involved. Fails without a stored record carrying a
+    /// relay URL for `peer` (a mailbox-only record can't rendezvous).
+    pub async fn backfill_by_key(
+        &self,
+        conversation: MessageId,
+        peer: PublicKey,
+    ) -> Result<usize, String> {
+        let records = self.state.contacts()?;
+        let record = records
+            .iter()
+            .find(|(_, record)| record.keys.contains(&peer))
+            .map(|(_, record)| record)
+            .ok_or("no stored contact record for that key")?;
+        let relay_urls: Vec<iroh::RelayUrl> = record
+            .relays
+            .iter()
+            .filter_map(|entry| entry.relay_url.as_deref())
+            .map(net::parse_relay_url)
+            .collect::<Result<_, _>>()?;
+        if relay_urls.is_empty() {
+            return Err(
+                "contact record has no relay url — re-exchange records to enable dial-by-key"
+                    .into(),
+            );
+        }
+        self.backfill_addr(conversation, net::peer_addr(&peer, &relay_urls)?)
             .await
     }
 
@@ -904,7 +977,7 @@ impl Contact {
     fn from_record(record: &ContactRecord) -> Self {
         Contact {
             keys: record.keys.clone(),
-            relays: record.relays.clone(),
+            relays: record.relays.iter().map(|r| r.mailbox.clone()).collect(),
         }
     }
 }
@@ -1068,6 +1141,113 @@ mod tests {
         assert_eq!(dag.next_logical(), 3);
 
         let _ = std::fs::remove_dir_all(temp_root("walk"));
+    }
+
+    /// An in-process iroh relay server (plain HTTP, `tls: None` — the same
+    /// shape the `zink-relay` binary embeds). Returns the handle (kept alive
+    /// by the caller) and its relay URL.
+    async fn spawn_test_relay() -> (iroh_relay::server::Server, String) {
+        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+        let mut config = ServerConfig::default();
+        config.relay = Some(RelayConfig::new((std::net::Ipv4Addr::LOCALHOST, 0)));
+        let server = Server::spawn(config).await.expect("spawn iroh relay");
+        let url = format!("http://{}", server.http_addr().expect("relay http addr"));
+        (server, url)
+    }
+
+    /// A profile whose relay entry carries `relay_url` — written straight to
+    /// state so the endpoint homes to it at the *next* open (the D0b
+    /// restart-to-apply semantics; the mailbox dial string is never used
+    /// here). Returns the homed client.
+    async fn open_homed(test: &str, name: &str, relay_url: &str) -> Client {
+        let key_path = temp_key(test, name);
+        ClientState::open(&key_path)
+            .save_profile(
+                name,
+                &[RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(relay_url.to_string()),
+                }],
+            )
+            .expect("save profile");
+        Client::open_or_create(&key_path)
+            .await
+            .expect("open client")
+    }
+
+    #[tokio::test]
+    async fn backfill_by_key__should_reach_a_peer_via_its_relay_across_two_relays() {
+        // Given: two relay services; A homes to one, B to the other — the
+        // D0b acceptance shape (never a single shared relay). B knows only
+        // A's *key* plus A's stored ContactRecord naming A's relay URL.
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed("bykey", "server", &url_a).await;
+        let b = open_homed("bykey", "client", &url_b).await;
+        a.endpoint.online().await; // A must be homed before B rendezvouses via its relay
+
+        let author = DeviceKey::from_seed([5; 32]);
+        let msgs = chain(&author, b.public_key(), 3);
+        let conversation = msgs[0].id();
+        for envelope in &msgs {
+            a.state.store_envelope(conversation, envelope).unwrap();
+        }
+        b.state
+            .store_envelope(conversation, msgs.last().unwrap())
+            .unwrap();
+        let record = ContactRecord::new(
+            vec![a.public_key()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "unused@203.0.113.1:1".to_string(),
+                relay_url: Some(url_a.clone()),
+            }],
+        );
+        b.add_contact(&record, Some("a".to_string()))
+            .expect("add contact");
+
+        // When: B backfills by key alone — no ip:port anywhere; iroh
+        // rendezvouses via A's relay and holepunches (or relays) from there.
+        let fetched = b
+            .backfill_by_key(conversation, a.public_key())
+            .await
+            .expect("backfill by key");
+
+        // Then: the missing ancestors arrived and the DAG is reply-ready.
+        assert_eq!(fetched, 2, "genesis + the middle message");
+        let dag = b.state.load_dag(conversation).expect("DAG builds");
+        assert_eq!(dag.next_logical(), 3);
+
+        let _ = std::fs::remove_dir_all(temp_root("bykey"));
+    }
+
+    #[tokio::test]
+    async fn backfill_by_key__should_fail_plainly_without_a_relay_url_in_the_record() {
+        // Given: a stored record that is mailbox-only (raw-contact shape)
+        let b = Client::open_or_create(&temp_key("nourl", "client"))
+            .await
+            .expect("open B");
+        let peer = DeviceKey::from_seed([6; 32]).public();
+        let record = ContactRecord::new(
+            vec![peer],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "unused@203.0.113.1:1".to_string(),
+                relay_url: None,
+            }],
+        );
+        b.add_contact(&record, Some("peer".to_string()))
+            .expect("add contact");
+
+        // When / Then: dial-by-key is impossible and says so — no fabricated
+        // reachability, no hang.
+        let err = b
+            .backfill_by_key(MessageId([1; 32]), peer)
+            .await
+            .expect_err("no relay url to rendezvous through");
+        assert!(err.contains("no relay url"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(temp_root("nourl"));
     }
 
     #[tokio::test]

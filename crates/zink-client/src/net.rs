@@ -5,24 +5,61 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
 use zink_protocol::{
     DeviceKey, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MAX_SYNC_RESPONSE_BYTES, MailboxOp,
-    MailboxRequest, MailboxResponse, MailboxResult, MessageEnvelope, SyncOp, SyncRequest,
-    SyncResponse, SyncResult,
+    MailboxRequest, MailboxResponse, MailboxResult, MessageEnvelope, PublicKey, SyncOp,
+    SyncRequest, SyncResponse, SyncResult,
 };
 
 /// The endpoint key IS the device key: mailbox auth is the connection.
-pub(crate) async fn bind_endpoint(device: &DeviceKey) -> Result<Endpoint, String> {
-    Endpoint::builder(presets::Minimal)
-        .secret_key(SecretKey::from_bytes(&device.seed()))
+///
+/// `home_relays` are the iroh relay URLs of this device's own relay services
+/// (D0b): with any set, the endpoint homes to them (`RelayMode::Custom`) and
+/// stays reachable by key across NATs — iroh holepunches to a direct path
+/// when it can and falls back to relaying the (encrypted) QUIC when it
+/// can't. With none set, the endpoint is dial-only + directly-dialable,
+/// exactly as before; relay changes take effect on the next bind (app
+/// restart) — iroh's relay transport is fixed at bind time.
+pub(crate) async fn bind_endpoint(
+    device: &DeviceKey,
+    home_relays: &[RelayUrl],
+) -> Result<Endpoint, String> {
+    let mut builder =
+        Endpoint::builder(presets::Minimal).secret_key(SecretKey::from_bytes(&device.seed()));
+    if !home_relays.is_empty() {
+        let map: RelayMap = home_relays.iter().cloned().collect();
+        builder = builder.relay_mode(RelayMode::Custom(map));
+    }
+    builder
         .bind()
         .await
         .map_err(|e| format!("bind endpoint: {e}"))
 }
 
-/// `<endpoint-id>@<ip:port>`, as printed by `zink-relay`.
+/// Parse an iroh relay URL from a `RelayEntry.relay_url` value.
+pub(crate) fn parse_relay_url(url: &str) -> Result<RelayUrl, String> {
+    RelayUrl::from_str(url).map_err(|e| format!("relay url {url}: {e}"))
+}
+
+/// A peer address from its device key + its relay URLs (from its
+/// ContactRecord): iroh routes initial signaling via the peer's relay, then
+/// holepunches to a direct path or falls back to relaying. The device key
+/// IS the endpoint key, so no lookup service is involved.
+pub(crate) fn peer_addr(key: &PublicKey, relay_urls: &[RelayUrl]) -> Result<EndpointAddr, String> {
+    let id = EndpointId::from_bytes(&key.0).map_err(|e| format!("peer endpoint id: {e}"))?;
+    let mut addr = EndpointAddr::new(id);
+    for url in relay_urls {
+        addr = addr.with_relay_url(url.clone());
+    }
+    Ok(addr)
+}
+
+/// `<endpoint-id>@<ip:port>`, as printed by `zink-relay`. Tolerates the
+/// full relay spec `<endpoint-id>@<ip:port>#<relay-url>` — mailbox dialing
+/// only needs the part before the `#`.
 pub(crate) fn parse_relay(spec: &str) -> Result<EndpointAddr, String> {
+    let spec = spec.split_once('#').map_or(spec, |(dial, _)| dial);
     let (id, sock) = spec
         .split_once('@')
         .ok_or("relay must be <endpoint-id>@<ip:port>")?;

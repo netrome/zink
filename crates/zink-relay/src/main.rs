@@ -1,35 +1,45 @@
 //! Relay binary: iroh endpoint + mailbox ALPN + blob cache, persisted on
-//! disk (slice B5).
+//! disk (slice B5) — plus, since D0b, the embedded **iroh relay server**
+//! (plain HTTP, no TLS/domain for native clients): one service = iroh
+//! relaying (peer rendezvous + holepunch coordination) + mailbox/blobs.
 //!
 //! Runs self-sufficient: no external iroh relays or discovery services. A
 //! zink relay sits on a publicly reachable address and clients dial it by
 //! its full `EndpointAddr` (id + socket addrs), which the ContactRecord's
-//! `relays` field carries (SPEC §3.6).
+//! `relays` field carries (SPEC §3.6). Clients *home* to the iroh relay
+//! URL (`RelayMode::Custom`) to stay reachable by key across NATs.
 //!
 //! ```text
-//! zink-relay [data-dir] [--port <udp-port>]  # defaults: ./zink-relay-data, ephemeral
+//! zink-relay [data-dir] [--port <udp-port>] [--relay-port <tcp-port>]
+//!            # defaults: ./zink-relay-data, ephemeral, ephemeral
 //! ```
 //!
-//! A deployed relay wants a fixed `--port` so its dial string survives
-//! restarts (the endpoint key already does, via `relay.key`).
+//! A deployed relay wants a fixed `--port` and `--relay-port` so its
+//! printed spec survives restarts (the endpoint key already does, via
+//! `relay.key`).
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use iroh::endpoint::presets;
 use iroh::{Endpoint, SecretKey};
+use iroh_relay::server::{RelayConfig, Server, ServerConfig};
 use zink_relay::blobs::{BlobCacheConfig, fs_blob_cache};
 use zink_relay::clock::SystemClock;
 use zink_relay::fs::FsMailboxStore;
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
 
-const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>]
+const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>] [--relay-port <tcp-port>]
 
   data-dir          where mailboxes, the blob cache, and the relay's identity
                     key live (default: ./zink-relay-data)
   --port <udp-port> fixed UDP port, so the dial string survives restarts
                     (default: ephemeral)
+  --relay-port <tcp-port>
+                    fixed HTTP port for the embedded iroh relay server —
+                    peer rendezvous/holepunch coordination; clients home to
+                    it (default: ephemeral)
   -h, --help        this text
   -V, --version     version + build info";
 
@@ -46,8 +56,23 @@ fn version() -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing();
-    let (data_dir, port) = parse_args();
+    let (data_dir, port, relay_port) = parse_args();
     std::fs::create_dir_all(&data_dir)?;
+
+    // The embedded iroh relay server (D0b): plain HTTP — `RelayConfig::new`
+    // is `tls: None`, so no domain/cert; native clients only for now (a
+    // browser client would need HTTPS, post-MVP). Untrusted like the
+    // mailbox: it coordinates holepunching and forwards *encrypted* QUIC.
+    let mut relay_config = ServerConfig::default();
+    relay_config.relay = Some(RelayConfig::new((
+        Ipv4Addr::UNSPECIFIED,
+        relay_port.unwrap_or(0),
+    )));
+    let relay_server = Server::spawn(relay_config).await?;
+    let relay_http_port = relay_server
+        .http_addr()
+        .ok_or("iroh relay server has no http addr")?
+        .port();
 
     // The endpoint key must survive restarts: it IS the relay's identity —
     // the dial strings in every ContactRecord point at it.
@@ -61,8 +86,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // "which build is deployed?" without touching the binary.
     println!("{} listening (data: {})", version(), data_dir.display());
     println!("  endpoint id: {}", endpoint.id());
+    // The full relay spec `<id>@<ip:port>#<relay-url>` — what users paste
+    // into a profile: mailbox dial string + the same host's iroh relay URL.
     for sock in endpoint.addr().ip_addrs() {
-        println!("  dial: {}@{}", endpoint.id(), sock);
+        // A URL host must bracket IPv6 literals ([::1]:4456, not ::1:4456).
+        let url_host = std::net::SocketAddr::new(sock.ip(), relay_http_port);
+        println!("  relay spec: {}@{sock}#http://{url_host}", endpoint.id());
     }
 
     let mailboxes = FsMailboxStore::new(data_dir.join("mailboxes"));
@@ -81,19 +110,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;
+    relay_server.shutdown().await?;
     Ok(())
 }
 
-/// `[data-dir] [--port <udp-port>]`, in any order. `-h`/`-V` print and
-/// exit; argument mistakes print usage and exit(2) — never a Debug-dumped
-/// error, and never silently taken as the data dir.
-fn parse_args() -> (PathBuf, Option<u16>) {
+/// `[data-dir] [--port <udp-port>] [--relay-port <tcp-port>]`, in any
+/// order. `-h`/`-V` print and exit; argument mistakes print usage and
+/// exit(2) — never a Debug-dumped error, and never silently taken as the
+/// data dir.
+fn parse_args() -> (PathBuf, Option<u16>, Option<u16>) {
     let bad = |message: &str| -> ! {
         eprintln!("{message}\n{USAGE}");
         std::process::exit(2);
     };
     let mut data_dir = None;
     let mut port = None;
+    let mut relay_port = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -114,6 +146,15 @@ fn parse_args() -> (PathBuf, Option<u16>) {
                     Err(e) => bad(&format!("--port: {e}")),
                 }
             }
+            "--relay-port" => {
+                let Some(value) = args.next() else {
+                    bad("missing value for --relay-port");
+                };
+                match value.parse() {
+                    Ok(value) => relay_port = Some(value),
+                    Err(e) => bad(&format!("--relay-port: {e}")),
+                }
+            }
             flag if flag.starts_with('-') => bad(&format!("unknown flag {flag}")),
             _ if data_dir.is_some() => bad("more than one data-dir given"),
             _ => data_dir = Some(PathBuf::from(arg)),
@@ -122,6 +163,7 @@ fn parse_args() -> (PathBuf, Option<u16>) {
     (
         data_dir.unwrap_or_else(|| PathBuf::from("./zink-relay-data")),
         port,
+        relay_port,
     )
 }
 

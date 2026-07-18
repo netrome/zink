@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use zink_protocol::{
-    BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey,
+    BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey, RelayEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -284,13 +284,14 @@ impl ClientState {
         ))
     }
 
-    pub fn save_profile(&self, name: &str, relays: &[String]) -> Result<(), String> {
+    pub fn save_profile(&self, name: &str, relays: &[RelayEntry]) -> Result<(), String> {
         let name_path = self.root.join("profile.name");
         create_parent(&name_path)?;
         write_atomic(&name_path, name.as_bytes()).map_err(|e| format!("write profile: {e}"))?;
+        let specs: Vec<String> = relays.iter().map(RelayEntry::to_spec).collect();
         write_atomic(
             &self.root.join("profile.relays"),
-            relays.join("\n").as_bytes(),
+            specs.join("\n").as_bytes(),
         )
         .map_err(|e| format!("write relays: {e}"))
     }
@@ -300,12 +301,22 @@ impl ClientState {
         (!name.trim().is_empty()).then(|| name.trim().to_string())
     }
 
-    pub fn home_relays(&self) -> Vec<String> {
+    /// The home relay services, one spec line per entry (`dial[#relay-url]`).
+    pub fn home_relay_entries(&self) -> Vec<RelayEntry> {
         std::fs::read_to_string(self.root.join("profile.relays"))
             .unwrap_or_default()
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| line.trim().to_string())
+            .map(RelayEntry::from_spec)
+            .collect()
+    }
+
+    /// The home relays' mailbox dial strings — what every mailbox path
+    /// (deposit fan-out, recv, subscribe, outbox keys) runs on.
+    pub fn home_relays(&self) -> Vec<String> {
+        self.home_relay_entries()
+            .into_iter()
+            .map(|entry| entry.mailbox)
             .collect()
     }
 

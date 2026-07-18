@@ -1,9 +1,9 @@
 [Unit]
-Description=zink relay (mailbox + blob cache)
+Description=zink relay (mailbox + blob cache + iroh relay server)
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/zink-relay %h/zink-relay-data --port 4400
+ExecStart=%h/.local/bin/zink-relay %h/zink-relay-data --port 4400 --relay-port 4401
 Restart=always
 RestartSec=5
 

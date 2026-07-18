@@ -24,3 +24,5 @@ wasm-bindgen-futures = "0.4"
 [dev-dependencies]
 # A runtime for the async peer-sync tests (iroh's router needs tokio).
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# In-process iroh relay servers for the D0b by-key connectivity e2e.
+iroh-relay = { version = "1.0.2", features = ["server"] }

@@ -176,7 +176,8 @@ cp deploy/zink-relay.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now zink-relay
 sudo loginctl enable-linger $USER     # start on boot without a login session
-journalctl --user -u zink-relay | grep dial:   # the dial string for clients
+journalctl --user -u zink-relay | grep 'relay spec:'   # what clients paste
+                                                       # into their profile
 ```
 
 ⚠️ The unit runs `~/.local/bin/zink-relay` — `cargo install` puts binaries in
@@ -191,8 +192,11 @@ journalctl --user -u zink-relay -n 5   # the running relay logs its version
 ```
 
 - Data (mailboxes, blob cache, the relay's identity key) lives in
-  `~/zink-relay-data`; the endpoint id and `--port 4400` are stable, so the
-  dial string survives restarts and reboots.
+  `~/zink-relay-data`; the endpoint id, `--port 4400` (mailbox QUIC/UDP), and
+  `--relay-port 4401` (embedded iroh relay server, plain HTTP/TCP — D0b peer
+  rendezvous; clients home to it) are stable, so the printed relay spec
+  `<id>@<ip:4400>#http://<ip>:4401` survives restarts and reboots. Both ports
+  must be reachable (4400/udp, 4401/tcp).
 - New key files (`relay.key`, client `device.key`) are written `0600`. A key
   created before that change keeps its old mode — `chmod 600` it once.
 - Abuse caps are compiled-in defaults for now: 30-day mailbox retention,

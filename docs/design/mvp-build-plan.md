@@ -332,7 +332,7 @@ on `keys.first()` needs revisiting at D2.
     peer-serves-nothing case stops rather than looping. CLI hook: `zink-cli backfill`,
     with `listen` printing its peer sync address. WASM build unaffected — sync gated
     `cfg(not(wasm))`.)*
-  - [ ] **D0b · Relay-coordinated peer connectivity.** 🎯 The reachability layer under
+  - [x] **D0b · Relay-coordinated peer connectivity.** 🎯 The reachability layer under
     the peer ALPN. Today the client is dial-only and reaches a peer only at an explicit
     `ip:port`, so cross-NAT peer dialing — and therefore auto-sync, `who-is-this`, and
     direct delivery — can't work. Run the **iroh relay server inside the `zink-relay`**
@@ -354,6 +354,19 @@ on `keys.first()` needs revisiting at D2.
     documented manual run (like C-spike/C4c). Design:
     [sync-primitives.md](./sync-primitives.md) §4. **Foundation for D0c/D0d, D1's
     `who-is-this`, and D5.**
+    ✅ *(2026-07-18: code complete + headless e2e green — two in-process iroh relay
+    servers, A homed to one / B to the other, B backfills by key alone (record carries
+    only key + relay URL, no ip:port anywhere). `RelayEntry { mailbox, relay_url }` in
+    the record; the user-facing form is the spec `<id>@<ip:port>#http://<ip>:<port>`
+    the relay now prints — `parse_relay` tolerates the full spec everywhere a dial
+    string is accepted. Endpoint homes at open (relay transport is fixed at bind), so
+    profile relay changes apply on the next start. Edges that round-trip the profile
+    use `home_relay_specs()` — feeding `home_relays()` (mailbox-only) back into
+    `set_profile` would silently drop the URL. Deploy: unit now passes
+    `--relay-port 4401` (tcp) next to `--port 4400` (udp), DEV-SETUP §5 updated.
+    **Remaining for the full done-when: the manual cross-NAT run** — redeploy the
+    relay, re-exchange QR/records (v1 in-place change broke stored dev records as
+    planned), then phone-on-cellular ↔ laptop `backfill <conv> <petname>`.)*
   - [ ] **D0c · Serving gate (contacts-only).** Immediately after D0b — dial-by-key
     widens who can reach the sync ALPN from "whoever knows my `ip:port`" to "anyone
     holding my key + relay". Client policy, not protocol: `SyncHandler` checks the

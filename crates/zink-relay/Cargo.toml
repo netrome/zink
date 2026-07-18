@@ -5,6 +5,10 @@ edition.workspace = true
 
 [dependencies]
 iroh = "1.0.2"
+# The iroh relay *server*, embedded in the relay binary (D0b): one service =
+# iroh relaying (peer rendezvous + holepunch coordination) + mailbox/blobs.
+# Same project/version as iroh; was already a dev-dependency (A6 spike).
+iroh-relay = { version = "1.0.2", features = ["server"] }
 iroh-blobs = "0.103"
 n0-future = "0.3.2"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal"] }
@@ -13,5 +17,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zink-protocol = { version = "0.1.0", path = "../zink-protocol" }
 
 [dev-dependencies]
-iroh-relay = { version = "1.0.2", features = ["server"] }
 n0-future = "0.3.2"

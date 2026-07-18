@@ -16,8 +16,9 @@
 //! zink-cli listen --key <file> [--relay <relay> …]
 //! ```
 //!
-//! `<relay>` is a dial string `<endpoint-id>@<ip:port>` as printed by
-//! `zink-relay`.
+//! `<relay>` is the spec printed by `zink-relay`:
+//! `<endpoint-id>@<ip:port>[#<relay-url>]` — the mailbox dial string, plus
+//! (D0b) the same service's iroh relay URL for peer dial-by-key.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -72,10 +73,12 @@ const USAGE: &str = "usage:
   zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
   zink-cli reply --key <file> <conversation-id | prefix> <text>
   zink-cli listen --key <file> [--relay <relay> ...]
-  zink-cli backfill --key <file> <conversation-id | prefix> <peer-addr>
-(<relay>/<peer-addr> = <endpoint-id>@<ip:port>; a relay's is printed by
- zink-relay, a peer's by its `listen`. recv and listen default to the home
- relays set via my-record)";
+  zink-cli backfill --key <file> <conversation-id | prefix>
+                    <peer-addr | petname | pubkey-hex>
+(<relay> = <endpoint-id>@<ip:port>[#<relay-url>] as printed by zink-relay;
+ <peer-addr> = <endpoint-id>@<ip:port> as printed by `listen`. A petname or
+ key backfills by key via the relay url in the stored contact record. recv
+ and listen default to the home relays set via my-record)";
 
 fn keygen(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
@@ -109,7 +112,9 @@ async fn my_record(args: &[String]) -> Result<(), String> {
     let relays = {
         let given = values(&flags, "--relay");
         if given.is_empty() {
-            client.home_relays()
+            // Full specs, not bare dial strings — re-saving the profile must
+            // not silently drop the relay URLs (D0b).
+            client.home_relay_specs()
         } else {
             given
         }
@@ -129,6 +134,7 @@ async fn my_record(args: &[String]) -> Result<(), String> {
             code.render::<qrcode::render::unicode::Dense1x2>().build()
         );
     }
+    client.close().await;
     Ok(())
 }
 
@@ -141,6 +147,7 @@ async fn contact_add(args: &[String]) -> Result<(), String> {
     let client = open_client(&flags).await?;
     let petname = client.add_contact(&record, optional(&flags, "--name")?)?;
     println!("added contact {petname:?}");
+    client.close().await;
     Ok(())
 }
 
@@ -163,6 +170,7 @@ async fn contacts(args: &[String]) -> Result<(), String> {
             record.relays.len()
         );
     }
+    client.close().await;
     Ok(())
 }
 
@@ -203,6 +211,7 @@ async fn send(args: &[String]) -> Result<(), String> {
         receipt.relay_count,
         pending_note(receipt.pending_relays)
     );
+    client.close().await;
     Ok(())
 }
 
@@ -239,6 +248,7 @@ async fn recv(args: &[String]) -> Result<(), String> {
     let received = client.recv(&relays).await?;
     if received.is_empty() {
         println!("no new messages");
+        client.close().await;
         return Ok(());
     }
     for message in &received {
@@ -260,6 +270,7 @@ async fn recv(args: &[String]) -> Result<(), String> {
             }
         }
     }
+    client.close().await;
     Ok(())
 }
 
@@ -300,6 +311,7 @@ async fn conversations(args: &[String]) -> Result<(), String> {
             }
         );
     }
+    client.close().await;
     Ok(())
 }
 
@@ -343,6 +355,7 @@ async fn history(args: &[String]) -> Result<(), String> {
             None => {}
         }
     }
+    client.close().await;
     Ok(())
 }
 
@@ -382,24 +395,50 @@ async fn reply(args: &[String]) -> Result<(), String> {
         receipt.relay_count,
         pending_note(receipt.pending_relays)
     );
+    client.close().await;
     Ok(())
 }
 
 /// Pull a conversation's missing ancestors from a peer (D0 sync), walking back
 /// to the genesis so a mid-conversation joiner can build the DAG and reply. The
 /// peer must be running to serve (e.g. `listen`, which prints its address).
+/// The peer is a dial string `<endpoint-id>@<ip:port>`, or — D0b — a contact
+/// petname / device-key hex, reached by key via the relay URL in their stored
+/// record (holepunched direct, relayed as fallback).
 async fn backfill(args: &[String]) -> Result<(), String> {
     let (flags, positionals) = parse_flags(args)?;
     let [wanted, peer] = positionals.as_slice() else {
         return Err(format!(
-            "exactly one conversation id (or prefix) and one peer address expected\n{USAGE}"
+            "exactly one conversation id (or prefix) and one peer expected\n{USAGE}"
         ));
     };
     let client = open_client(&flags).await?;
     let conversation = resolve_conversation(&client, wanted)?;
-    let fetched = client.backfill(conversation, peer).await?;
+    let fetched = if peer.contains('@') {
+        client.backfill(conversation, peer).await?
+    } else {
+        let key = resolve_peer_key(&client, peer)?;
+        client.backfill_by_key(conversation, key).await?
+    };
     println!("backfilled {fetched} message(s) from {peer}");
+    client.close().await;
     Ok(())
+}
+
+/// A peer named on the command line: a contact petname, or a device-key hex.
+/// (Contact identity is keyed on the record's first key — the C2 convention,
+/// revisited at D2.)
+fn resolve_peer_key(client: &Client, peer: &str) -> Result<zink_protocol::PublicKey, String> {
+    for (petname, record) in client.contacts()? {
+        if petname == *peer {
+            return record
+                .keys
+                .first()
+                .copied()
+                .ok_or_else(|| "contact record has no keys".to_string());
+        }
+    }
+    Ok(zink_protocol::PublicKey(zink_client::hex::parse32(peer)?))
 }
 
 /// Live delivery: subscribe to every relay and print messages as they are

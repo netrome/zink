@@ -226,15 +226,24 @@ message's `sender`/`recipients` — is a small follow-up once serve+fetch works.
   backfills from A to the genesis, B `load_dag` succeeds and B can thread a
   reply. Non-goals: re-wrap-to-read (D2), auto-backfill-on-orphan wiring,
   dial-by-key (D0b), forward auto-sync.
-- **D0b · Relay-coordinated peer connectivity (§4.1).** iroh relay server in the
-  `zink-relay` binary (`tls: None`); clients home to their own relays
-  (`RelayMode::Custom`, multi-relay); `RelayUrl` added to `ContactRecord`
-  (in-place at version 1, paired with the mailbox dial string — §4.1); dial a
-  peer by key via their record's relay, holepunching to direct with relay
-  fallback. The foundation for D0c/D0d, D1's `who-is-this`, and D5.
+- **D0b · Relay-coordinated peer connectivity (§4.1) — code complete
+  (2026-07-18; manual cross-NAT run pending).** iroh relay server in the
+  `zink-relay` binary (`tls: None`, `--relay-port`); clients home to their own
+  relays (`RelayMode::Custom`, multi-relay); `RelayEntry { mailbox, relay_url }`
+  in `ContactRecord` (in-place at version 1, paired — §4.1); dial a peer by key
+  via their record's relay, holepunching to direct with relay fallback
+  (`Client::backfill_by_key`; CLI `backfill <conv> <petname | key>`). The
+  foundation for D0c/D0d, D1's `who-is-this`, and D5.
   *Done when:* two NAT'd clients on different relays connect and one backfills
   from the other by key alone — headless e2e for by-key dial via relay
-  rendezvous; the cross-NAT holepunch itself is a documented manual run.
+  rendezvous ✅ (`backfill_by_key__should_reach_a_peer_via_its_relay_across_two_relays`);
+  the cross-NAT holepunch itself is a documented manual run (pending).
+  As-built notes: iroh's relay transport is fixed at bind, so profile relay
+  changes apply at the next open; the dialer needs no entry for the callee's
+  relay in its own map (iroh connects to any relay URL in a peer's
+  `EndpointAddr` — verified in iroh 1.0.2 source); user-facing spec is
+  `<dial>#<relay-url>` printed by the relay, tolerated everywhere a dial
+  string is accepted.
 - **D0c · Serving gate (contacts-only, §2).** Right after D0b (independent code,
   so parallel is fine): `SyncHandler` answers `NotHeld` to callers not in the
   contact store. Client policy only; no wire change.

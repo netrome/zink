@@ -72,6 +72,19 @@ client.flush_outbox() -> FlushReport          // idempotent re-deposit + re-push
 // in the lib); connect → register → flush → drain → drain-per-nudge,
 // reconnecting forever with jittered backoff; `on_new` per non-empty drain
 client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
+// peer sync (D0a/D0b, sync-primitives.md): the client also *serves* — an
+// accepting router on SYNC_ALPN answers get/get-successors from local
+// storage for the client's lifetime. The endpoint homes to the profile's
+// relay URLs (RelayMode::Custom, applied at open — a profile change takes
+// effect on the next open), which keeps this device reachable by key.
+client.backfill(conversation, "<id>@<ip:port>") -> usize   // explicit peer addr
+client.backfill_by_key(conversation, PublicKey) -> usize   // via the relay_url in
+                                              // the peer's stored ContactRecord:
+                                              // rendezvous at their relay, holepunch
+                                              // to direct, relayed as fallback
+client.home_relay_specs() -> Vec<String>      // full `dial[#relay-url]` specs — the
+                                              // round-trip form for profile forms;
+                                              // home_relays() stays mailbox-only
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened
@@ -91,8 +104,10 @@ not a contract.
   moves to a wasm-gated module so `web/spike/build.sh` keeps working.
 - **iroh with `default-features = false, features = ["tls-ring"]`** (the WASM-proven
   configuration) — also sufficient native, so all consumers share one iroh config.
-- Contacts remain `(key, relay dial strings)` — the ContactRecord wire format and QR
-  exchange are C2.
+- Contacts remain `(key, relay entries)` — the ContactRecord wire format and QR
+  exchange are C2. Since D0b an entry pairs the mailbox dial string with the same
+  service's iroh relay URL (`RelayEntry`); the resolved `Contact` used by sends
+  carries the mailbox strings, the relay URL feeds dial-by-key.
 - **Blob cache (C3a): ciphertext at rest.** `<key-file>.state/blobs/<hash-hex>` holds
   encrypted blobs exactly as relays do; every read re-verifies against the referencing
   envelope (`open_blob`), so the cache is trusted no more than a relay. Own blobs are

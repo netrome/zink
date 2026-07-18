@@ -138,17 +138,24 @@ renders a QR / link encoding your **rendezvous record** —
 ContactRecord {
   keys:          [key]              // current device keys
   attestations:  [Attestation]      // self-attestations (name, avatar, same-person-as links)
-  relays:        [relay endpoint]   // where my mailbox(es) live
+  relays:        [RelayEntry]       // my relay services, one entry each:
+                                    //   mailbox    — dial string (deposits/drains)
+                                    //   relay_url  — the same service's iroh relay
+                                    //                URL (optional; peer dial-by-key)
 }
 ```
 
 Scanning it gives the other side everything needed to reach and render you: whom to
 fan out to, how to display you, and — crucially — **which relay(s) hold your mailbox**
-when you're offline. This is the rendezvous answer: iroh discovery resolves
-key→address for *online* nodes, while `relays` is how a sender finds your inbox when
-you're not. Pairing is the same exchange between two of your own devices and yields a
-**mutual** `same-person-as` link. It's also the natural place to later hand over an
-initial capability grant (§8) so a new contact can message you from the start.
+when you're offline. This is the rendezvous answer for *both* states: a device homes
+to its relays' iroh relay URLs, so a peer holding your record reaches you **by key**
+while you're online (relay-coordinated — signaling via your relay, holepunched to a
+direct path, relayed as encrypted fallback; no discovery service involved), and
+`mailbox` is how a sender finds your inbox when you're not. An entry without a
+`relay_url` is mailbox-only knowledge: deposits work, dial-by-key doesn't. Pairing is
+the same exchange between two of your own devices and yields a **mutual**
+`same-person-as` link. It's also the natural place to later hand over an initial
+capability grant (§8) so a new contact can message you from the start.
 
 **Freshness.** `relays` is the rendezvous anchor for offline delivery, so it must stay
 reasonably current. It propagates lazily — via the QR at add-time, `who-is-this`, and a
@@ -255,7 +262,9 @@ you send to, and what history you choose to serve (§5.2).
 
 ### 5.1 Two interaction patterns (no gossip plane)
 
-Everything runs over direct iroh connections (relay-routed for browsers), in two shapes:
+Everything runs over iroh connections — direct when a path exists or holepunches,
+relayed (still end-to-end encrypted QUIC) through a party's relay when it doesn't,
+and always relay-routed for browsers — in two shapes:
 
 - **Fan-out (push):** deliver a message/blob to the recipient keys you chose —
   reliable, acked, parked in the recipient's mailbox if offline.

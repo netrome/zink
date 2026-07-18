@@ -130,7 +130,10 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
     Ok(AppState {
         my_key: hex::encode(&client.public_key().0),
         name: client.profile_name(),
-        relay: client.home_relays().into_iter().next(),
+        // The full spec (`dial[#relay-url]`): this value round-trips through
+        // the profile form back into set_profile — the bare dial string
+        // would silently drop the relay URL on a re-save (D0b).
+        relay: client.home_relay_specs().into_iter().next(),
         contacts: client
             .contacts()?
             .into_iter()
