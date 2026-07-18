@@ -47,6 +47,7 @@ async fn main() -> ExitCode {
         Some("history") => history(&args[1..]).await,
         Some("reply") => reply(&args[1..]).await,
         Some("listen") => listen(&args[1..]).await,
+        Some("backfill") => backfill(&args[1..]).await,
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -71,8 +72,10 @@ const USAGE: &str = "usage:
   zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
   zink-cli reply --key <file> <conversation-id | prefix> <text>
   zink-cli listen --key <file> [--relay <relay> ...]
-(<relay> = <endpoint-id>@<ip:port>, as printed by zink-relay; recv and listen
- default to the home relays set via my-record)";
+  zink-cli backfill --key <file> <conversation-id | prefix> <peer-addr>
+(<relay>/<peer-addr> = <endpoint-id>@<ip:port>; a relay's is printed by
+ zink-relay, a peer's by its `listen`. recv and listen default to the home
+ relays set via my-record)";
 
 fn keygen(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
@@ -382,6 +385,23 @@ async fn reply(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Pull a conversation's missing ancestors from a peer (D0 sync), walking back
+/// to the genesis so a mid-conversation joiner can build the DAG and reply. The
+/// peer must be running to serve (e.g. `listen`, which prints its address).
+async fn backfill(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [wanted, peer] = positionals.as_slice() else {
+        return Err(format!(
+            "exactly one conversation id (or prefix) and one peer address expected\n{USAGE}"
+        ));
+    };
+    let client = open_client(&flags).await?;
+    let conversation = resolve_conversation(&client, wanted)?;
+    let fetched = client.backfill(conversation, peer).await?;
+    println!("backfilled {fetched} message(s) from {peer}");
+    Ok(())
+}
+
 /// Live delivery: subscribe to every relay and print messages as they are
 /// nudged in. Runs until killed — the dev-tool sibling of the app's
 /// subscription tasks.
@@ -405,6 +425,10 @@ async fn listen(args: &[String]) -> Result<(), String> {
         ));
     }
     let contacts = std::sync::Arc::new(client.contacts()?);
+    if let Ok(addr) = client.sync_address() {
+        // What a peer dials to backfill history from this device (D0 sync).
+        println!("peer sync address: {addr}");
+    }
     println!("listening on {} relay(s)…", relays.len());
     let mut loops = Vec::new();
     for relay in relays {

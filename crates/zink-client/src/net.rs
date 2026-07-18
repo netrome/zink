@@ -41,10 +41,24 @@ pub(crate) async fn connect(
     alpn: &[u8],
     timeout: std::time::Duration,
 ) -> Result<Connection, String> {
-    n0_future::time::timeout(timeout, endpoint.connect(parse_relay(relay)?, alpn))
+    connect_addr(endpoint, parse_relay(relay)?, alpn, timeout)
         .await
-        .map_err(|_| format!("connect to relay {relay}: timed out"))?
-        .map_err(|e| format!("connect to relay {relay}: {e}"))
+        .map_err(|e| format!("connect to {relay}: {e}"))
+}
+
+/// Connect to an already-resolved `EndpointAddr` — used for peer sync, where a
+/// dial string is parsed once and where a locally-bound peer advertises
+/// several addresses (loopback/LAN/public) and iroh should try them all.
+pub(crate) async fn connect_addr(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    alpn: &[u8],
+    timeout: std::time::Duration,
+) -> Result<Connection, String> {
+    n0_future::time::timeout(timeout, endpoint.connect(addr, alpn))
+        .await
+        .map_err(|_| "timed out".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) async fn request(

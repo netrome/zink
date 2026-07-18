@@ -302,13 +302,22 @@ on `keys.first()` needs revisiting at D2.
   without a conversation's genesis cannot reply — noted in B5); prerequisite for D2
   backfill and D4's backlog serving. *(The peer ALPN it stands up is also the substrate
   for D5 direct delivery.)* Design: [sync-primitives.md](./sync-primitives.md).
-  - [ ] **D0a · Serve + backward-fill.** `SYNC_ALPN` + sync wire types in
+  - [x] **D0a · Serve + backward-fill.** `SYNC_ALPN` + sync wire types in
     `zink-protocol`; the client runs an *accepting* router (first time — it's been
-    dial-only) serving `MessageCore`s at discretion; `Client::backfill(conversation,
+    dial-only) serving envelopes at discretion; `Client::backfill(conversation,
     from)` walks `parents` back to the genesis. *Done when:* headless e2e — A builds an
     N-message conversation, B holds only the latest, B backfills from A to the genesis,
     B's `load_dag` succeeds and B threads a reply. Non-goals: re-wrap-to-*read* old
     bodies (D2), auto-backfill-on-orphan, forward auto-sync.
+    ✅ *(2026-07-12: serve full envelopes — not bare cores — so the requester
+    verifies authorship for free and reuses `remember`; permissive serve-what-you-hold;
+    peer addressed by dial string now (bare-key discovery deferred to D0b — see
+    sync-primitives.md §4 on the reachability caveat). `get-successors` served +
+    round-trip tested but not yet driven. Two headless tests: backfill walks a 3-message
+    chain to genesis so `load_dag`/`heads`/`next_logical` are reply-ready; and a
+    peer-serves-nothing case stops rather than looping. CLI hook: `zink-cli backfill`,
+    with `listen` printing its peer sync address. WASM build unaffected — sync gated
+    `cfg(not(wasm))`.)*
   - [ ] **D0b · Auto-sync wiring.** Trigger backfill on an orphan receipt (peer chosen
     from the message `sender`); forward catch-up via `get-successors`.
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side

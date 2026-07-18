@@ -81,12 +81,18 @@ impl SyncResponse {
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub enum SyncResult {
     /// `Get` hit. (Boxed for variant-size balance; BORSH encodes `Box<T>` as `T`.)
-    Envelope { envelope: Box<MessageEnvelope> },
+    Envelope {
+        envelope: Box<MessageEnvelope>,
+    },
     /// `Get` miss, or the peer declined to serve this id.
     NotHeld,
     /// `GetSuccessors` — known children (possibly empty).
-    Successors { ids: Vec<MessageId> },
-    Error { code: SyncErrorCode },
+    Successors {
+        ids: Vec<MessageId>,
+    },
+    Error {
+        code: SyncErrorCode,
+    },
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]

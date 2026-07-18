@@ -802,10 +802,23 @@ impl Client {
     /// verified and checked to be the id we asked for before it's stored.
     /// Returns the number of newly-stored messages.
     pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, String> {
+        self.backfill_addr(conversation, net::parse_relay(from)?)
+            .await
+    }
+
+    /// `backfill` with the peer address already resolved — the seam the string
+    /// API parses into, and the one tests use to dial a locally-bound peer's
+    /// full multi-address `EndpointAddr` (a bare public socket isn't reliably
+    /// self-reachable on one host).
+    async fn backfill_addr(
+        &self,
+        conversation: MessageId,
+        from: iroh::EndpointAddr,
+    ) -> Result<usize, String> {
         // A hostile peer could feed an unbounded fake chain; bound the walk.
         const MAX_BACKFILL: usize = 10_000;
         let connection =
-            net::connect(&self.endpoint, from, SYNC_ALPN, self.config.connect_timeout).await?;
+            net::connect_addr(&self.endpoint, from, SYNC_ALPN, self.config.connect_timeout).await?;
         let mut fetched = 0usize;
         loop {
             let frontier = self.state.missing_ancestors(conversation);
@@ -962,4 +975,128 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before 1970")
         .as_millis() as u64
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use zink_protocol::{KeyCommitment, MessageCore};
+
+    /// A key path in a per-test temp dir (tests run in parallel, so the dir is
+    /// namespaced by `test` — a shared root would let one test's cleanup delete
+    /// another's files mid-run). The caller cleans up with `temp_root(test)`.
+    fn temp_key(test: &str, name: &str) -> String {
+        let dir = temp_root(test);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join(name).to_string_lossy().into_owned()
+    }
+
+    fn temp_root(test: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("zink-client-sync-{}-{test}", std::process::id()))
+    }
+
+    /// A signed linear chain: genesis (seq/logical 0), then children each
+    /// threading onto the previous — what a real send would produce, enough to
+    /// rebuild the DAG. Bodies are empty (the backfill test never decrypts).
+    fn chain(author: &DeviceKey, recipient: PublicKey, len: u64) -> Vec<MessageEnvelope> {
+        let mut envelopes: Vec<MessageEnvelope> = Vec::new();
+        for seq in 0..len {
+            let (conversation, parents) = match envelopes.first() {
+                None => (None, vec![]),
+                Some(genesis) => (Some(genesis.id()), vec![envelopes.last().unwrap().id()]),
+            };
+            let core = MessageCore {
+                version: FORMAT_VERSION,
+                conversation,
+                parents,
+                recipients: vec![recipient],
+                sender: author.public(),
+                seq,
+                logical: seq,
+                timestamp_ms: 0,
+                body: vec![],
+                key_commit: KeyCommitment([0; 32]),
+                blob_refs: vec![],
+            };
+            envelopes.push(MessageEnvelope::new(core, author));
+        }
+        envelopes
+    }
+
+    #[tokio::test]
+    async fn backfill__should_walk_a_conversation_back_to_its_genesis() {
+        // Given: a 3-message conversation A holds in full, while B — added
+        // mid-conversation — holds only the latest message, so it can't even
+        // build the DAG (no genesis on disk) and thus can't reply.
+        let a = Client::open_or_create(&temp_key("walk", "server"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("walk", "client"))
+            .await
+            .expect("open B");
+
+        let author = DeviceKey::from_seed([9; 32]);
+        let msgs = chain(&author, b.public_key(), 3);
+        let conversation = msgs[0].id();
+        for envelope in &msgs {
+            a.state.store_envelope(conversation, envelope).unwrap();
+        }
+        let latest = msgs.last().unwrap();
+        b.state.store_envelope(conversation, latest).unwrap();
+        assert!(
+            b.state.load_dag(conversation).is_err(),
+            "B lacks the genesis before backfill"
+        );
+
+        // When: B backfills the missing ancestors from A (dialing A's full
+        // address — a locally-bound peer's bare public socket isn't reliably
+        // self-reachable on one host; the string API is exercised separately)
+        let fetched = b
+            .backfill_addr(conversation, a.endpoint.addr())
+            .await
+            .expect("backfill");
+
+        // Then: B pulled the two missing ancestors, can now build the DAG, and
+        // would thread a reply onto the true head at the next logical clock
+        assert_eq!(fetched, 2, "genesis + the middle message");
+        let dag = b
+            .state
+            .load_dag(conversation)
+            .expect("DAG builds after backfill");
+        assert_eq!(dag.heads(), vec![latest.id()]);
+        assert_eq!(dag.next_logical(), 3);
+
+        let _ = std::fs::remove_dir_all(temp_root("walk"));
+    }
+
+    #[tokio::test]
+    async fn backfill__should_stop_when_the_peer_lacks_the_ancestors() {
+        // Given: B holds only the latest message; A (the peer) holds nothing.
+        let a = Client::open_or_create(&temp_key("stuck", "server"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("stuck", "client"))
+            .await
+            .expect("open B");
+        let author = DeviceKey::from_seed([7; 32]);
+        let msgs = chain(&author, b.public_key(), 3);
+        let conversation = msgs[0].id();
+        b.state
+            .store_envelope(conversation, msgs.last().unwrap())
+            .unwrap();
+
+        // When: B backfills from a peer that serves nothing
+        let fetched = b
+            .backfill_addr(conversation, a.endpoint.addr())
+            .await
+            .expect("backfill returns Ok even with nothing to fetch");
+
+        // Then: it fetches nothing and gives up rather than looping — honesty
+        // over a fabricated root (the genesis is still missing).
+        assert_eq!(fetched, 0);
+        assert!(b.state.load_dag(conversation).is_err());
+
+        let _ = std::fs::remove_dir_all(temp_root("stuck"));
+    }
 }

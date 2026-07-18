@@ -131,6 +131,25 @@ accepts *both* forms of peer address and picks by shape:
   (surfaced, never a silent hang). Accepting the form now keeps the API stable;
   we don't half-implement the resolution and pretend it works.
 
+**Discovery feasibility (investigated 2026-07-12).** iroh 1.0 renamed discovery
+to `address_lookup`, added à la carte via `Builder::address_lookup(...)`.
+Enabling it is ~2 lines — and crucially `presets::N0DisableRelay` gives n0's
+DNS/pkarr key→address discovery *with n0's relay fleet turned off*, so discovery
+is separable from the relays we deliberately don't want (the original reason we
+picked `Minimal`). In-crate mechanisms (`DnsAddressLookup`, `PkarrPublisher`/
+`PkarrResolver`) need no new dep but lean on n0's public DNS/pkarr server; mDNS
+(`iroh-mdns-address-lookup`, LAN-only) and mainline-DHT
+(`iroh-mainline-address-lookup`, decentralized) are separate crates. **The catch
+is not discovery but reachability:** finding a peer's address ≠ being able to
+connect to it. A phone on cellular/CGNAT usually isn't dialable at a direct
+`ip:port` even once resolved — that needs holepunching via an iroh *transport*
+relay, which we don't run (our mailbox works cross-network only because both
+clients dial its stable public address *outbound*). So key-only discovery is a
+cheap add for *reachable* peers (same-LAN, or one side publicly reachable); full
+cross-NAT peer sync is a larger, later piece (an iroh relay, or routing sync
+through the existing rendezvous). This is why D0a ships the dial string and the
+ContactRecord `relays` stay the rendezvous anchor.
+
 ---
 
 ## 5. The backfill loop (fixing the hole)
