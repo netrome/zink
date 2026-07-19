@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 138 158">
+  <style>
+    .stroke{stroke:#7c3aed;fill:none;stroke-width:9;stroke-linecap:round;stroke-linejoin:round}
+    .dot{fill:#7c3aed}
+    @media (prefers-color-scheme: dark){
+      .stroke{stroke:#a78bfa}
+      .dot{fill:#a78bfa}
+    }
+  </style>
+  <polyline class="stroke" points="31,29 129,29 9,129 107,129"/>
+  <circle class="dot" cx="31" cy="29" r="24"/>
+  <circle class="dot" cx="107" cy="129" r="24"/>
+</svg>
