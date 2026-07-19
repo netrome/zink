@@ -195,8 +195,12 @@ journalctl --user -u zink-relay -n 5   # the running relay logs its version
   `~/zink-relay-data`; the endpoint id, `--port 4400` (mailbox QUIC/UDP), and
   `--relay-port 4401` (embedded iroh relay server, plain HTTP/TCP — D0b peer
   rendezvous; clients home to it) are stable, so the printed relay spec
-  `<id>@<ip:4400>#http://<ip>:4401` survives restarts and reboots. Both ports
-  must be reachable (4400/udp, 4401/tcp).
+  `<id>@<ip:4400>#http://<ip>:4401` survives restarts and reboots. Since De2
+  the relay also answers QUIC address discovery (QAD) on **UDP at the
+  `--relay-port` number** (the same-port convention clients derive it by) —
+  so 4400/udp, 4401/tcp **and 4401/udp** must all be reachable. QAD failing
+  is soft but slow: clients fall back to the pre-De2 behavior (~3 s stall on
+  every open, disco-only address discovery).
 - New key files (`relay.key`, client `device.key`) are written `0600`. A key
   created before that change keeps its old mode — `chmod 600` it once.
 - Abuse caps are compiled-in defaults for now: 30-day mailbox retention,

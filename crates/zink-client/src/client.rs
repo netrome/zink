@@ -1293,12 +1293,31 @@ mod tests {
     /// shape the `zink-relay` binary embeds). Returns the handle (kept alive
     /// by the caller) and its relay URL.
     async fn spawn_test_relay() -> (iroh_relay::server::Server, String) {
-        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
-        let mut config = ServerConfig::default();
-        config.relay = Some(RelayConfig::new((std::net::Ipv4Addr::LOCALHOST, 0)));
-        let server = Server::spawn(config).await.expect("spawn iroh relay");
-        let url = format!("http://{}", server.http_addr().expect("relay http addr"));
-        (server, url)
+        use iroh_relay::server::{QuicConfig, RelayConfig, Server, ServerConfig};
+        use std::net::Ipv4Addr;
+        // Same-port convention (De2): QAD rides UDP at the relay URL's port
+        // number, so the port is picked up front — two `:0` binds would land
+        // on different numbers. Distinct URLs get distinct QAD ports, which
+        // is what lets multi-relay tests share one machine. Retried in case
+        // the picked pair races a parallel test.
+        for _ in 0..3 {
+            let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .expect("pick a port")
+                .local_addr()
+                .expect("local addr")
+                .port();
+            let mut config = ServerConfig::default();
+            config.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, port)));
+            let mut quic = QuicConfig::new((Ipv4Addr::LOCALHOST, port));
+            let (_certs, tls) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
+            quic.server_config = Some(tls);
+            config.quic = Some(quic);
+            if let Ok(server) = Server::spawn(config).await {
+                let url = format!("http://{}", server.http_addr().expect("relay http addr"));
+                return (server, url);
+            }
+        }
+        panic!("no free port pair for a test relay in 3 attempts");
     }
 
     /// Store `requester`'s key as a contact of `server`, so the D0c
@@ -1331,6 +1350,30 @@ mod tests {
         Client::open_or_create(&key_path)
             .await
             .expect("open client")
+    }
+
+    #[tokio::test]
+    async fn homed_endpoint__should_report_online_without_waiting_out_probe_timeout() {
+        // Given: a home relay serving QAD (De2). Without it, the first
+        // net-report waited out iroh's full 3 s probe timeout before the
+        // endpoint reported online (measured ~3.03 s of the ~3.15 s
+        // relay-based e2e tests).
+        let (_relay, url) = spawn_test_relay().await;
+        let client = open_homed("qad", "client", &url).await;
+
+        // When
+        let started = std::time::Instant::now();
+        client.endpoint.online().await;
+        let elapsed = started.elapsed();
+
+        // Then: nowhere near the 3 s probe timeout (bound leaves CI headroom;
+        // locally this is well under a second)
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "online took {elapsed:?} — QAD probe likely failing"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("qad"));
     }
 
     #[tokio::test]

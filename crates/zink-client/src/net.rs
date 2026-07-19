@@ -6,7 +6,10 @@ use std::str::FromStr;
 
 use crate::error::Error;
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
+use iroh::tls::CaTlsConfig;
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
+};
 use zink_protocol::{
     DeviceKey, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MAX_SYNC_RESPONSE_BYTES, MailboxOp,
     MailboxRequest, MailboxResponse, MailboxResult, MessageEnvelope, PublicKey, SyncOp,
@@ -29,13 +32,36 @@ pub(crate) async fn bind_endpoint(
     let mut builder =
         Endpoint::builder(presets::Minimal).secret_key(SecretKey::from_bytes(&device.seed()));
     if !home_relays.is_empty() {
-        let map: RelayMap = home_relays.iter().cloned().collect();
-        builder = builder.relay_mode(RelayMode::Custom(map));
+        let map: RelayMap = home_relays.iter().cloned().map(relay_config).collect();
+        builder = builder
+            .relay_mode(RelayMode::Custom(map))
+            // The relay serves QAD with a self-signed cert (De2) — webpki
+            // roots would put a CA in the trust path, which zink relays
+            // deliberately don't have. Nothing security-relevant rides on
+            // this TLS: iroh connections authenticate by endpoint key, and
+            // a QAD man-in-the-middle can at most misreport our observed
+            // address (degraded holepunching — today's baseline anyway).
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify());
     }
     builder
         .bind()
         .await
         .map_err(|e| Error::Transport(format!("bind endpoint: {e}")))
+}
+
+/// One home relay's client-side config. Same-port convention (De2): the
+/// relay serves QUIC address discovery on UDP at the relay URL's own port
+/// number (TCP for HTTP relaying and UDP for QAD coexist at one number, and
+/// distinct URLs get distinct QAD ports — multi-relay on one host stays
+/// collision-free). A URL with no explicit port keeps iroh's default QAD
+/// port (7842), which is exactly the convention standard iroh relays use.
+fn relay_config(url: RelayUrl) -> RelayConfig {
+    let port = url.port();
+    let mut config = RelayConfig::from(url);
+    if let (Some(port), Some(quic)) = (port, config.quic.as_mut()) {
+        quic.port = port;
+    }
+    config
 }
 
 /// Parse an iroh relay URL from a `RelayEntry.relay_url` value.

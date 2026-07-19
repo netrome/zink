@@ -2,6 +2,12 @@
 //! disk (slice B5) — plus, since D0b, the embedded **iroh relay server**
 //! (plain HTTP, no TLS/domain for native clients): one service = iroh
 //! relaying (peer rendezvous + holepunch coordination) + mailbox/blobs.
+//! Since De2 the relay server also answers **QUIC address discovery** (QAD,
+//! the STUN replacement) on UDP at the same port number as the HTTP relay —
+//! the *same-port convention* clients use to derive the QAD port from the
+//! relay URL. Without it a homing client's first net-report waits out the
+//! full probe timeout (~3 s) before the endpoint reports online, and
+//! address discovery for holepunching is disco-only.
 //!
 //! Runs self-sufficient: no external iroh relays or discovery services. A
 //! zink relay sits on a publicly reachable address and clients dial it by
@@ -23,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use iroh::endpoint::presets;
 use iroh::{Endpoint, SecretKey};
-use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+use iroh_relay::server::{QuicConfig, RelayConfig, Server, ServerConfig};
 use zink_relay::blobs::{BlobCacheConfig, fs_blob_cache};
 use zink_relay::clock::SystemClock;
 use zink_relay::fs::FsMailboxStore;
@@ -39,7 +45,8 @@ const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>] [--relay-p
   --relay-port <tcp-port>
                     fixed HTTP port for the embedded iroh relay server —
                     peer rendezvous/holepunch coordination; clients home to
-                    it (default: ephemeral)
+                    it. QUIC address discovery is served on the same port
+                    number over UDP — open both (default: ephemeral)
   -h, --help        this text
   -V, --version     version + build info";
 
@@ -63,16 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // is `tls: None`, so no domain/cert; native clients only for now (a
     // browser client would need HTTPS, post-MVP). Untrusted like the
     // mailbox: it coordinates holepunching and forwards *encrypted* QUIC.
-    let mut relay_config = ServerConfig::default();
-    relay_config.relay = Some(RelayConfig::new((
-        Ipv4Addr::UNSPECIFIED,
-        relay_port.unwrap_or(0),
-    )));
-    let relay_server = Server::spawn(relay_config).await?;
-    let relay_http_port = relay_server
-        .http_addr()
-        .ok_or("iroh relay server has no http addr")?
-        .port();
+    // QAD rides on UDP at the same port number (De2, same-port convention).
+    let (relay_server, relay_http_port) = spawn_relay_server(relay_port).await?;
 
     // The endpoint key must survive restarts: it IS the relay's identity —
     // the dial strings in every ContactRecord point at it.
@@ -93,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url_host = std::net::SocketAddr::new(sock.ip(), relay_http_port);
         println!("  relay spec: {}@{sock}#http://{url_host}", endpoint.id());
     }
+    println!("  QAD: udp/{relay_http_port} (self-signed TLS)");
 
     let mailboxes = FsMailboxStore::new(data_dir.join("mailboxes"));
     let blob_store = fs_blob_cache(
@@ -112,6 +112,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     router.shutdown().await?;
     relay_server.shutdown().await?;
     Ok(())
+}
+
+/// Spawn the embedded iroh relay server: HTTP relaying on TCP + QAD on UDP,
+/// both at the same port number (clients derive the QAD port from the relay
+/// URL, so the two must agree). An ephemeral port is picked here rather than
+/// left to the OS — two `:0` binds would land on different numbers; retried
+/// in case the picked pair races another process.
+async fn spawn_relay_server(
+    relay_port: Option<u16>,
+) -> Result<(Server, u16), Box<dyn std::error::Error + Send + Sync>> {
+    let attempts = if relay_port.is_some() { 1 } else { 3 };
+    let mut last_error: Box<dyn std::error::Error + Send + Sync> = "no port attempted".into();
+    for _ in 0..attempts {
+        let port = match relay_port {
+            Some(port) => port,
+            None => std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?
+                .local_addr()?
+                .port(),
+        };
+        let mut config = ServerConfig::default();
+        config.relay = Some(RelayConfig::new((Ipv4Addr::UNSPECIFIED, port)));
+        let mut quic = QuicConfig::new((Ipv4Addr::UNSPECIFIED, port));
+        quic.server_config = Some(qad_tls_config()?);
+        config.quic = Some(quic);
+        match Server::spawn(config).await {
+            Ok(server) => {
+                let http_port = server
+                    .http_addr()
+                    .ok_or("iroh relay server has no http addr")?
+                    .port();
+                return Ok((server, http_port));
+            }
+            Err(e) => last_error = e.into(),
+        }
+    }
+    Err(last_error)
+}
+
+/// The QAD endpoint's TLS 1.3 config (QUIC requires TLS; iroh rejects
+/// anything below 1.3). The cert is self-signed and regenerated every start:
+/// no domain, no CA, nothing pins it — clients deliberately don't verify it
+/// (iroh connections authenticate by endpoint key; a QAD man-in-the-middle
+/// can at most misreport a client's observed address, degrading holepunching
+/// to the relayed path — see zink-client's `net.rs`).
+fn qad_tls_config() -> Result<rustls::ServerConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let cert = rcgen::generate_simple_self_signed(vec!["zink-relay".to_string()])?;
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.cert.der().clone()], key.into())?;
+    Ok(config)
 }
 
 /// `[data-dir] [--port <udp-port>] [--relay-port <tcp-port>]`, in any

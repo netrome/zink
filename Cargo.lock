@@ -5243,6 +5243,8 @@ dependencies = [
  "iroh-blobs",
  "iroh-relay",
  "n0-future",
+ "rcgen",
+ "rustls",
  "tokio",
  "tracing",
  "tracing-subscriber",

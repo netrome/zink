@@ -432,7 +432,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   `Result<_, String>` command boundaries kept working with `?` — only two
   tail-position returns needed `Ok(…?)`. The NoRelayUrl test now matches the
   variant. Note: `Received.body` already carried typed `OpenError` — unchanged.)*
-- [ ] **De2 · QAD endpoint in `zink-relay`.** The embedded iroh relay serves only
+- [x] **De2 · QAD endpoint in `zink-relay`.** The embedded iroh relay serves only
   HTTP relaying (`quic: None`), so clients' first net-report waits out iroh's full
   3 s `PROBES_TIMEOUT` before the endpoint reports online (measured: ~3.03 s of
   the ~3.15 s relay-based e2e tests), and address discovery for holepunching is
@@ -444,6 +444,25 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   better holepunch rates, and the two relay-based e2e tests drop to sub-second.
   *Done when:* a client homing to the relay reports online well under 1 s and
   the QAD probe succeeds in the net-report.
+  ✅ *(2026-07-19: **same-port convention** — the relay serves QAD on UDP at the
+  relay-URL port number (TCP http + UDP QAD coexist at one number; distinct
+  URLs → distinct QAD ports, so multi-relay e2e on one machine stays
+  collision-free; a URL with no explicit port keeps iroh's default 7842, which
+  is standard iroh relays' own convention). Not a hard assumption anywhere —
+  the port is per-relay in the client's `RelayMap`. Self-signed cert
+  regenerated per start (nothing pins it, so no data-dir persistence); the
+  client homes with `CaTlsConfig::insecure_skip_verify` — a webpki CA in the
+  trust path is against the philosophy, iroh connections authenticate by
+  endpoint key, and a QAD MITM can at most misreport the observed address
+  (degrades holepunching to today's baseline). That constructor sits behind
+  iroh-relay's *empty* `test-utils` feature — flipped via a direct
+  `iroh-relay` dep (zero new compiled code; `rcgen`/`rustls` in `zink-relay`
+  likewise already in the graph via iroh-relay `server`). Ephemeral relay
+  ports are now picked by the relay (a `:0` pair would land on two numbers).
+  Suite: zink-client e2e **3.18 s → 0.37 s**; timing test pins the regression
+  (`online` < 2 s vs the 3 s probe timeout). Deploy: unit unchanged, but
+  **4401/udp must be open** next to 4400/udp + 4401/tcp — DEV-SETUP §5
+  updated; QAD failing is soft (falls back to the pre-De2 stall).)*
 - [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
   petnames; `who-is-this` pull *(a peer request/response — depends on D0b connectivity)*;
   client-side trust ranking. *(Profile + petnames are largely already built from Stage C:

@@ -16,6 +16,12 @@ zink-protocol = { path = "../zink-protocol" }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 blake3 = "1"
 iroh-blobs = "0.103"
+# Already compiled into every build via iroh; a direct dep only to flip its
+# *empty* `test-utils` feature, which ungates `CaTlsConfig::
+# insecure_skip_verify` (De2: home relays serve QAD with self-signed certs —
+# a webpki CA in the trust path is against the philosophy, and nothing
+# security-relevant rides on this TLS; see net.rs).
+iroh-relay = { version = "1.0.2", default-features = false, features = ["test-utils"] }
 n0-future = "0.3.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
@@ -26,5 +32,6 @@ wasm-bindgen-futures = "0.4"
 [dev-dependencies]
 # A runtime for the async peer-sync tests (iroh's router needs tokio).
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# In-process iroh relay servers for the D0b by-key connectivity e2e.
+# In-process iroh relay servers for the D0b by-key connectivity e2e
+# (`server` adds the server half on top of the regular dep above).
 iroh-relay = { version = "1.0.2", features = ["server"] }
