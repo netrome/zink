@@ -225,6 +225,14 @@ is attacker-controlled* — a spammer can list your friends for free —
   persisted dismissal (§5). *Done when:* a three-device (or
   two-devices-plus-CLI) group chat runs live: create, add, popup → add
   Charlie, reply-all reaches everyone.
+  *(2026-07-19: code complete — popup data comes from an `unknown_members`
+  command over heads-based membership, so added-but-silent members surface
+  (sender-based detection would miss them); candidates pair each name
+  group with the freshest learned record (`Client::learned_candidates` —
+  the promotable payload, so add-as-contact works offline); dismissal
+  persists in client state and collapses the popup to the compact who-is
+  row. An add with empty text is permitted: the membership change IS the
+  message. Awaiting the live run.)*
 
 ## 9. Doc touchpoints when this lands
 

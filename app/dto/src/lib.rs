@@ -68,6 +68,23 @@ pub struct Message {
     /// The sender's key (hex) when it belongs to no stored contact — the
     /// "who is this?" handle (D1c). `None` for own and contacts' messages.
     pub unknown_sender: Option<String>,
+    /// Membership deltas vs this message's parents (D2c, groups.md §2) —
+    /// labels of keys this message added to / dropped from the addressed
+    /// set. Derived from signed cores; empty for genesis / partial views.
+    pub joined: Vec<String>,
+    pub left: Vec<String>,
+}
+
+/// One unknown member of a conversation — the "a wild key appeared"
+/// surface (D2c, groups.md §5). Candidates come from the learned store
+/// (the scoped auto-query fills it); `dismissed` collapses the popup to
+/// the compact manual row.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UnknownMember {
+    /// The key, hex — handle for `who_is` / `dismiss`.
+    pub key: String,
+    pub candidates: Vec<WhoIsCandidate>,
+    pub dismissed: bool,
 }
 
 /// What a `who_is` query brought back, render-ready (D1c).

@@ -11,7 +11,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use wasm_bindgen::prelude::wasm_bindgen;
-use zink_app_dto::{AppState, Conversation, Message, OutgoingImage, QrPayload, WhoIsReport};
+use zink_app_dto::{
+    AppState, Conversation, Message, OutgoingImage, QrPayload, UnknownMember, WhoIsReport,
+};
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -154,6 +156,7 @@ fn App() -> impl IntoView {
                     id=id
                     label=label
                     messages=messages
+                    state=state
                     reload_messages=load_messages
                     ok=ok
                     err=err
@@ -179,32 +182,36 @@ fn ChatsView(
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
-    let to = RwSignal::new(String::new());
+    let selected = RwSignal::new(std::collections::BTreeSet::<String>::new());
     let text = RwSignal::new(String::new());
     let contacts = move || state.get().map(|state| state.contacts).unwrap_or_default();
 
+    // Multi-select compose (D2c): a group is just several recipients.
     let start_chat = move |_| {
-        let (petname, body) = (to.get_untracked(), text.get_untracked());
-        if petname.is_empty() || body.trim().is_empty() {
-            return err("pick a contact and write a message".into());
+        let names: Vec<String> = selected.get_untracked().into_iter().collect();
+        let body = text.get_untracked();
+        if names.is_empty() || body.trim().is_empty() {
+            return err("pick at least one contact and write a message".into());
         }
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
                 conversation: Option<&'a str>,
-                to: Option<&'a str>,
+                to: Option<Vec<String>>,
                 text: &'a str,
             }
+            let label = names.join(", ");
             let args = Args {
                 conversation: None,
-                to: Some(&petname),
+                to: Some(names),
                 text: &body,
             };
             match invoke::invoke::<String>("send_message", &args).await {
                 Ok(conversation) => {
                     text.set(String::new());
+                    selected.update(|selected| selected.clear());
                     ok("sent");
-                    open_chat(conversation, petname);
+                    open_chat(conversation, label);
                 }
                 Err(e) => err(e),
             }
@@ -229,20 +236,37 @@ fn ChatsView(
                     .collect::<Vec<_>>()
             }}
             <div class="compose">
-                <select on:change=move |ev| to.set(event_target_value(&ev))>
-                    <option value="" selected disabled>
-                        "new chat with…"
-                    </option>
+                <div class="picks">
+                    <span class="dim">"new chat with:"</span>
                     {move || {
                         contacts()
                             .into_iter()
                             .map(|contact| {
-                                let value = contact.petname.clone();
-                                view! { <option value=value>{contact.petname}</option> }
+                                let name = contact.petname.clone();
+                                let toggled = contact.petname.clone();
+                                view! {
+                                    <label class="pick">
+                                        <input
+                                            type="checkbox"
+                                            prop:checked=move || {
+                                                selected.with(|selected| selected.contains(&name))
+                                            }
+                                            on:change=move |_| {
+                                                selected
+                                                    .update(|selected| {
+                                                        if !selected.remove(&toggled) {
+                                                            selected.insert(toggled.clone());
+                                                        }
+                                                    })
+                                            }
+                                        />
+                                        {contact.petname}
+                                    </label>
+                                }
                             })
                             .collect::<Vec<_>>()
                     }}
-                </select>
+                </div>
                 <textarea
                     rows="2"
                     placeholder="first message"
@@ -294,6 +318,7 @@ fn ChatView(
     id: String,
     label: String,
     messages: RwSignal<Vec<Message>>,
+    state: RwSignal<Option<AppState>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
@@ -444,16 +469,73 @@ fn ChatView(
             }
         });
     };
-    // Unknown participants of this conversation, deduped — the banner rows.
-    let unknown_keys = move || {
-        let mut keys: Vec<String> = messages
-            .get()
-            .into_iter()
-            .filter_map(|message| message.unknown_sender)
-            .collect();
-        keys.sort();
-        keys.dedup();
-        keys
+    // Unknown members — the "wild key appeared" surface (D2c, groups.md
+    // §5): loaded from membership (covers added-but-silent members, which
+    // per-message sender fields would miss), refreshed whenever the
+    // messages change (the scoped auto-query has run by then).
+    let unknowns = RwSignal::new(Vec::<UnknownMember>::new());
+    let load_unknowns = move || {
+        let id = conversation.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                conversation: &'a str,
+            }
+            let args = Args { conversation: &id };
+            if let Ok(list) = invoke::invoke::<Vec<UnknownMember>>("unknown_members", &args).await {
+                unknowns.set(list);
+            }
+        });
+    };
+    Effect::new(move |_| {
+        messages.track();
+        load_unknowns();
+    });
+    let ignore = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("dismiss", &args).await {
+                Ok(_) => load_unknowns(),
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Add a contact to this conversation (D2c): a message with the grown
+    // recipient set is the whole mechanism — the signed recipients list
+    // announces the membership change.
+    let add_pick = RwSignal::new(String::new());
+    let add_member = move |_| {
+        let petname = add_pick.get_untracked();
+        if petname.is_empty() {
+            return;
+        }
+        let id = conversation.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                conversation: Option<&'a str>,
+                add: Option<Vec<String>>,
+                text: &'a str,
+            }
+            let args = Args {
+                conversation: Some(&id),
+                add: Some(vec![petname.clone()]),
+                text: "",
+            };
+            match invoke::invoke::<String>("send_message", &args).await {
+                Ok(_) => {
+                    add_pick.set(String::new());
+                    ok(&format!("added {petname} to the conversation"));
+                    reload_messages(id);
+                }
+                Err(e) => err(e),
+            }
+        });
     };
 
     let send = move |_| {
@@ -492,27 +574,77 @@ fn ChatView(
         <main>
             <h3>{label}</h3>
             {move || {
-                let keys = unknown_keys();
-                (!keys.is_empty())
+                let list = unknowns.get();
+                (!list.is_empty())
                     .then(|| {
                         view! {
                             <div class="panel">
-                                {keys
+                                {list
                                     .into_iter()
-                                    .map(|key| {
-                                        let short = key.chars().take(8).collect::<String>();
-                                        view! {
-                                            <div class="row">
-                                                <span class="dim">
-                                                    {format!("unknown participant {short}…")}
-                                                </span>
-                                                <button
-                                                    class="secondary"
-                                                    on:click=move |_| ask(key.clone())
-                                                >
-                                                    "who is this?"
-                                                </button>
-                                            </div>
+                                    .map(|member| {
+                                        let short = member.key.chars().take(8).collect::<String>();
+                                        if member.dismissed {
+                                            let ask_key = member.key.clone();
+                                            view! {
+                                                <div class="row">
+                                                    <span class="dim">{format!("{short}… (ignored)")}</span>
+                                                    <button
+                                                        class="secondary"
+                                                        on:click=move |_| ask(ask_key.clone())
+                                                    >
+                                                        "who is this?"
+                                                    </button>
+                                                </div>
+                                            }
+                                                .into_any()
+                                        } else {
+                                            let ask_key = member.key.clone();
+                                            let ignore_key = member.key.clone();
+                                            let avatar_key = member.key.clone();
+                                            let candidates = member
+                                                .candidates
+                                                .into_iter()
+                                                .map(|candidate| {
+                                                    let avatar_key = avatar_key.clone();
+                                                    view! {
+                                                        <div class="row">
+                                                            <b>{candidate.name}</b>
+                                                            <span class="dim">{candidate.provenance}</span>
+                                                            {candidate
+                                                                .payload
+                                                                .map(|payload| {
+                                                                    view! {
+                                                                        <button on:click=move |_| {
+                                                                            add_learned(payload.clone());
+                                                                            refetch_avatar(avatar_key.clone());
+                                                                        }>"add as contact"</button>
+                                                                    }
+                                                                })}
+                                                        </div>
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>();
+                                            view! {
+                                                <div class="wild">
+                                                    <div class="row">
+                                                        <b>{format!("a wild key appeared: {short}…")}</b>
+                                                        <button
+                                                            class="secondary"
+                                                            on:click=move |_| ask(ask_key.clone())
+                                                        >
+                                                            "who is this?"
+                                                        </button>
+                                                        <button
+                                                            class="secondary"
+                                                            on:click=move |_| ignore(ignore_key.clone())
+                                                        >
+                                                            "ignore"
+                                                        </button>
+                                                    </div>
+                                                    {candidates}
+                                                </div>
+                                            }
+                                                .into_any()
                                         }
                                     })
                                     .collect::<Vec<_>>()}
@@ -641,6 +773,12 @@ fn ChatView(
                                 .then_some(" · ⏳ not delivered yet")
                                 .unwrap_or_default();
                             let avatar_key = (!message.mine).then(|| message.sender_key.clone());
+                            let deltas: Vec<String> = message
+                                .joined
+                                .iter()
+                                .map(|name| format!("+ {name}"))
+                                .chain(message.left.iter().map(|name| format!("− {name}")))
+                                .collect();
                             view! {
                                 <div class=class>
                                     {avatar_key
@@ -658,6 +796,8 @@ fn ChatView(
                                     <span class="dim">
                                         {message.sender} " · " {time_of(message.timestamp_ms)} {delivery}
                                     </span>
+                                    {(!deltas.is_empty())
+                                        .then(|| view! { <div class="dim">{deltas.join(" · ")}</div> })}
                                     {images}
                                     {body.map(|text| view! { <div>{text}</div> })}
                                     {unopenable.then(|| view! { <div class="dim">"<unopenable>"</div> })}
@@ -682,6 +822,28 @@ fn ChatView(
                             }
                         })
                 }}
+                <div class="picks">
+                    <select on:change=move |ev| add_pick.set(event_target_value(&ev))>
+                        <option value="" selected disabled>
+                            "add to conversation…"
+                        </option>
+                        {move || {
+                            state
+                                .get()
+                                .map(|state| state.contacts)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|contact| {
+                                    let value = contact.petname.clone();
+                                    view! { <option value=value>{contact.petname}</option> }
+                                })
+                                .collect::<Vec<_>>()
+                        }}
+                    </select>
+                    <button class="secondary" on:click=add_member>
+                        "add"
+                    </button>
+                </div>
                 <input type="file" accept="image/*" on:change=attach />
                 <textarea
                     rows="2"

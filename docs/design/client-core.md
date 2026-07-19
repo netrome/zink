@@ -107,6 +107,12 @@ client.who_is(PublicKey) -> WhoIsOutcome      // dial every dialable contact AT 
 client.resolve_name(PublicKey) -> ResolvedName // petname > learned self-claims
                                               // (revision-ranked, provenance +
                                               // agreement surfaced) > Unknown
+client.learned_candidates(PublicKey) -> Vec<(LearnedName, ContactRecord)>
+                                              // resolve_name's groups, each with the
+                                              // freshest record claiming the name —
+                                              // the popup's promotable payload (D2c)
+client.dismiss(PublicKey) / client.dismissed() // ignore an unknown key (persisted
+                                              // presentation policy, groups.md §5)
 client.who_is_among(PublicKey, &[PublicKey]) -> WhoIsOutcome
                                               // responder-scoped who_is (D2b) — the
                                               // auto-query's shape; also auto-run

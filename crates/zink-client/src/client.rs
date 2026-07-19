@@ -1292,13 +1292,35 @@ impl Client {
     /// along: which contacts hold a record claiming each name, and whether
     /// the subject itself served one.
     pub fn resolve_name(&self, key: PublicKey) -> Result<ResolvedName, Error> {
-        let contacts = self.state.contacts()?;
-        if let Some((petname, _)) = contacts
+        if let Some((petname, _)) = self
+            .state
+            .contacts()?
             .iter()
             .find(|(_, record)| record.keys.contains(&key))
         {
             return Ok(ResolvedName::Petname(petname.clone()));
         }
+        let names: Vec<LearnedName> = self
+            .learned_candidates(key)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        if names.is_empty() {
+            return Ok(ResolvedName::Unknown);
+        }
+        Ok(ResolvedName::Learned(names))
+    }
+
+    /// Render-ready candidates for a key from everything learned so far:
+    /// `resolve_name`'s groups, each paired with the freshest record
+    /// claiming that name (highest revision, then latest receipt) — the
+    /// promotable payload behind the wild-key popup's add button (D2c,
+    /// groups.md §5). Best first; a genuine tie surfaces both.
+    pub fn learned_candidates(
+        &self,
+        subject: PublicKey,
+    ) -> Result<Vec<(LearnedName, ContactRecord)>, Error> {
+        let contacts = self.state.contacts()?;
         let petname_of = |responder: PublicKey| {
             contacts
                 .iter()
@@ -1308,36 +1330,58 @@ impl Client {
                 // status; fall back to an honest key prefix.
                 .unwrap_or_else(|| hex::encode(&responder.0[..4]))
         };
-        let mut by_name: BTreeMap<String, LearnedName> = BTreeMap::new();
-        for entry in self.state.learned(&key) {
+        let mut groups: BTreeMap<String, (LearnedName, ContactRecord, (u64, u64))> =
+            BTreeMap::new();
+        for entry in self.state.learned(&subject) {
             let Some((name, revision)) = entry.record.self_name_claim() else {
                 continue; // no verifiable self-claim — relays-only evidence
             };
-            let learned = by_name
-                .entry(name.to_string())
-                .or_insert_with(|| LearnedName {
-                    name: name.to_string(),
-                    revision,
-                    held_by: Vec::new(),
-                    confirmed_by_subject: false,
-                });
-            learned.revision = learned.revision.max(revision);
-            if entry.responder == key {
-                learned.confirmed_by_subject = true;
+            let name = name.to_string();
+            let rank = (revision, entry.received_ms);
+            let group = groups.entry(name.clone()).or_insert_with(|| {
+                (
+                    LearnedName {
+                        name,
+                        revision,
+                        held_by: Vec::new(),
+                        confirmed_by_subject: false,
+                    },
+                    entry.record.clone(),
+                    rank,
+                )
+            });
+            group.0.revision = group.0.revision.max(revision);
+            if entry.responder == subject {
+                group.0.confirmed_by_subject = true;
             } else {
-                learned.held_by.push(petname_of(entry.responder));
+                group.0.held_by.push(petname_of(entry.responder));
+            }
+            if rank > group.2 {
+                group.1 = entry.record.clone();
+                group.2 = rank;
             }
         }
-        if by_name.is_empty() {
-            return Ok(ResolvedName::Unknown);
-        }
-        let mut names: Vec<LearnedName> = by_name.into_values().collect();
-        names.sort_by(|a, b| {
-            b.revision
-                .cmp(&a.revision)
-                .then_with(|| a.name.cmp(&b.name))
+        let mut candidates: Vec<(LearnedName, ContactRecord)> = groups
+            .into_values()
+            .map(|(name, record, _)| (name, record))
+            .collect();
+        candidates.sort_by(|a, b| {
+            b.0.revision
+                .cmp(&a.0.revision)
+                .then_with(|| a.0.name.cmp(&b.0.name))
         });
-        Ok(ResolvedName::Learned(names))
+        Ok(candidates)
+    }
+
+    /// Ignore an unknown key (D2c, groups.md §5): the popup stops
+    /// proposing it; the key keeps rendering as hex (honest), and the
+    /// manual who-is path stays available. Local presentation policy.
+    pub fn dismiss(&self, key: PublicKey) -> Result<(), Error> {
+        self.state.dismiss_key(&key)
+    }
+
+    pub fn dismissed(&self) -> BTreeSet<PublicKey> {
+        self.state.dismissed_keys()
     }
 
     /// Sync a partially-known conversation with a peer (SPEC §5.2): walk
@@ -2847,6 +2891,81 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("avatarb"));
+    }
+
+    #[tokio::test]
+    async fn learned_candidates__should_pair_each_name_with_the_freshest_record() {
+        // Given: two responders serve the same claimed name, but with
+        // different records — the later receipt carries fresher relays
+        let a = Client::open_or_create(&temp_key("cands", "asker"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([25; 32]);
+        let older = signed_record(
+            &carol,
+            "Carol",
+            0,
+            vec![RelayEntry {
+                mailbox: "old@203.0.113.1:1".to_string(),
+                relay_url: None,
+            }],
+        );
+        let newer = signed_record(
+            &carol,
+            "Carol",
+            0,
+            vec![RelayEntry {
+                mailbox: "new@203.0.113.2:2".to_string(),
+                relay_url: None,
+            }],
+        );
+        a.state
+            .save_learned(
+                &carol.public(),
+                &DeviceKey::from_seed([26; 32]).public(),
+                &older,
+                1,
+            )
+            .expect("learn older");
+        a.state
+            .save_learned(
+                &carol.public(),
+                &DeviceKey::from_seed([27; 32]).public(),
+                &newer,
+                2,
+            )
+            .expect("learn newer");
+
+        // When
+        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+
+        // Then: one group (agreement of two), paired with the freshest
+        // record — the promotable payload
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.name, "Carol");
+        assert_eq!(candidates[0].0.held_by.len(), 2);
+        assert_eq!(candidates[0].1.relays[0].mailbox, "new@203.0.113.2:2");
+
+        let _ = std::fs::remove_dir_all(temp_root("cands"));
+    }
+
+    #[tokio::test]
+    async fn dismiss__should_persist_across_reopens() {
+        // Given
+        let key_path = temp_key("dismiss", "me");
+        let a = Client::open_or_create(&key_path).await.expect("open");
+        let noisy = DeviceKey::from_seed([28; 32]).public();
+
+        // When
+        a.dismiss(noisy).expect("dismiss");
+        a.dismiss(noisy).expect("idempotent");
+        drop(a);
+        let a = Client::open_or_create(&key_path).await.expect("reopen");
+
+        // Then
+        assert!(a.dismissed().contains(&noisy));
+
+        let _ = std::fs::remove_dir_all(temp_root("dismiss"));
     }
 
     #[tokio::test]

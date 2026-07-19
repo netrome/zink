@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AppState, BlobInfo, ContactRow, Conversation, Message, OutgoingImage, QrPayload,
+    AppState, BlobInfo, ContactRow, Conversation, Message, OutgoingImage, QrPayload, UnknownMember,
     WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, ResolvedName, hex};
@@ -254,6 +254,16 @@ async fn messages(
                     .any(|(_, record)| record.keys.contains(&message.sender)))
             .then(|| hex::encode(&message.sender.0)),
             sender_key: hex::encode(&message.sender.0),
+            joined: message
+                .joined
+                .iter()
+                .map(|key| label(&contacts, key))
+                .collect(),
+            left: message
+                .left
+                .iter()
+                .map(|key| label(&contacts, key))
+                .collect(),
             mine: message.sender == me,
             text: message
                 .body
@@ -306,11 +316,13 @@ async fn send_message(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
     conversation: Option<String>,
-    to: Option<String>,
+    to: Option<Vec<String>>,
+    add: Option<Vec<String>>,
     text: String,
     image: Option<OutgoingImage>,
 ) -> Result<String, String> {
-    if text.trim().is_empty() && image.is_none() {
+    let adding = add.unwrap_or_default();
+    if text.trim().is_empty() && image.is_none() && adding.is_empty() {
         return Err("nothing to send".into());
     }
     let blobs = match image {
@@ -322,24 +334,29 @@ async fn send_message(
         (Some(conversation), _) => {
             let conversation = parse_id(&conversation)?;
             let resolved = client.reply_contacts(conversation)?;
+            // --add grows the recipient set (groups.md §2): the signed
+            // recipients list is the membership announcement.
+            let mut contacts = resolved.contacts;
+            for petname in &adding {
+                contacts.push(client.resolve_contact(petname)?);
+            }
             // Unroutable members stay recipients (groups.md §2 — membership
             // is not deliverability); only an all-unroutable set is an error.
-            if resolved
-                .contacts
-                .iter()
-                .all(|contact| contact.relays.is_empty())
-            {
+            if contacts.iter().all(|contact| contact.relays.is_empty()) {
                 return Err("no routable participants — add their contacts first".into());
             }
             client
-                .send_in(conversation, &resolved.contacts, text.into_bytes(), blobs)
+                .send_in(conversation, &contacts, text.into_bytes(), blobs)
                 .await?
         }
-        (None, Some(petname)) => {
-            let contact = client.resolve_contact(&petname)?;
-            client.send(&[contact], text.into_bytes(), blobs).await?
+        (None, Some(petnames)) if !petnames.is_empty() => {
+            let contacts: Vec<zink_client::Contact> = petnames
+                .iter()
+                .map(|petname| client.resolve_contact(petname))
+                .collect::<Result<_, _>>()?;
+            client.send(&contacts, text.into_bytes(), blobs).await?
         }
-        (None, None) => return Err("no conversation or contact given".into()),
+        _ => return Err("no conversation or contact given".into()),
     };
     // A successful send proves the network is up: retry any backlog now, but
     // off the command's path so this send's latency doesn't wait on it.
@@ -411,6 +428,73 @@ async fn avatar(
         .map(|bytes| BASE64.encode(&bytes)))
 }
 
+/// One render-ready candidate row (provenance preformatted — the webview
+/// never re-implements naming policy).
+fn candidate_dto(learned: zink_client::LearnedName, payload: Option<String>) -> WhoIsCandidate {
+    let mut provenance = Vec::new();
+    if learned.confirmed_by_subject {
+        provenance.push("confirmed by themself".to_string());
+    }
+    if !learned.held_by.is_empty() {
+        provenance.push(format!("records held by {}", learned.held_by.join(", ")));
+    }
+    WhoIsCandidate {
+        name: learned.name,
+        provenance: provenance.join("; "),
+        payload,
+    }
+}
+
+/// The unknown members of a conversation — the "a wild key appeared"
+/// surface (D2c, groups.md §5). Candidates render from the learned store
+/// (the scoped auto-query fills it at drain time); payloads come from the
+/// freshest learned record, so add-as-contact works offline.
+#[tauri::command]
+async fn unknown_members(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    conversation: String,
+) -> Result<Vec<UnknownMember>, String> {
+    let client = client(&app, &managed).await?;
+    let conversation = parse_id(&conversation)?;
+    let me = client.public_key();
+    let contacts = client.contacts()?;
+    let dismissed = client.dismissed();
+    let mut members = Vec::new();
+    for key in client.membership(conversation)? {
+        if key == me
+            || contacts
+                .iter()
+                .any(|(_, record)| record.keys.contains(&key))
+        {
+            continue;
+        }
+        let candidates = client
+            .learned_candidates(key)?
+            .into_iter()
+            .map(|(learned, record)| candidate_dto(learned, Some(record.to_qr_string())))
+            .collect();
+        members.push(UnknownMember {
+            key: hex::encode(&key.0),
+            candidates,
+            dismissed: dismissed.contains(&key),
+        });
+    }
+    Ok(members)
+}
+
+/// Ignore an unknown key (D2c): collapses its popup; the key keeps
+/// rendering as hex, and manual who-is stays available.
+#[tauri::command]
+async fn dismiss(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    Ok(client.dismiss(PublicKey(hex::parse32(&subject)?))?)
+}
+
 /// JPEG / PNG / WebP magic bytes — the formats the webview canvas emits.
 fn looks_like_image(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xFF, 0xD8, 0xFF])
@@ -448,18 +532,7 @@ async fn who_is(
                             answer.record.self_claimed_name() == Some(learned.name.as_str())
                         })
                         .map(|answer| answer.record.to_qr_string());
-                    let mut provenance = Vec::new();
-                    if learned.confirmed_by_subject {
-                        provenance.push("confirmed by themself".to_string());
-                    }
-                    if !learned.held_by.is_empty() {
-                        provenance.push(format!("records held by {}", learned.held_by.join(", ")));
-                    }
-                    WhoIsCandidate {
-                        name: learned.name,
-                        provenance: provenance.join("; "),
-                        payload,
-                    }
+                    candidate_dto(learned, payload)
                 })
                 .collect();
             (None, candidates)
@@ -554,7 +627,9 @@ pub fn run() {
             refresh,
             who_is,
             set_avatar,
-            avatar
+            avatar,
+            unknown_members,
+            dismiss
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")

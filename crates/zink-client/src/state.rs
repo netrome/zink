@@ -483,6 +483,33 @@ impl ClientState {
         learned
     }
 
+    /// Dismiss an unknown key (D2c, groups.md §5): the "ignore" side of
+    /// the wild-key popup — pure presentation policy, persisted so the
+    /// popup doesn't nag every open. One hex key per line; idempotent.
+    pub fn dismiss_key(&self, key: &PublicKey) -> Result<(), Error> {
+        let mut dismissed = self.dismissed_keys();
+        if !dismissed.insert(*key) {
+            return Ok(());
+        }
+        let path = self.root.join("dismissed.keys");
+        create_parent(&path)?;
+        let content: String = dismissed
+            .iter()
+            .map(|key| format!("{}\n", hex(&key.0)))
+            .collect();
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write dismissed keys: {e}")))
+    }
+
+    pub fn dismissed_keys(&self) -> BTreeSet<PublicKey> {
+        std::fs::read_to_string(self.root.join("dismissed.keys"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| crate::hex::parse32(line.trim()).ok())
+            .map(PublicKey)
+            .collect()
+    }
+
     fn contact_stem(&self, key: &PublicKey) -> PathBuf {
         self.root.join("contacts").join(hex(&key.0))
     }

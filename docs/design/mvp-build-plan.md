@@ -618,6 +618,18 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   contacts-view pull refreshes that row's avatar. The ~5 s `who_is.rs` e2e
   is inherent subprocess cost (~15 CLI invocations, each a full client
   open), left as is.)*
+- [ ] **De4 · e2e suite latency.** The full-stack CLI tests are slow (groups
+  ~13 s, who-is ~5 s) for reasons that are harness-shaped, not protocol-shaped:
+  each drives the CLI *binary*, so every step is a subprocess doing a full
+  client open (bind, home, net-report, register) and close — ~15–30 spawns per
+  test — plus fixed-sleep readiness polls around background `listen` processes.
+  The flows themselves are hundreds-of-ms fast (the in-process client-crate
+  e2es prove it: multi-relay sync suites finish in ~0.4 s). Fix shape: an
+  in-process multi-client harness — zink-relay's mailbox service as a
+  zink-client dev-dependency (no cycle; the blobs/nudge router already spawns
+  in-process in zink-relay's own tests) — so whole flows run as library calls;
+  the CLI keeps one or two thin smoke tests for arg-parsing/output. *(Noted
+  2026-07-19 at D2b review.)*
 - [ ] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
   on the contacts' side IS the membership-presentation pipeline, so it ships
@@ -702,6 +714,27 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     heads-based labels + delta lines; the wild-Charlie popup with persisted
     dismissal. *Done when:* a live group chat across devices — create, add,
     popup → add, reply-all reaches everyone.
+    *(2026-07-19: code complete — compose is a contact multi-select
+    (`send_message` takes `to: Vec<String>` + `add: Vec<String>`; an add
+    with empty text is allowed — the membership change IS the message);
+    chat view gained an add-to-conversation picker, derived delta lines
+    (`+ name · − name`, from `Message.{joined,left}` labels), and the
+    wild-key popup driven by a new `unknown_members` command — unknown
+    *members* (from heads-based membership, so added-but-silent members
+    surface, which sender-based detection would miss) with learned
+    candidates (name + provenance + promotable payload from
+    `Client::learned_candidates`, the freshest record per name group —
+    `resolve_name` now delegates to it) and a `dismissed` flag; ignore →
+    `dismiss` command → `dismissed.keys` in client state (persisted;
+    dismissed keys collapse to the compact who-is row — the un-dismiss
+    path; honest hex rendering stays). Labels everywhere are heads-based
+    for free (D2a changed the summary semantics). UI wasm + aarch64 APK
+    build; 155 tests incl. freshest-record pairing + dismissal
+    persistence. **Awaiting the live group-chat run** — phone + two
+    desktop instances works: create a group from the multi-select, add the
+    third member from the picker, their device pops "a wild key appeared"
+    with the auto-learned candidate, add → label flips, reply-all reaches
+    everyone. That run closes D2.)*
 - [ ] **D3 · Multi-device.** 🎯 *(Was D2 — now genuinely thin: D2's pipeline
   does the propagation, since "your new device" and "a new member" are the
   same event under the hood (SPEC §5.2).)* QR pairing producing the mutual
