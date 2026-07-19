@@ -618,7 +618,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   contacts-view pull refreshes that row's avatar. The ~5 s `who_is.rs` e2e
   is inherent subprocess cost (~15 CLI invocations, each a full client
   open), left as is.)*
-- [ ] **De5 · who-is from a freshly-set-up client.** Field observation at the
+- [x] **De5 · who-is from a freshly-set-up client.** Field observation at the
   D2c run (2026-07-19, three instances on one laptop): the *new* participant's
   who-is never completed — not even after adding a contact — while the
   long-running clients' queries worked. Prime suspect: **homing applies at
@@ -632,6 +632,23 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   hang; if it truly never completes, the connect path has a second bug.
   Not critical (one-time-per-install window); revisit before D3's pairing
   flow, which will hit the same fresh-client moment by construction.
+  ✅ *(2026-07-19: root cause confirmed — worse than the homing hypothesis:
+  an unprofiled client bound with `RelayMode::Disabled`, i.e. **no relay
+  transport in the socket at all**, so relay URLs were unusable in either
+  direction until the next open. Fix in two halves: (a) `bind_endpoint`
+  now ALWAYS binds the relay transport (`RelayMode::Custom` with an empty
+  map pre-profile) + the QAD trust config unconditionally — outbound
+  dial-by-key works the moment a peer's record is held, no profile needed;
+  (b) `set_profile` (now async) applies the map delta to the RUNNING
+  endpoint via iroh's `insert_relay`/`remove_relay` — homing at runtime,
+  restart-to-apply gone, no UI hint needed. Regression test: a fresh
+  profileless client gets a who-is answer immediately AND homes (`online`
+  within 5 s) after a `set_profile` with zero reopens. The "never
+  completed" flavor of the field report couldn't be reproduced — with the
+  transport always present the failing path no longer exists; if a hang
+  ever resurfaces it's a fresh report. Also fixed while stabilizing: two
+  tests shared the `temp_root("fresh")` namespace and one wiped the
+  other's live state mid-run — test-only flake, renamed.)*
 - [ ] **De4 · e2e suite latency.** The full-stack CLI tests are slow (groups
   ~13 s, who-is ~5 s) for reasons that are harness-shaped, not protocol-shaped:
   each drives the CLI *binary*, so every step is a subprocess doing a full

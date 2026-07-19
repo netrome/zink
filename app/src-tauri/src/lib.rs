@@ -173,7 +173,7 @@ async fn set_profile(
     relay: String,
 ) -> Result<QrPayload, String> {
     let client = client(&app, &managed).await?;
-    client.set_profile(&name, &[relay])?;
+    client.set_profile(&name, &[relay]).await?;
     client.register_at_home_relays().await?;
     // The relay may be new — give it its live-delivery task right away.
     spawn_subscriptions(&app, &managed, &client);

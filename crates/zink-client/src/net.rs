@@ -29,21 +29,25 @@ pub(crate) async fn bind_endpoint(
     device: &DeviceKey,
     home_relays: &[RelayUrl],
 ) -> Result<Endpoint, Error> {
-    let mut builder =
-        Endpoint::builder(presets::Minimal).secret_key(SecretKey::from_bytes(&device.seed()));
-    if !home_relays.is_empty() {
-        let map: RelayMap = home_relays.iter().cloned().map(relay_config).collect();
-        builder = builder
-            .relay_mode(RelayMode::Custom(map))
-            // The relay serves QAD with a self-signed cert (De2) — webpki
-            // roots would put a CA in the trust path, which zink relays
-            // deliberately don't have. Nothing security-relevant rides on
-            // this TLS: iroh connections authenticate by endpoint key, and
-            // a QAD man-in-the-middle can at most misreport our observed
-            // address (degraded holepunching — today's baseline anyway).
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify());
-    }
-    builder
+    let map: RelayMap = home_relays.iter().cloned().map(relay_config).collect();
+    Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::from_bytes(&device.seed()))
+        // The relay transport is ALWAYS bound — with an empty map when no
+        // profile exists yet (De5). Without it, a freshly-set-up client
+        // could not use relay URLs in either direction until the next
+        // open: no dialing peers by key (the field bug — who-is dead on a
+        // new install) and no homing. With the transport present, peers'
+        // relay URLs dial immediately, and `Client::set_profile` homes
+        // the *running* endpoint via `insert_relay` — restart-to-apply is
+        // gone.
+        .relay_mode(RelayMode::Custom(map))
+        // The relay serves QAD with a self-signed cert (De2) — webpki
+        // roots would put a CA in the trust path, which zink relays
+        // deliberately don't have. Nothing security-relevant rides on
+        // this TLS: iroh connections authenticate by endpoint key, and
+        // a QAD man-in-the-middle can at most misreport our observed
+        // address (degraded holepunching — today's baseline anyway).
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
         .bind()
         .await
         .map_err(|e| Error::Transport(format!("bind endpoint: {e}")))
@@ -55,7 +59,7 @@ pub(crate) async fn bind_endpoint(
 /// distinct URLs get distinct QAD ports — multi-relay on one host stays
 /// collision-free). A URL with no explicit port keeps iroh's default QAD
 /// port (7842), which is exactly the convention standard iroh relays use.
-fn relay_config(url: RelayUrl) -> RelayConfig {
+pub(crate) fn relay_config(url: RelayUrl) -> RelayConfig {
     let port = url.port();
     let mut config = RelayConfig::from(url);
     if let (Some(port), Some(quic)) = (port, config.quic.as_mut()) {

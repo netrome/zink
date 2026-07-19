@@ -767,7 +767,7 @@ impl Client {
     /// mailbox dial string, plus the same service's iroh relay URL, which
     /// makes this device reachable by key (D0b; applied at the next open,
     /// since the endpoint's relay transport is fixed at bind time).
-    pub fn set_profile(&self, name: &str, relays: &[String]) -> Result<(), Error> {
+    pub async fn set_profile(&self, name: &str, relays: &[String]) -> Result<(), Error> {
         if name.trim().is_empty() {
             return Err(Error::ProfileIncomplete("name must not be empty"));
         }
@@ -788,7 +788,34 @@ impl Client {
             self.state
                 .save_profile_revision(self.state.profile_revision() + 1)?;
         }
-        self.state.save_profile(name.trim(), &entries)
+        let previous = self.home_relay_urls()?;
+        self.state.save_profile(name.trim(), &entries)?;
+        // Home the RUNNING endpoint (De5): the relay transport is always
+        // bound (net::bind_endpoint), so map changes apply immediately —
+        // a profile save no longer needs a restart to take effect.
+        let next = self.home_relay_urls()?;
+        for url in next.iter().filter(|url| !previous.contains(url)) {
+            self.endpoint
+                .insert_relay(
+                    url.clone(),
+                    std::sync::Arc::new(net::relay_config(url.clone())),
+                )
+                .await;
+        }
+        for url in previous.iter().filter(|url| !next.contains(url)) {
+            self.endpoint.remove_relay(url).await;
+        }
+        Ok(())
+    }
+
+    /// The profile's parsed home-relay URLs (entries without one skipped).
+    fn home_relay_urls(&self) -> Result<Vec<iroh::RelayUrl>, Error> {
+        self.state
+            .home_relay_entries()
+            .iter()
+            .filter_map(|entry| entry.relay_url.as_deref())
+            .map(net::parse_relay_url)
+            .collect()
     }
 
     pub fn profile_name(&self) -> Option<String> {
@@ -2622,12 +2649,15 @@ mod tests {
         // When / Then: first profile starts at 0; a re-save of the same
         // name doesn't bump; a rename supersedes (SPEC §3.2)
         a.set_profile("alice", std::slice::from_ref(&relay))
+            .await
             .expect("set");
         assert_eq!(revision(&a), 0);
         a.set_profile("alice", std::slice::from_ref(&relay))
+            .await
             .expect("re-set");
         assert_eq!(revision(&a), 0);
         a.set_profile("alicia", std::slice::from_ref(&relay))
+            .await
             .expect("rename");
         assert_eq!(revision(&a), 1);
 
@@ -2707,6 +2737,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("conc"));
+    }
+
+    #[tokio::test]
+    async fn fresh_client__should_dial_by_key_and_home_without_a_reopen() {
+        // Given: B homed + serving; A is a FRESH client — key created this
+        // run, no profile yet (the new-participant moment from the D2c
+        // field run, where who-is was dead until an app restart)
+        let (_relay, url) = spawn_test_relay().await;
+        let b = open_homed("rebind5", "responder", &url).await;
+        let a = Client::open_or_create(&temp_key("rebind5", "newborn"))
+            .await
+            .expect("open A");
+        befriend(&b, &a);
+        a.add_contact(
+            &ContactRecord::new(
+                vec![b.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(url.clone()),
+                }],
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+        b.endpoint.online().await;
+
+        // When: who-is BEFORE any profile exists — outbound dial-by-key
+        // needs only the relay transport, which is now always bound
+        let outcome = a.who_is(b.public_key()).await.expect("who_is");
+
+        // Then: answered, not hung and not unreachable
+        assert_eq!(
+            outcome.answers.len(),
+            1,
+            "asked {}, unreachable {}",
+            outcome.asked,
+            outcome.unreachable
+        );
+
+        // When: the profile is saved on the RUNNING client
+        let spec = format!("{}@203.0.113.1:1#{url}", hex::encode(&a.public_key().0));
+        a.set_profile("newborn", std::slice::from_ref(&spec))
+            .await
+            .expect("profile");
+
+        // Then: the endpoint homes with no reopen — restart-to-apply is gone
+        n0_future::time::timeout(Duration::from_secs(5), a.endpoint.online())
+            .await
+            .expect("homed at runtime");
+
+        let _ = std::fs::remove_dir_all(temp_root("rebind5"));
     }
 
     #[tokio::test]
@@ -2845,6 +2927,7 @@ mod tests {
         assert_eq!((first.revision, second.revision), (0, 1));
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
         a.set_profile("alice", std::slice::from_ref(&relay))
+            .await
             .expect("profile");
         let record = a.my_record().expect("record");
         assert_eq!(
@@ -2873,6 +2956,7 @@ mod tests {
         let receipt = a.set_avatar(b"portrait".to_vec()).await.expect("set");
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
         a.set_profile("alice", std::slice::from_ref(&relay))
+            .await
             .expect("profile");
         let ciphertext = a.state.load_blob(&receipt.hash).expect("cached at set");
         b.state.save_blob(&receipt.hash, &ciphertext).expect("seed");

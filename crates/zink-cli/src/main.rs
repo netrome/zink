@@ -131,7 +131,7 @@ async fn my_record(args: &[String]) -> Result<(), String> {
     if relays.is_empty() {
         return Err(format!("no home relay yet — pass --relay\n{USAGE}"));
     }
-    client.set_profile(&name, &relays)?;
+    client.set_profile(&name, &relays).await?;
     client.register_at_home_relays().await?;
     let payload = client.my_record()?.to_qr_string();
     println!("{payload}");

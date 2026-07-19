@@ -78,9 +78,11 @@ client.flush_outbox() -> FlushReport          // idempotent re-deposit + re-push
 client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
 // peer sync (D0a/D0b, sync-primitives.md): the client also *serves* — an
 // accepting router on SYNC_ALPN answers get/get-successors from local
-// storage for the client's lifetime. The endpoint homes to the profile's
-// relay URLs (RelayMode::Custom, applied at open — a profile change takes
-// effect on the next open), which keeps this device reachable by key.
+// storage for the client's lifetime. The relay transport is ALWAYS bound
+// (empty map pre-profile — De5), so peers' relay URLs dial immediately on
+// a fresh install; set_profile (async since De5) homes the RUNNING
+// endpoint via insert_relay/remove_relay — profile changes apply live,
+// no restart. Homing keeps this device reachable by key.
 // Serving gate (D0c): contacts-only — non-contacts get NotHeld / empty
 // successors, indistinguishable from not-holding; own key always served.
 // Auto-sync (D0d): every drain (recv / catch-up / nudge) heals orphaned
