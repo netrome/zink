@@ -728,6 +728,31 @@ impl Client {
         Ok(summaries)
     }
 
+    /// Display labels for a participant set, deduped per *person*
+    /// (multi-device.md §7): keys held by one contact entry collapse to a
+    /// single petname — a two-device contact renders once in conversation
+    /// labels — while unknown keys stay distinct, as honest short hex.
+    /// Order follows the input; a cluster's label sits at its first key.
+    pub fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
+        let contacts = self.state.contacts()?;
+        let mut labels = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for key in keys {
+            match contacts
+                .iter()
+                .find(|(_, record)| record.keys.contains(key))
+            {
+                Some((petname, _)) => {
+                    if seen.insert(petname.clone()) {
+                        labels.push(petname.clone());
+                    }
+                }
+                None => labels.push(hex::encode(&key.0[..4])),
+            }
+        }
+        Ok(labels)
+    }
+
     /// One conversation's stored messages in the DAG's linearized order.
     /// Bodies are opened per message and never fail the whole history — an
     /// envelope this device cannot open (e.g. sealed before the self-wrap
@@ -870,6 +895,14 @@ impl Client {
     /// Store a scanned/pasted record. The petname defaults to the contact's
     /// self-claimed name; the caller may override (petnames are ours, not
     /// theirs). Returns the petname it was stored under.
+    ///
+    /// **Contact identity is key overlap** (multi-device.md §4): a record
+    /// sharing any key with an existing contact is an update *of that
+    /// entry* — accepted only under that entry's own petname, which is the
+    /// explicit confirm. A `keys` list is unauthenticated per-key, so a
+    /// hostile record smuggling a contact's key must never rewrite that
+    /// contact's trust anchor as a side effect of adding "someone new";
+    /// a record overlapping two or more contacts is refused outright.
     pub fn add_contact(
         &self,
         record: &ContactRecord,
@@ -890,14 +923,33 @@ impl Client {
                     "record has no valid self-claimed name; provide a petname".into(),
                 )
             })?;
-        // A petname must resolve to one person: reject collisions with a
-        // *different* key; re-adding the same person updates their record.
-        for (existing_name, existing) in self.state.contacts()? {
-            if existing_name == petname && existing.keys.first() != record.keys.first() {
-                return Err(Error::PetnameCollision(petname));
+        let contacts = self.state.contacts()?;
+        let overlapping: Vec<&(String, ContactRecord)> = contacts
+            .iter()
+            .filter(|(_, existing)| existing.keys.iter().any(|key| record.keys.contains(key)))
+            .collect();
+        match overlapping.as_slice() {
+            // A brand-new person; the petname must still resolve to one
+            // person (send-by-name stays unambiguous).
+            [] => {
+                if contacts.iter().any(|(name, _)| *name == petname) {
+                    return Err(Error::PetnameCollision(petname));
+                }
+                self.state.save_contact(&petname, record)?;
+            }
+            [(existing_name, existing)] => {
+                if *existing_name != petname {
+                    return Err(Error::ContactOverlap {
+                        existing: existing_name.clone(),
+                    });
+                }
+                self.state.replace_contact(existing, &petname, record)?;
+            }
+            several => {
+                let names: Vec<&str> = several.iter().map(|(name, _)| name.as_str()).collect();
+                return Err(Error::AmbiguousOverlap(names.join(", ")));
             }
         }
-        self.state.save_contact(&petname, record)?;
         Ok(petname)
     }
 
@@ -2628,6 +2680,195 @@ mod tests {
         assert_eq!(contact.keys, vec![carol.public()]);
 
         let _ = std::fs::remove_dir_all(temp_root("keys"));
+    }
+
+    fn mailbox_only(mailbox: &str) -> Vec<RelayEntry> {
+        vec![RelayEntry {
+            mailbox: mailbox.to_string(),
+            relay_url: None,
+        }]
+    }
+
+    #[tokio::test]
+    async fn add_contact__should_update_the_overlapping_contact_under_its_own_petname() {
+        // Given: bob stored under his original single-key record
+        let a = Client::open_or_create(&temp_key("overlap-update", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([31; 32]);
+        let laptop = DeviceKey::from_seed([32; 32]);
+        let original =
+            ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1"));
+        a.add_contact(&original, Some("bob".to_string()))
+            .expect("add");
+
+        // When: a re-scan with the key set extended and *reordered* — a new
+        // first key, so the store stem must re-derive without forking
+        let rescanned = ContactRecord::new(
+            vec![laptop.public(), bob.public()],
+            vec![],
+            mailbox_only("bb@203.0.113.2:2"),
+        );
+        a.add_contact(&rescanned, Some("bob".to_string()))
+            .expect("update");
+
+        // Then: still exactly one contact, holding the fresh record
+        let contacts = a.contacts().expect("contacts");
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].0, "bob");
+        assert_eq!(contacts[0].1, rescanned);
+
+        let _ = std::fs::remove_dir_all(temp_root("overlap-update"));
+    }
+
+    #[tokio::test]
+    async fn add_contact__should_surface_an_overlap_under_a_different_petname() {
+        // Given: bob stored; a hostile record smuggling bob's key into its
+        // own key list (multi-device.md §4 — the trust-anchor hijack)
+        let a = Client::open_or_create(&temp_key("overlap-confirm", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([33; 32]);
+        let mallory = DeviceKey::from_seed([34; 32]);
+        a.add_contact(
+            &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+        let contacts_dir =
+            std::path::PathBuf::from(format!("{}.state", temp_key("overlap-confirm", "a")))
+                .join("contacts");
+        let before = dir_bytes(&contacts_dir);
+        let smuggling = ContactRecord::new(
+            vec![mallory.public(), bob.public()],
+            vec![],
+            mailbox_only("mm@203.0.113.6:6"),
+        );
+
+        // When: added as "someone new"
+        let result = a.add_contact(&smuggling, Some("mallory".to_string()));
+
+        // Then: surfaced, naming the entry it would rewrite; nothing stored
+        assert!(matches!(
+            result,
+            Err(Error::ContactOverlap { ref existing }) if existing == "bob"
+        ));
+        assert_eq!(dir_bytes(&contacts_dir), before);
+
+        // And: the same add under the matched petname is the explicit
+        // confirm — it updates bob's entry, keeping one contact
+        a.add_contact(&smuggling, Some("bob".to_string()))
+            .expect("confirmed update");
+        let contacts = a.contacts().expect("contacts");
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].0, "bob");
+
+        let _ = std::fs::remove_dir_all(temp_root("overlap-confirm"));
+    }
+
+    #[tokio::test]
+    async fn add_contact__should_refuse_a_record_overlapping_two_contacts() {
+        // Given: bob and carol stored as distinct contacts
+        let a = Client::open_or_create(&temp_key("overlap-ambiguous", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([35; 32]);
+        let carol = DeviceKey::from_seed([36; 32]);
+        for (device, name, mailbox) in [
+            (&bob, "bob", "bb@203.0.113.1:1"),
+            (&carol, "carol", "cc@203.0.113.2:2"),
+        ] {
+            a.add_contact(
+                &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
+                Some(name.to_string()),
+            )
+            .expect("add");
+        }
+        let contacts_dir =
+            std::path::PathBuf::from(format!("{}.state", temp_key("overlap-ambiguous", "a")))
+                .join("contacts");
+        let before = dir_bytes(&contacts_dir);
+        let spanning = ContactRecord::new(
+            vec![bob.public(), carol.public()],
+            vec![],
+            mailbox_only("xx@203.0.113.7:7"),
+        );
+
+        // When / Then: refused under any petname — even a matching one —
+        // and the store is untouched
+        for petname in ["dana", "bob"] {
+            assert!(matches!(
+                a.add_contact(&spanning, Some(petname.to_string())),
+                Err(Error::AmbiguousOverlap(_))
+            ));
+        }
+        assert_eq!(dir_bytes(&contacts_dir), before);
+
+        let _ = std::fs::remove_dir_all(temp_root("overlap-ambiguous"));
+    }
+
+    #[tokio::test]
+    async fn add_contact__should_reject_a_petname_collision_without_key_overlap() {
+        // Given: bob stored; an unrelated record wanting the same petname
+        let a = Client::open_or_create(&temp_key("overlap-collision", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([37; 32]);
+        let other = DeviceKey::from_seed([38; 32]);
+        a.add_contact(
+            &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+
+        // When / Then: no shared key = no identity evidence — rejected
+        assert!(matches!(
+            a.add_contact(
+                &ContactRecord::new(
+                    vec![other.public()],
+                    vec![],
+                    mailbox_only("oo@203.0.113.2:2"),
+                ),
+                Some("bob".to_string()),
+            ),
+            Err(Error::PetnameCollision(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(temp_root("overlap-collision"));
+    }
+
+    #[tokio::test]
+    async fn participant_labels__should_collapse_a_contacts_device_keys_to_one_label() {
+        // Given: bob's record holds two device keys; one unknown key
+        let a = Client::open_or_create(&temp_key("labels-dedup", "a"))
+            .await
+            .expect("open");
+        let phone = DeviceKey::from_seed([39; 32]);
+        let laptop = DeviceKey::from_seed([40; 32]);
+        let unknown = DeviceKey::from_seed([41; 32]).public();
+        a.add_contact(
+            &ContactRecord::new(
+                vec![phone.public(), laptop.public()],
+                vec![],
+                mailbox_only("bb@203.0.113.1:1"),
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+
+        // When
+        let labels = a
+            .participant_labels(&[phone.public(), laptop.public(), unknown])
+            .expect("labels");
+
+        // Then: both device keys collapse to one petname; the unknown key
+        // stays distinct, as honest short hex
+        assert_eq!(
+            labels,
+            vec!["bob".to_string(), hex::encode(&unknown.0[..4])]
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("labels-dedup"));
     }
 
     #[tokio::test]

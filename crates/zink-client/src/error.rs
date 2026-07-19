@@ -34,6 +34,17 @@ pub enum Error {
     /// The chosen petname already names a different contact.
     #[error("a different contact is already named {0:?}")]
     PetnameCollision(String),
+    /// The record shares a key with an existing contact stored under a
+    /// different petname — updating that entry must be explicit, never a
+    /// side effect of an add that said "new contact" (multi-device.md §4).
+    #[error(
+        "record shares a key with your contact {existing:?} — add it under that petname to update their entry"
+    )]
+    ContactOverlap { existing: String },
+    /// The record shares keys with two or more contacts; merging is never
+    /// silent — an ambiguous record is refused (multi-device.md §4).
+    #[error("record shares keys with multiple contacts ({0}) — not stored")]
+    AmbiguousOverlap(String),
     /// A send needs someone to send to.
     #[error("at least one recipient required")]
     NoRecipients,

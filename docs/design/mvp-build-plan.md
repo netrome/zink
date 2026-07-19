@@ -812,13 +812,33 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   receive-only — pulling requires recognizing back; key-overlap contact
   updates are explicitly confirmed, never silent — an unauthenticated
   `keys` list must not rewrite a contact's trust anchor.)*
-  - [ ] **D3a · Identity core.** `ContactRecord::device_cluster()` (verified
+  - [x] **D3a · Identity core.** `ContactRecord::device_cluster()` (verified
     mutual links); the key-overlap contact-identity + collision fix, with
     the overlap confirm; label dedup per cluster. *Done when:* mutual links
     cluster, unilateral/forged don't; a re-scanned record with
     reordered/added keys updates the same contact through the confirm; a
     record smuggling another contact's key, or overlapping two contacts,
     surfaces instead of silently merging.
+    ✅ *(2026-07-19: protocol `link_tier`/`LinkTier` — the planned
+    `device_cluster()` materialized as the design doc's sharpened shape, a
+    pure helper over attestations aggregated from held records (the client
+    aggregates at D3c's popup); only verified, *self-attested* links count
+    — forged, tampered, and third-party claims are inert, and a forged
+    reverse link cannot fake the mutual upgrade. Client: `add_contact`
+    identity is key overlap — the same petname IS the explicit confirm
+    (updates that entry; store stem re-derived via
+    `ClientState::replace_contact`, write-new-then-remove-old so a crash
+    forks, never loses); a different petname errors `ContactOverlap`
+    naming the entry at risk; ≥2 overlapping contacts error
+    `AmbiguousOverlap`, never merged; petname reuse with *zero* overlap
+    stays `PetnameCollision`. `participant_labels` dedups labels per
+    contact entry (CLI + app conversation lists moved onto it).
+    Deliberately unchanged: the *addressing* uses of `keys.first()`
+    (learned-relay lookup handle, who-is responder handle) — under the
+    per-device-records model a clustered device becomes its **own**
+    contact entry, so records stay single-key-led and only the *identity*
+    uses were broken. 167 tests incl. the adversarial overlap cases; app
+    cross-checked for aarch64.)*
   - [ ] **D3b · Recognize + gate.** Own-devices store; the one-way
     recognize act (store key + record, sign the vouch, `my_record` carries
     it); D0c gate: recognized keys served like self, and `WhoIs` serves

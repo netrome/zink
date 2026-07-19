@@ -46,6 +46,10 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
                                               // arrived through; verify + decrypt
 // profile + contacts (C2): set_profile, my_record, add_contact, contacts,
 // resolve_contact, register_at_home_relays
+// contact identity = key overlap (D3a, multi-device.md §4): add_contact
+// updates the one overlapping entry, only under its own petname (the
+// explicit confirm) — ContactOverlap / AmbiguousOverlap otherwise;
+// participant_labels(&[PublicKey]) dedups display labels per contact entry
 // stored history (C3a):
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's

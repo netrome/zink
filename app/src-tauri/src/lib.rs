@@ -200,30 +200,30 @@ async fn conversations(
     managed: State<'_, ManagedClient>,
 ) -> Result<Vec<Conversation>, String> {
     let client = client(&app, &managed).await?;
-    let contacts = client.contacts()?;
     let me = client.public_key();
-    Ok(client
-        .conversations()?
-        .into_iter()
-        .map(|summary| {
-            let others: Vec<String> = summary
-                .participants
-                .iter()
-                .filter(|key| **key != me)
-                .map(|key| label(&contacts, key))
-                .collect();
-            Conversation {
-                id: hex::encode(&summary.id.0),
-                label: if others.is_empty() {
-                    "only me".to_string()
-                } else {
-                    others.join(", ")
-                },
-                message_count: summary.message_count,
-                last_timestamp_ms: summary.last_timestamp_ms,
-            }
-        })
-        .collect())
+    let mut conversations = Vec::new();
+    for summary in client.conversations()? {
+        let other_keys: Vec<_> = summary
+            .participants
+            .iter()
+            .copied()
+            .filter(|key| *key != me)
+            .collect();
+        // Deduped per person (multi-device.md §7): a two-device contact
+        // labels once.
+        let others = client.participant_labels(&other_keys)?;
+        conversations.push(Conversation {
+            id: hex::encode(&summary.id.0),
+            label: if others.is_empty() {
+                "only me".to_string()
+            } else {
+                others.join(", ")
+            },
+            message_count: summary.message_count,
+            last_timestamp_ms: summary.last_timestamp_ms,
+        });
+    }
+    Ok(conversations)
 }
 
 /// One conversation's messages, linearized, petname-labelled.

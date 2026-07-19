@@ -273,18 +273,23 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 
 ## 9. Slices
 
-- **D3a · Identity core.** Tiered link-evidence evaluation over a *set* of
-  held records (protocol helper over attestations; the client aggregates
-  stored + learned records): vouched-from-trust vs mutually-confirmed vs
-  spoof-direction-only; the key-overlap contact-identity fix +
-  petname-collision by overlap, with the overlap confirm (§4); clustered
-  label dedup in edges' data.
+- **D3a · Identity core — done (2026-07-19).** Tiered link-evidence
+  evaluation over a *set* of held records (protocol helper over
+  attestations; the client aggregates stored + learned records):
+  vouched-from-trust vs mutually-confirmed vs spoof-direction-only; the
+  key-overlap contact-identity fix + petname-collision by overlap, with
+  the overlap confirm (§4); clustered label dedup in edges' data.
   *Done when:* unit tests — a trusted key's vouch tiers as offerable, both
   directions upgrade, the reverse direction alone and forged signatures
   tier as nothing; a re-scanned record with reordered/added keys updates
   the same contact through the confirm; adversarial overlap — a record
   smuggling a *different* contact's key, and one overlapping two contacts
   — surfaces instead of silently merging (§4).
+  *(As built: `zink_protocol::link_tier` over `SignedAttestation`s — only
+  verified, self-attested links count, so a forged reverse link can't fake
+  the mutual upgrade; `add_contact`'s same-petname add is the confirm,
+  `ContactOverlap`/`AmbiguousOverlap` are the refusals;
+  `Client::participant_labels` is the dedup seam both edges render from.)*
 - **D3b · Recognize + gate.** Own-devices store; the one-way recognize act
   in `Client` (store key + record, sign link, `my_record` gains the
   vouch); the D0c gate extension (recognized keys served like self) + the

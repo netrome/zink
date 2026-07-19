@@ -301,15 +301,17 @@ async fn conversations(args: &[String]) -> Result<(), String> {
     if summaries.is_empty() {
         println!("no conversations");
     }
-    let contacts = client.contacts()?;
     let me = client.public_key();
     for summary in summaries {
-        let others: Vec<String> = summary
+        let other_keys: Vec<_> = summary
             .participants
             .iter()
-            .filter(|key| **key != me)
-            .map(|key| label(&contacts, key))
+            .copied()
+            .filter(|key| *key != me)
             .collect();
+        // Deduped per person (multi-device.md §7): a two-device contact
+        // labels once.
+        let others = client.participant_labels(&other_keys)?;
         println!(
             "{}  {} message(s)  with {}",
             hex::encode(&summary.id.0),

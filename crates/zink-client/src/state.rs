@@ -387,6 +387,29 @@ impl ClientState {
             .map_err(|e| Error::Storage(format!("write petname: {e}")))
     }
 
+    /// Replace a stored contact's record — the explicit key-overlap update
+    /// (multi-device.md §4). The stem derives from the record's first key,
+    /// so a reordered/re-keyed record lands under a new stem: write the new
+    /// entry first, then drop the old files — a crash in between leaves a
+    /// duplicate to clean up, never a lost contact.
+    pub fn replace_contact(
+        &self,
+        old: &ContactRecord,
+        petname: &str,
+        new: &ContactRecord,
+    ) -> Result<(), Error> {
+        self.save_contact(petname, new)?;
+        let (Some(old_key), Some(new_key)) = (old.keys.first(), new.keys.first()) else {
+            return Ok(());
+        };
+        if old_key != new_key {
+            let stem = self.contact_stem(old_key);
+            let _ = std::fs::remove_file(stem.with_extension("record"));
+            let _ = std::fs::remove_file(stem.with_extension("name"));
+        }
+        Ok(())
+    }
+
     /// All stored contacts as `(petname, record)`, petname-sorted.
     pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, Error> {
         let dir = self.root.join("contacts");
