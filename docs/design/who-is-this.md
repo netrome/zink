@@ -31,8 +31,8 @@ decision, not a missing feature).
 | Serving policy | **Contacts-only, uniformly** — same gate as `get`/`get-successors`; strangers get `NotHeld` for every subject, including the responder's own keys. (The D0c note anticipated a *looser* per-op policy here; resolved the other way for maximum privacy. The gate stays per-op structurally — the policies just coincide.) |
 | Hop limit | 1, structurally: learned records are never re-served (§4), and there is no forwarding. No `hops` field on the wire — forwarding is a responder-side choice added at D4 via a version bump. |
 | Auto-query | None. Manual trigger only (§5). |
-| Learned records | Stored **outside** the contact store, with provenance (§5) — they must never widen the D0c serving gate. |
-| Record refresh | A record served *by its own subject* auto-refreshes a stored contact iff the key set is unchanged (§7). |
+| Learned records | Stored **outside** the contact store, with provenance (§5) — they must never widen the D0c serving gate. Multiple records per subject is the data model, one per `(subject, responder)`. |
+| Record refresh | **Nothing is ever overwritten** (revised 2026-07-19 — an earlier draft auto-refreshed the stored record in place; rejected as needless mutation of a trust anchor). The contact store is never touched by network input; subject-served answers append to the learned store like any other, with provenance "the subject"; freshness is a **read-time** resolution (§7). |
 | Avatars | Content key travels **inside `Claim::Avatar`**, next to the blob hash; ciphertext on relay caches, key only ever on E2E channels (§8). |
 | Profile revision | `my_record`'s hardcoded `revision: 0` is a bug — persist a counter, bump on profile change (§7). |
 
@@ -81,17 +81,21 @@ marginal UX gain, so it's a deliberate non-goal, not a follow-up.
 The flow, best-effort like every peer op:
 
 1. Candidate responders = every dialable stored contact, **plus the subject
-   itself** if a stored record makes it dialable (the refresh case, §7).
+   itself** if a stored record makes it dialable (the freshness case, §7).
 2. Dial each by key (D0b), send `WhoIs { subject }`, collect answers.
 3. Validate each answer like a scanned QR: record decodes, `subject ∈
    record.keys`, self-attestations verify (`self_claimed_name` already
    enforces attester = subject ∈ keys). Unverifiable answers are dropped with
    a warning, never fatal.
-4. Store survivors in the **learned store**, keyed by subject, with
-   provenance: which contact served it, and when. Distinct from the contact
-   store — learned records don't get petnames, aren't served onward (§4),
-   and don't open the D0c gate. Re-answers from the same responder replace
-   (latest wins per responder).
+4. Store survivors in the **learned store**, keyed `(subject, responder)`,
+   with the receipt time — including answers from the subject itself
+   (provenance "the subject", proven by the authenticated connection key).
+   Distinct from the contact store — learned records don't get petnames,
+   aren't served onward (§4), and don't open the D0c gate. A re-answer from
+   the same responder replaces that responder's entry (latest per responder);
+   nothing else is ever overwritten, and **the contact store is never
+   modified by network input** — the scanned (or explicitly promoted) record
+   is immutable evidence until another explicit act replaces it.
 
 Promotion to a real contact is exactly the existing `add_contact` — one
 explicit act, petname prefilled from the winning self-claim.
@@ -113,16 +117,46 @@ MVP precedence, deterministic and honest about provenance:
 Weighting *which contact* served an answer (close friend vs. acquaintance) is
 D4 differentiation; MVP treats all contacts equally and shows the list.
 
-## 7. Record refresh & the revision fix
+**What friends' answers do and don't contain.** A `WhoIs` answer is the
+subject's record as the responder stores it — the subject's *self*-claims,
+relayed verbatim. Different friends may therefore show you different
+*revisions* of the same person's self-record (a stale name, an old avatar) —
+useful drift-spotting — but never their own labels: a responder's petname for
+the subject is exactly what SPEC §3.2 keeps private unless they deliberately
+broadcast it as a third-party `name` attestation. That — "your friends call
+them …" — is D4 vouching, purely additive on this same primitive.
 
-**Refresh.** When a `WhoIs` answer comes from the *subject's own connection*
-(responder key ∈ stored record's keys) and the served record's key set equals
-the stored one, the stored contact record is replaced in place — fresh relays
-and attestations, petname untouched. A changed key set is **not** auto-merged:
-a single compromised device could smuggle attacker keys into the set; key-set
-changes wait for D2's mutual `same-person-as` links (and the related review
-note — contact identity keyed on `keys.first()` — lands there too). Until D2,
-a key-set change means re-scan the QR.
+## 7. Record freshness = read-time resolution
+
+Nothing refreshes in place — freshness is resolved when a record is *used*
+(revised 2026-07-19; the write-time auto-refresh in an earlier draft was
+rejected: mutating a trust anchor on network input is dangerous and
+unnecessary when the inputs can just accumulate and be ranked, the same
+stance the DAG takes).
+
+At dial / fan-out time, the relays for a subject resolve by provenance
+class, latest-received within a class:
+
+1. **Subject-served** learned record — authenticated by the connection key
+   (only the key-holder can produce one).
+2. **The contact-store record** — authenticated by the out-of-band scan (or
+   the explicit promotion).
+3. **Contact-served** learned records — third-hand; used only when nothing
+   better exists, which is precisely the one-way-add bootstrap where it's
+   the whole point.
+
+**Sealing keys never come from learned records** — only from the user-added
+contact-store record, until D2's mutual `same-person-as` links can evaluate
+key-set changes (the review note about contact identity keyed on
+`keys.first()` lands there too). A learned record with a different key set
+just sits as evidence; until D2, adopting new keys means an explicit re-add.
+
+**Revision.** `my_record` currently hardcodes `revision: 0`, so a renamed
+profile issues a *second* rev-0 claim and supersession has no winner — ranking
+(§6) and display of conflicting answers both need one. Fix in D1b: persist a
+per-profile revision counter in client state, bump on every `set_profile`
+change, stamp it into the self-attestations. (Per `(claim-kind)` scope is
+already respected: name and avatar bump independently.)
 
 **Revision.** `my_record` currently hardcodes `revision: 0`, so a renamed
 profile issues a *second* rev-0 claim and supersession has no winner — ranking
@@ -137,6 +171,20 @@ The gap: `Claim::Avatar(BlobHash)` names ciphertext but carries no key, and an
 avatar has no message envelope to wrap keys in. Plaintext blobs on relay
 caches would break the ciphertext-only invariant. Resolution — put the key in
 the claim:
+
+**Why not just an image message?** (Considered 2026-07-19.) The image
+*plumbing* is fully reused — same `EncryptedBlob` construction, key-commit,
+relay caches, canvas downscale; D1d adds no new crypto. What can't be reused
+is the envelope: a message's content key is sealed to a recipient set **fixed
+at seal time**, while an avatar's audience is **open-ended and
+forward-growing** — every future contact, plus friends-of-friends via `WhoIs`
+(the subject can't have key-wrapped for people it doesn't know exist, and a
+relaying contact can't re-wrap without fabricating content the requester
+couldn't verify against the subject's signature). Nostr-style "profile = a
+note with extra fields" works there because notes are public plaintext; in an
+E2E system the one-primitive-with-variants layer is the *attestation*, and
+the key-in-claim is what makes the audience open-ended while relays still
+hold only ciphertext.
 
 ```
 Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
@@ -168,10 +216,11 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
   §4). *Done when:* headless e2e — a contact's `WhoIs` returns the stored
   record; a stranger's returns `NotHeld`; a learned-only subject returns
   `NotHeld` even to a contact.
-- **D1b · Pull, learned store, resolution, refresh.** §5–§7, CLI `who-is` for
-  e2e. *Done when:* the one-way-add flow headless — A learns C's record via
-  contact B, adds C, replies to C; plus a subject-served refresh updates
-  relays and a key-set change doesn't.
+- **D1b · Pull, learned store, resolution.** §5–§7, CLI `who-is` for e2e.
+  *Done when:* the one-way-add flow headless — A learns C's record via
+  contact B, adds C, replies to C; a subject-served answer wins relay
+  resolution **without modifying the contact store** (byte-identical after
+  any sequence of `who_is` calls); sealing keys ignore learned records.
 - **D1c · UI.** Unknown participant → "who is this?" action; candidates with
   provenance; add-as-contact prefilled; refresh surfaced on contact view.
   *Done when:* the acceptance flow runs live on two devices.

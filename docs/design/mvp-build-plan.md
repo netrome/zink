@@ -474,9 +474,11 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   serving policy, learned-record storage, avatar crypto; decisions resolved
   2026-07-19. Notably: serving stays **contacts-only uniformly** (the D0c note
   anticipated a looser per-op policy for this op; resolved the other way — the
-  per-op gate structure stays, the policies coincide), and **no auto-query** (asking
+  per-op gate structure stays, the policies coincide), **no auto-query** (asking
   contacts about a key reveals you just heard from it — manual trigger only, a
-  privacy decision).
+  privacy decision), and **network input never mutates stored records** — answers
+  accumulate in a learned store (multiple records per key) and freshness is a
+  read-time resolution, the same keep-evidence-rank-at-use stance as the DAG.
   - [ ] **D1a · Protocol op + serve side.** `SyncOp::WhoIs { key }` →
     `SyncResult::Known { record }` / `NotHeld` on the existing sync ALPN (in-place
     at v1); `SyncHandler` serves a contact caller the fresh self-record (own key)
@@ -485,17 +487,21 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     *Done when:* headless e2e — a contact's `WhoIs` returns the stored record; a
     stranger's returns `NotHeld`; a learned-only subject is `NotHeld` even to a
     contact.
-  - [ ] **D1b · Pull, learned store, resolution, refresh.** `Client::who_is(key)`
-    dialing the subject (if held) + all dialable contacts; answers validated like
-    scanned QRs and stored in a **learned store** with provenance, outside the
-    contact store (the D0c gate must not widen); resolution precedence petname >
-    learned self-claim (with provenance + agreement count, `revision` breaks
-    conflicts) > hex; subject-served answers refresh a stored contact in place iff
-    the key set is unchanged (key-set changes wait for D2's mutual links); fix
-    `my_record`'s hardcoded `revision: 0` (persist + bump per profile change —
-    supersession needs a winner); CLI `who-is`. *Done when:* headless e2e — the
-    one-way-add flow (A learns C via contact B, adds C, replies), a refresh
-    updates relays, and a key-set change doesn't.
+  - [ ] **D1b · Pull, learned store, resolution.** `Client::who_is(key)` dialing
+    the subject (if held) + all dialable contacts; answers validated like scanned
+    QRs and stored in a **learned store** with provenance, keyed
+    (subject, responder), outside the contact store (the D0c gate must not
+    widen); **nothing is ever overwritten** — the contact store is never touched
+    by network input; freshness is read-time relay resolution by provenance
+    class (subject-served > scanned > contact-served, latest within class), and
+    sealing keys come only from the user-added record until D2; name precedence
+    petname > learned self-claim (with provenance + agreement count, `revision`
+    breaks conflicts) > hex; fix `my_record`'s hardcoded `revision: 0` (persist +
+    bump per profile change — supersession needs a winner); CLI `who-is`.
+    *Done when:* headless e2e — the one-way-add flow (A learns C via contact B,
+    adds C, replies); a subject-served answer wins relay resolution with the
+    contact store byte-identical after any sequence of `who_is` calls; sealing
+    keys ignore learned records.
   - [ ] **D1c · Messaging-UI hook.** Unknown participant → "who is this?" action;
     candidate names with provenance ("records held by B, D"); add-as-contact with
     the petname prefilled; refresh from the contact view. *Done when:* the
