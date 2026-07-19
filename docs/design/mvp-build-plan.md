@@ -868,7 +868,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     who-is-this.md §4 gained the mirror rule, client-core.md the pairing
     APIs. Live CLI run: laptop's record → phone `recognize` → `devices`
     lists it; the laptop's own list stays empty.)*
-  - [ ] **D3c · Send-to-self + clustering offers.** Recipients gain own
+  - [x] **D3c · Send-to-self + clustering offers.** Recipients gain own
     devices (the core mechanism); the fresh-device bootstrap (own-device
     authorship legitimizes, own devices as auto-query responders); the
     popup upgrade — "P added a device (mutually verified)" as an
@@ -877,6 +877,37 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     carries both keys; the contact accepts the offer and both of P's
     devices receive the reply; a reply from the new device reaches the
     contact directly.
+    ✅ *(2026-07-19: `finish_send` appends recognized devices to the
+    signed recipients + relay fan-out (sender stays unlisted — self-wrap
+    unchanged); **fork fix found at implementation**: `send`'s
+    participants→conversation lookup now tries the device-extended set
+    first, bare set as fallback — else the first post-pairing conversation
+    records only the grown set and every later send-by-name forks (test
+    pins it). Bootstrap: `own_keys()` (self + recognized) — the cluster is
+    "me" at the edges; own-device authorship passes
+    `has_contributing_contact`; siblings are `who_is`/auto-query
+    responders and route through the devices store (`trusted_record_for`
+    feeds reply targets + `who_is_among`); recognized keys are never
+    "unknown members" and label by self-claim. Offers:
+    `device_evidence(key)` aggregates attestations across stored contact
+    records + learned records and tiers per contact via D3a's `link_tier`
+    — popup (app) + `who-is` (CLI) render "P says this is their device
+    (unconfirmed by the key)" / "…mutually confirmed"; accepting stays
+    `add_contact`. Introduce-now: no API needed — it IS an empty-body
+    `send_in` (the D2c gesture); the button is D3e. e2e
+    (`multi_device.rs`): pair two-way (laptop vouches first so the
+    served record carries the reverse link) → phone's next organic
+    message announces both keys → laptop reads it from first inclusion →
+    alice auto-learns the laptop record via the mirror rule, sees
+    "mutually confirmed" after a phone freshness pull, promotes → her one
+    reply reaches BOTH devices → the laptop (empty contact store,
+    routes learned via its sibling) replies and alice receives it
+    **with the phone offline since before her reply** — directness
+    proven, robustness never load-bearing. Client-crate: recipients grow
+    + no fork + device-relay outbox entries with all relays down;
+    evidence tiers incl. the spoof direction; device labels + own_keys.
+    SPEC §6 send-to-self recorded (the C3 pending line);
+    who-is-this.md §5 responders + client-core.md updated. 174 tests.)*
   - [ ] **D3d · Re-wrap.** `SyncOp::GetKeys { ids }` → wraps re-sealed to
     the caller (own devices only); wrap-append storage; opportunistic run
     after pairing/sync. *Done when:* headless e2e — the paired device reads

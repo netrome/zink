@@ -200,14 +200,16 @@ async fn conversations(
     managed: State<'_, ManagedClient>,
 ) -> Result<Vec<Conversation>, String> {
     let client = client(&app, &managed).await?;
-    let me = client.public_key();
+    // The whole own cluster is "me" (D3c): a conversation is never
+    // "with mårten laptop".
+    let own = client.own_keys();
     let mut conversations = Vec::new();
     for summary in client.conversations()? {
         let other_keys: Vec<_> = summary
             .participants
             .iter()
             .copied()
-            .filter(|key| *key != me)
+            .filter(|key| !own.contains(key))
             .collect();
         // Deduped per person (multi-device.md §7): a two-device contact
         // labels once.
@@ -237,6 +239,17 @@ async fn messages(
     let conversation = parse_id(&conversation)?;
     let contacts = client.contacts()?;
     let me = client.public_key();
+    // Own sibling devices (D3c): label by their self-claimed name, and
+    // never flag them as unknown senders — they are this person.
+    let devices = client.recognized_devices();
+    let device_name = |key: &PublicKey| {
+        devices.iter().find(|(k, _)| k == key).map(|(_, record)| {
+            record
+                .self_claimed_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| hex::encode(&key.0)[..8].to_string())
+        })
+    };
     Ok(client
         .history(conversation)?
         .into_iter()
@@ -245,10 +258,13 @@ async fn messages(
             conversation: hex::encode(&conversation.0),
             sender: if message.sender == me {
                 "me".to_string()
+            } else if let Some(name) = device_name(&message.sender) {
+                format!("me ({name})")
             } else {
                 label(&contacts, &message.sender)
             },
             unknown_sender: (message.sender != me
+                && device_name(&message.sender).is_none()
                 && !contacts
                     .iter()
                     .any(|(_, record)| record.keys.contains(&message.sender)))
@@ -457,12 +473,13 @@ async fn unknown_members(
 ) -> Result<Vec<UnknownMember>, String> {
     let client = client(&app, &managed).await?;
     let conversation = parse_id(&conversation)?;
-    let me = client.public_key();
+    // Own sibling devices are never "unknown members" (D3c).
+    let own = client.own_keys();
     let contacts = client.contacts()?;
     let dismissed = client.dismissed();
     let mut members = Vec::new();
     for key in client.membership(conversation)? {
-        if key == me
+        if own.contains(&key)
             || contacts
                 .iter()
                 .any(|(_, record)| record.keys.contains(&key))
@@ -474,10 +491,27 @@ async fn unknown_members(
             .into_iter()
             .map(|(learned, record)| candidate_dto(learned, Some(record.to_qr_string())))
             .collect();
+        // The popup upgrade (D3c, multi-device.md §7): "P says this is
+        // their device", tiered — evidence for the one-tap offer.
+        let device_evidence = client
+            .device_evidence(key)?
+            .into_iter()
+            .map(|evidence| match evidence.tier {
+                zink_protocol::LinkTier::MutuallyConfirmed => format!(
+                    "{} and this key vouch each other (mutually confirmed)",
+                    evidence.petname
+                ),
+                _ => format!(
+                    "{} says this is their device (unconfirmed by the key)",
+                    evidence.petname
+                ),
+            })
+            .collect();
         members.push(UnknownMember {
             key: hex::encode(&key.0),
             candidates,
             dismissed: dismissed.contains(&key),
+            device_evidence,
         });
     }
     Ok(members)

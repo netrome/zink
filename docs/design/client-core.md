@@ -57,6 +57,16 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 // listed keys never widen it), and WhoIs serves recognized-device subjects
 // (the mirror rule). One-way is receive-only: pulling needs the sibling's
 // record, which recognizing back provides.
+// send-to-self (D3c, multi-device.md §5): finish_send appends recognized
+// devices to every send's signed recipients + relay fan-out (the sending
+// device stays unlisted — self-wrap); send's conversation lookup tries the
+// device-extended participant set first (post-pairing sends must not
+// fork). own_keys() = self + recognized (edges filter "others" with it);
+// own-device authorship legitimizes (has_contributing_contact) and
+// siblings answer who_is/auto-queries — the fresh-device bootstrap.
+// device_evidence(key) -> Vec<DeviceEvidence>: verified link tiers per
+// contact ("P says this is their device" / mutually confirmed) — the
+// popup's offer data; accept stays add_contact.
 // stored history (C3a):
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's

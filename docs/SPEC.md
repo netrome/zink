@@ -349,8 +349,11 @@ visible.
   hashed core, so ids are unaffected and recipients see no difference. This is what
   lets a device reopen its own stored copy when rendering history (everything at rest
   stays ciphertext). A client convention, not protocol: a client that skips it only
-  loses its own history. Depositing to your *own mailbox* is the multi-device
-  extension of the same idea (phase 2).
+  loses its own history. **Send-to-self (recorded 2026-07-19, D3c)** is the
+  multi-device extension of the same idea: a sender's *other* recognized devices are
+  appended to every message's signed `recipients` and deposited to like any recipient
+  (multi-device.md §5) — your devices are honest conversation members, joined by your
+  own signature; the sending device itself stays unlisted, covered by its self-wrap.
 - **Key commitment (non-committing-AEAD fix):** common AEADs (XChaCha20-Poly1305,
   AES-GCM) are **not** key-committing — a malicious sender could craft one ciphertext
   that decrypts to *different* valid plaintexts under two content-keys, seal a different

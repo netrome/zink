@@ -85,6 +85,10 @@ pub struct UnknownMember {
     pub key: String,
     pub candidates: Vec<WhoIsCandidate>,
     pub dismissed: bool,
+    /// Verified link evidence, strongest first (D3c, multi-device.md §7):
+    /// render-ready lines like "mårten says this is their device" /
+    /// "…mutually confirmed". Evidence for an offer, never automation.
+    pub device_evidence: Vec<String>,
 }
 
 /// What a `who_is` query brought back, render-ready (D1c).

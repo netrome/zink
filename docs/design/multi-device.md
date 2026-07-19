@@ -305,15 +305,23 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   list (§4's lesson); the mirror rule answers ahead of contact lookups;
   CLI `recognize` + `devices`, where pasting the payload is the confirm.
   SPEC §3.2/§3.6 + who-is-this.md §4 + client-core.md updated per §10.)*
-- **D3c · Send-to-self + clustering offers.** Recipients gain own devices
-  (the core mechanism); the fresh-device bootstrap (own-device authorship
-  legitimizes, own devices as auto-query responders — §5); §7 popup
-  upgrade (evidence-ranked offer, explicit accept); optional introduce-now
-  sugar. *Done when:* headless e2e — after pairing, P's next message
-  carries both keys; the contact's client renders "P added a device"
-  evidence and, on the explicit accept, both of P's devices receive the
-  contact's reply; and a reply sent *from* the new device reaches the
-  contact directly, not only via siblings.
+- **D3c · Send-to-self + clustering offers — done (2026-07-19).**
+  Recipients gain own devices (the core mechanism); the fresh-device
+  bootstrap (own-device authorship legitimizes, own devices as auto-query
+  responders — §5); §7 popup upgrade (evidence-ranked offer, explicit
+  accept); optional introduce-now sugar. *Done when:* headless e2e — after
+  pairing, P's next message carries both keys; the contact's client
+  renders "P added a device" evidence and, on the explicit accept, both of
+  P's devices receive the contact's reply; and a reply sent *from* the new
+  device reaches the contact directly, not only via siblings.
+  *(As built: appended in `finish_send`, sender unlisted (self-wrap);
+  found at implementation — the send-by-name conversation lookup must try
+  the device-extended participant set first, else post-pairing sends fork;
+  `device_evidence` tiers per contact over attestations aggregated from
+  stored + learned records, rendered in the popup and CLI `who-is`;
+  introduce-now needs no API — it is an empty-body `send_in`, the button
+  lands with D3e. The acceptance e2e proves directness with the sibling
+  offline from before the contact's reply onward.)*
 - **D3d · Re-wrap.** `GetKeys` op + serve/request sides + wrap-append
   storage; opportunistic run after pairing/sync. *Done when:* headless e2e
   — the paired device reads bodies from before it existed (the D2a-style

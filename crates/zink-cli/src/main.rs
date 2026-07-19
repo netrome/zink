@@ -344,13 +344,15 @@ async fn conversations(args: &[String]) -> Result<(), String> {
     if summaries.is_empty() {
         println!("no conversations");
     }
-    let me = client.public_key();
+    // The whole own cluster is "me" (D3c): a conversation is never
+    // "with mårten laptop".
+    let own = client.own_keys();
     for summary in summaries {
         let other_keys: Vec<_> = summary
             .participants
             .iter()
             .copied()
-            .filter(|key| *key != me)
+            .filter(|key| !own.contains(key))
             .collect();
         // Deduped per person (multi-device.md §7): a two-device contact
         // labels once.
@@ -538,6 +540,20 @@ async fn who_is(args: &[String]) -> Result<(), String> {
             answer.responder_petname,
             answer.record.to_qr_string()
         );
+    }
+    // Link evidence (D3c, multi-device.md §7): says WHO claims, tiered —
+    // the one-way tier is a claim, the mutual one is consent-proof.
+    for evidence in client.device_evidence(key)? {
+        match evidence.tier {
+            zink_protocol::LinkTier::MutuallyConfirmed => println!(
+                "device evidence: {} and this key vouch each other (mutually confirmed)",
+                evidence.petname
+            ),
+            _ => println!(
+                "device evidence: {} says this is their device (unconfirmed by the key)",
+                evidence.petname
+            ),
+        }
     }
     match client.resolve_name(key)? {
         ResolvedName::Petname(petname) => println!("resolved: contact {petname:?}"),

@@ -601,6 +601,19 @@ fn ChatView(
                                             let ask_key = member.key.clone();
                                             let ignore_key = member.key.clone();
                                             let avatar_key = member.key.clone();
+                                            // The popup upgrade (D3c): who
+                                            // *claims* this key, tiered.
+                                            let evidence = member
+                                                .device_evidence
+                                                .iter()
+                                                .map(|line| {
+                                                    view! {
+                                                        <div class="row">
+                                                            <span class="dim">{line.clone()}</span>
+                                                        </div>
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>();
                                             let candidates = member
                                                 .candidates
                                                 .into_iter()
@@ -641,6 +654,7 @@ fn ChatView(
                                                             "ignore"
                                                         </button>
                                                     </div>
+                                                    {evidence}
                                                     {candidates}
                                                 </div>
                                             }

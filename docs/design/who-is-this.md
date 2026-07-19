@@ -99,7 +99,10 @@ marginal UX gain, so it's a deliberate non-goal, not a follow-up.
 The flow, best-effort like every peer op:
 
 1. Candidate responders = every dialable stored contact, **plus the subject
-   itself** if a stored record makes it dialable (the freshness case, §7).
+   itself** if a stored record makes it dialable (the freshness case, §7),
+   **plus recognized own devices** (D3c, multi-device.md §5): siblings
+   serve this caller like self, and on a fresh device they are the only
+   responders there are.
 2. Dial each by key (D0b) — **all at once, deadline capped at
    `min(connect_timeout, 5 s)`** (De3: an offline contact costs one bounded
    dial, never a serial sum) — send `WhoIs { subject }`, collect answers

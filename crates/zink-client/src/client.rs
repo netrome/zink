@@ -154,7 +154,20 @@ impl Client {
             .copied()
             .chain([self.device.public()])
             .collect();
-        let existing = self.state.conversation_for(&participants);
+        // Send-to-self makes the *sealed* set the recorded one (D3c), so a
+        // send-by-name looks up the device-extended set first — else every
+        // post-pairing send would miss its own conversation and fork. The
+        // bare set stays as fallback: it finds pre-pairing conversations,
+        // which the next send re-records under the grown set.
+        let extended: BTreeSet<PublicKey> = participants
+            .iter()
+            .copied()
+            .chain(self.own_keys())
+            .collect();
+        let existing = self
+            .state
+            .conversation_for(&extended)
+            .or_else(|| self.state.conversation_for(&participants));
         let draft = match existing {
             Some(conversation) => self.threaded_draft(conversation, recipients)?,
             None => MessageDraft {
@@ -204,19 +217,17 @@ impl Client {
     /// can say so.
     pub fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, Error> {
         let me = self.device.public();
-        let records = self.state.contacts()?;
         let mut contacts = Vec::new();
         let mut unknown = Vec::new();
         for key in self.membership(conversation)? {
             if key == me {
                 continue;
             }
-            let stored = records
-                .iter()
-                .find(|(_, record)| record.keys.contains(&key))
-                .map(|(_, record)| record);
+            // Contact record, or a recognized own device's (D3c): a
+            // sibling in the membership routes through the devices store.
+            let stored = self.trusted_record_for(&key);
             let relays: Vec<String> = self
-                .effective_relays(key, stored)
+                .effective_relays(key, stored.as_ref())
                 .into_iter()
                 .map(|entry| entry.mailbox)
                 .collect();
@@ -272,6 +283,29 @@ impl Client {
         // its own delivery.
         draft.plaintext = plaintext;
         draft.blobs = blob_drafts;
+        // Send-to-self (D3c, multi-device.md §5): recognized own devices
+        // are honest members of every conversation this device speaks in —
+        // appended to the signed recipients and deposited to like any
+        // recipient. The sending device itself stays unlisted (the C3
+        // self-wrap covers its own copy). Appended here, after the
+        // participant-set lookup in `send`: the user-addressed set keeps
+        // finding the conversation, and the grown set is what gets
+        // recorded below — same latest-writer-wins index as any add.
+        let mut device_contacts = Vec::new();
+        for (key, record) in self.state.recognized_devices() {
+            if key == self.device.public() || draft.recipients.contains(&key) {
+                continue;
+            }
+            draft.recipients.push(key);
+            device_contacts.push(Contact {
+                keys: vec![key],
+                relays: self
+                    .effective_relays(key, Some(&record))
+                    .into_iter()
+                    .map(|entry| entry.mailbox)
+                    .collect(),
+            });
+        }
         let seq = draft.seq;
         let existing = draft.conversation;
         let sealed =
@@ -296,7 +330,12 @@ impl Client {
 
         // Ledger before network (live-delivery.md §2): a crash or failure
         // from here on leaves entries a later flush retries idempotently.
-        let relays = distinct_relays(contacts.iter().map(|c| c.relays.clone()));
+        let relays = distinct_relays(
+            contacts
+                .iter()
+                .chain(device_contacts.iter())
+                .map(|c| c.relays.clone()),
+        );
         let now = now_ms();
         for relay in &relays {
             self.state.add_outbox(id, relay, conversation, now)?;
@@ -731,20 +770,34 @@ impl Client {
     /// Display labels for a participant set, deduped per *person*
     /// (multi-device.md §7): keys held by one contact entry collapse to a
     /// single petname — a two-device contact renders once in conversation
-    /// labels — while unknown keys stay distinct, as honest short hex.
-    /// Order follows the input; a cluster's label sits at its first key.
+    /// labels. A recognized own device labels with its self-claimed name
+    /// (D3c); unknown keys stay distinct, as honest short hex. Order
+    /// follows the input; a cluster's label sits at its first key.
     pub fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
         let contacts = self.state.contacts()?;
+        let devices = self.state.recognized_devices();
         let mut labels = Vec::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for key in keys {
-            match contacts
+            let label = contacts
                 .iter()
                 .find(|(_, record)| record.keys.contains(key))
-            {
-                Some((petname, _)) => {
-                    if seen.insert(petname.clone()) {
-                        labels.push(petname.clone());
+                .map(|(petname, _)| petname.clone())
+                .or_else(|| {
+                    devices
+                        .iter()
+                        .find(|(device_key, _)| device_key == key)
+                        .map(|(_, record)| {
+                            record
+                                .self_claimed_name()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| hex::encode(&key.0[..4]))
+                        })
+                });
+            match label {
+                Some(label) => {
+                    if seen.insert(label.clone()) {
+                        labels.push(label);
                     }
                 }
                 None => labels.push(hex::encode(&key.0[..4])),
@@ -1003,6 +1056,34 @@ impl Client {
         self.state.recognized_devices()
     }
 
+    /// This device's key cluster as its own client sees it: self plus the
+    /// recognized devices (D3c). Edges filter "other participants" with
+    /// this — a conversation with a contact is not "with mårten laptop".
+    pub fn own_keys(&self) -> BTreeSet<PublicKey> {
+        std::iter::once(self.device.public())
+            .chain(self.state.recognized_devices().into_iter().map(|(k, _)| k))
+            .collect()
+    }
+
+    /// The stored record for a key this client trusts: a user-added
+    /// contact's, else a recognized own device's (D3c — devices resolve
+    /// routes and labels through their own store, never through contacts).
+    fn trusted_record_for(&self, key: &PublicKey) -> Option<ContactRecord> {
+        self.state
+            .contacts()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(_, record)| record.keys.contains(key))
+            .map(|(_, record)| record)
+            .or_else(|| {
+                self.state
+                    .recognized_devices()
+                    .into_iter()
+                    .find(|(device_key, _)| device_key == key)
+                    .map(|(_, record)| record)
+            })
+    }
+
     /// Petname → the Contact to send to. Keys come from the user-added
     /// record alone; relays resolve at read time (D1b, who-is-this.md §7).
     pub fn resolve_contact(&self, petname: &str) -> Result<Contact, Error> {
@@ -1084,11 +1165,15 @@ impl Client {
     /// timeouts. Resolution over everything learned so far is
     /// `resolve_name`.
     pub async fn who_is(&self, subject: PublicKey) -> Result<WhoIsOutcome, Error> {
+        // Contacts plus recognized own devices (D3c): siblings serve this
+        // caller like self, and on a fresh device they are the only
+        // responders there are.
         let responders: Vec<PublicKey> = self
             .state
             .contacts()?
             .iter()
             .filter_map(|(_, record)| record.keys.first().copied())
+            .chain(self.state.recognized_devices().into_iter().map(|(k, _)| k))
             .collect();
         self.who_is_among(subject, &responders).await
     }
@@ -1126,8 +1211,13 @@ impl Client {
             let petname = named
                 .map(|(petname, _)| petname.clone())
                 .unwrap_or_else(|| hex::encode(&responder.0)[..8].to_string());
-            let stored = named.map(|(_, record)| record);
-            match self.peer_addr_for(responder, stored) {
+            // A responder that is no contact may be a recognized own
+            // device (D3c) — its route lives in the devices store.
+            let stored = match named.map(|(_, record)| record.clone()) {
+                Some(record) => Some(record),
+                None => self.trusted_record_for(&responder),
+            };
+            match self.peer_addr_for(responder, stored.as_ref()) {
                 Ok(addr) => targets.push((petname, responder, addr)),
                 // No dialable route — never counted as "asked".
                 Err(_) => tracing::debug!(%petname, "who-is: no dialable route; skipped"),
@@ -1336,14 +1426,20 @@ impl Client {
     /// retroactively the moment a contact's message arrives.
     pub fn has_contributing_contact(&self, conversation: MessageId) -> Result<bool, Error> {
         let records = self.state.contacts()?;
+        // Own-cluster authorship counts (D3c, multi-device.md §5): there is
+        // no key this client trusts more than its own — a fresh device's
+        // conversations arrive authored by its siblings, and the empty
+        // contact store must not mute the auto-query bootstrap.
+        let own = self.own_keys();
         Ok(self
             .state
             .load_envelopes(conversation)?
             .iter()
             .any(|envelope| {
-                records
-                    .iter()
-                    .any(|(_, record)| record.keys.contains(&envelope.core.sender))
+                own.contains(&envelope.core.sender)
+                    || records
+                        .iter()
+                        .any(|(_, record)| record.keys.contains(&envelope.core.sender))
             }))
     }
 
@@ -1363,7 +1459,13 @@ impl Client {
         let Ok(records) = self.state.contacts() else {
             return;
         };
-        let known = |key: &PublicKey| records.iter().any(|(_, record)| record.keys.contains(key));
+        // Recognized own devices are never "unknown members" (D3c) — and
+        // they ARE responders: a fresh device's only route to its
+        // contacts' records is asking its siblings (multi-device.md §5).
+        let own = self.own_keys();
+        let known = |key: &PublicKey| {
+            own.contains(key) || records.iter().any(|(_, record)| record.keys.contains(key))
+        };
         let conversations: BTreeSet<MessageId> = received
             .iter()
             .map(|message| {
@@ -1495,6 +1597,44 @@ impl Client {
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
         Ok(candidates)
+    }
+
+    /// Link evidence for an unknown key across everything this client
+    /// holds — stored contact records plus all learned records for the
+    /// subject and for each contact's keys (multi-device.md §7): per
+    /// contact whose keys verifiably vouch the subject, the evidence tier.
+    /// Strongest first; several contacts claiming the same key all
+    /// surface, honestly — the §8 misattribution case is exactly why the
+    /// popup says *who* claims, and why nothing here auto-adopts: every
+    /// tier only ever produces an offer, accepted via `add_contact`.
+    pub fn device_evidence(&self, subject: PublicKey) -> Result<Vec<DeviceEvidence>, Error> {
+        let contacts = self.state.contacts()?;
+        let mut attestations: Vec<SignedAttestation> = Vec::new();
+        for entry in self.state.learned(&subject) {
+            attestations.extend(entry.record.attestations.clone());
+        }
+        for (_, record) in &contacts {
+            attestations.extend(record.attestations.clone());
+            for key in &record.keys {
+                for entry in self.state.learned(key) {
+                    attestations.extend(entry.record.attestations.clone());
+                }
+            }
+        }
+        let mut evidence: Vec<DeviceEvidence> = contacts
+            .iter()
+            .filter_map(|(petname, record)| {
+                match zink_protocol::link_tier(&record.keys, subject, &attestations) {
+                    zink_protocol::LinkTier::None => None,
+                    tier => Some(DeviceEvidence {
+                        petname: petname.clone(),
+                        tier,
+                    }),
+                }
+            })
+            .collect();
+        evidence.sort_by(|a, b| b.tier.cmp(&a.tier).then_with(|| a.petname.cmp(&b.petname)));
+        Ok(evidence)
     }
 
     /// Ignore an unknown key (D2c, groups.md §5): the popup stops
@@ -1892,6 +2032,16 @@ pub struct LearnedName {
     pub held_by: Vec<String>,
     /// The subject itself served a record claiming this name.
     pub confirmed_by_subject: bool,
+}
+
+/// One contact's verified link evidence for an unknown key (D3c,
+/// multi-device.md §7): the popup's "P says this is their device" line —
+/// an offer's provenance, never an instruction.
+pub struct DeviceEvidence {
+    /// Whose device the evidence says it is.
+    pub petname: String,
+    /// Vouched-from-trust, or mutually confirmed (the upgrade).
+    pub tier: zink_protocol::LinkTier,
 }
 
 /// Whom a reply reaches: the resolvable participants, and the keys we hold
@@ -3146,6 +3296,170 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("recognize-vouch"));
+    }
+
+    #[tokio::test]
+    async fn send_to_self__should_append_recognized_devices_and_not_fork() {
+        // Given: a phone that recognized its laptop; alice as a contact.
+        // Relays are unreachable — sends queue, and the stored state is
+        // what carries the assertions.
+        let key = temp_key("sendself", "phone");
+        keystore::create(&key).expect("key");
+        let phone = Client::open_with(
+            &key,
+            ClientConfig {
+                connect_timeout: Duration::from_millis(300),
+            },
+        )
+        .await
+        .expect("open");
+        let laptop = DeviceKey::from_seed([50; 32]).public();
+        let alice = DeviceKey::from_seed([51; 32]).public();
+        phone
+            .recognize_device(&ContactRecord::new(
+                vec![laptop],
+                vec![],
+                mailbox_only("ll@203.0.113.5:5"),
+            ))
+            .expect("recognize");
+        let to_alice = || {
+            vec![Contact {
+                keys: vec![alice],
+                relays: vec!["aa@203.0.113.1:1".to_string()],
+            }]
+        };
+
+        // When: two sends by the same user-addressed set
+        for text in [b"one".as_slice(), b"two".as_slice()] {
+            let result = phone.send(&to_alice(), text.to_vec(), vec![]).await;
+            assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        }
+
+        // Then: exactly ONE conversation — the device-extended lookup
+        // keeps post-pairing sends threading instead of forking
+        let conversations = phone.state.conversations();
+        assert_eq!(conversations.len(), 1, "post-pairing send-by-name forked");
+        let envelopes = phone
+            .state
+            .load_envelopes(conversations[0])
+            .expect("envelopes");
+        assert_eq!(envelopes.len(), 2);
+        // …and every sealed core lists the laptop as an honest member,
+        // while the sending device itself stays unlisted (self-wrap)
+        for envelope in &envelopes {
+            assert!(envelope.core.recipients.contains(&laptop));
+            assert!(envelope.core.recipients.contains(&alice));
+            assert!(!envelope.core.recipients.contains(&phone.public_key()));
+        }
+        // …and the laptop's relay is owed the deposits like any recipient
+        assert!(
+            phone
+                .state
+                .outbox()
+                .iter()
+                .any(|entry| entry.relay == "ll@203.0.113.5:5"),
+            "no outbox entry for the device's relay"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("sendself"));
+    }
+
+    #[tokio::test]
+    async fn device_evidence__should_tier_from_held_records() {
+        // Given: P is a contact whose record vouches an unknown key
+        let a = Client::open_or_create(&temp_key("evidence", "a"))
+            .await
+            .expect("open");
+        let p = DeviceKey::from_seed([52; 32]);
+        let laptop = DeviceKey::from_seed([53; 32]);
+        let vouch = |attester: &DeviceKey, linked: PublicKey| {
+            SignedAttestation::new(
+                Attestation {
+                    version: FORMAT_VERSION,
+                    attester: attester.public(),
+                    subject: attester.public(),
+                    claim: Claim::SamePersonAs(linked),
+                    revision: 0,
+                },
+                attester,
+            )
+        };
+        let p_record = ContactRecord::new(
+            vec![p.public()],
+            vec![vouch(&p, laptop.public())],
+            mailbox_only("pp@203.0.113.1:1"),
+        );
+        a.add_contact(&p_record, Some("p".to_string()))
+            .expect("add");
+
+        // Then: the one-way tier — offerable, labeled as P's claim
+        let evidence = a.device_evidence(laptop.public()).expect("evidence");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].petname, "p");
+        assert_eq!(evidence[0].tier, zink_protocol::LinkTier::VouchedFromTrust);
+
+        // When: the laptop's own record — learned via the auto-query —
+        // carries the reverse vouch
+        let laptop_record = ContactRecord::new(
+            vec![laptop.public()],
+            vec![vouch(&laptop, p.public())],
+            mailbox_only("ll@203.0.113.2:2"),
+        );
+        a.state
+            .save_learned(&laptop.public(), &p.public(), &laptop_record, 1)
+            .expect("learn");
+
+        // Then: upgraded to mutually confirmed
+        assert_eq!(
+            a.device_evidence(laptop.public()).expect("evidence")[0].tier,
+            zink_protocol::LinkTier::MutuallyConfirmed
+        );
+
+        // And: the spoof direction — a stranger's record claiming P's key —
+        // is no evidence at all
+        let stranger = DeviceKey::from_seed([54; 32]);
+        let spoof = ContactRecord::new(
+            vec![stranger.public()],
+            vec![vouch(&stranger, p.public())],
+            mailbox_only("ss@203.0.113.3:3"),
+        );
+        a.state
+            .save_learned(&stranger.public(), &p.public(), &spoof, 2)
+            .expect("learn");
+        assert!(
+            a.device_evidence(stranger.public())
+                .expect("evidence")
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("evidence"));
+    }
+
+    #[tokio::test]
+    async fn participant_labels__should_label_a_recognized_device_by_its_self_claim() {
+        // Given
+        let a = Client::open_or_create(&temp_key("labels-device", "a"))
+            .await
+            .expect("open");
+        let laptop = DeviceKey::from_seed([55; 32]);
+        a.recognize_device(&signed_record(
+            &laptop,
+            "mårten laptop",
+            0,
+            mailbox_only("ll@203.0.113.5:5"),
+        ))
+        .expect("recognize");
+
+        // When / Then: the device labels by its self-claim, and the own
+        // cluster covers both keys (what edges filter "others" with)
+        assert_eq!(
+            a.participant_labels(&[laptop.public()]).expect("labels"),
+            vec!["mårten laptop".to_string()]
+        );
+        assert!(a.own_keys().contains(&laptop.public()));
+        assert!(a.own_keys().contains(&a.public_key()));
+
+        let _ = std::fs::remove_dir_all(temp_root("labels-device"));
     }
 
     #[tokio::test]
