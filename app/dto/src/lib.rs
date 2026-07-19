@@ -11,8 +11,17 @@ pub struct AppState {
     pub my_key: String,
     pub name: Option<String>,
     pub relay: Option<String>,
-    pub contacts: Vec<String>,
+    pub contacts: Vec<ContactRow>,
     pub record: Option<QrPayload>,
+}
+
+/// One contact-list row. The key rides along so the contact view can run
+/// identity actions (`who_is` refresh, D1c) without re-deriving it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ContactRow {
+    pub petname: String,
+    /// The record's first key, hex — the `who_is` handle.
+    pub key: String,
 }
 
 /// A displayable ContactRecord: SVG for the screen, text for copy/paste.
@@ -54,6 +63,34 @@ pub struct Message {
     /// True while ≥1 relay is still owed this message (outbox, C4a) —
     /// delivery will be retried; render a "not yet delivered" cue.
     pub pending: bool,
+    /// The sender's key (hex) when it belongs to no stored contact — the
+    /// "who is this?" handle (D1c). `None` for own and contacts' messages.
+    pub unknown_sender: Option<String>,
+}
+
+/// What a `who_is` query brought back, render-ready (D1c).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WhoIsReport {
+    /// How many contacts served a record just now.
+    pub answers: usize,
+    /// The petname, when the key already belongs to a contact (the
+    /// refresh flow — fresh answers sharpen relay resolution by
+    /// themselves; there is nothing to promote).
+    pub contact: Option<String>,
+    /// Ranked name candidates for an unknown key, best first.
+    pub candidates: Vec<WhoIsCandidate>,
+}
+
+/// One believable name for an unknown key, with provenance.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WhoIsCandidate {
+    pub name: String,
+    /// Preformatted: "confirmed by themself" / "records held by Bob, Dana".
+    pub provenance: String,
+    /// Feed to `add_contact` to promote — the freshest served record
+    /// claiming this name; `None` when no responder is serving one right
+    /// now (the claim came from an earlier query).
+    pub payload: Option<String>,
 }
 
 /// One blob reference of a message.

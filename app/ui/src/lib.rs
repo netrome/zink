@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use wasm_bindgen::prelude::wasm_bindgen;
-use zink_app_dto::{AppState, Conversation, Message, OutgoingImage, QrPayload};
+use zink_app_dto::{AppState, Conversation, Message, OutgoingImage, QrPayload, WhoIsReport};
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -155,6 +155,7 @@ fn App() -> impl IntoView {
                     label=label
                     messages=messages
                     reload_messages=load_messages
+                    ok=ok
                     err=err
                 />
             }
@@ -235,9 +236,9 @@ fn ChatsView(
                     {move || {
                         contacts()
                             .into_iter()
-                            .map(|name| {
-                                let value = name.clone();
-                                view! { <option value=value>{name}</option> }
+                            .map(|contact| {
+                                let value = contact.petname.clone();
+                                view! { <option value=value>{contact.petname}</option> }
                             })
                             .collect::<Vec<_>>()
                     }}
@@ -282,6 +283,7 @@ fn ChatView(
     label: String,
     messages: RwSignal<Vec<Message>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
+    ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let draft = RwSignal::new(String::new());
@@ -344,6 +346,61 @@ fn ChatView(
         });
     };
 
+    // "who is this?" (D1c): `Some((subject, None))` = asking, `Some((_,
+    // Some(report)))` = showing candidates. Manual trigger only — asking
+    // reveals the interest to every contact asked (who-is-this.md §5).
+    let whois = RwSignal::new(None::<(String, Option<WhoIsReport>)>);
+    let ask = move |subject: String| {
+        whois.set(Some((subject.clone(), None)));
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &subject };
+            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
+                Ok(report) => whois.set(Some((subject, Some(report)))),
+                Err(e) => {
+                    whois.set(None);
+                    err(e);
+                }
+            }
+        });
+    };
+    let add_learned = move |payload: String| {
+        let id = conversation.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+                petname: Option<&'a str>,
+            }
+            let args = Args {
+                payload: &payload,
+                petname: None, // prefilled from the self-claimed name
+            };
+            match invoke::invoke::<String>("add_contact", &args).await {
+                Ok(petname) => {
+                    ok(&format!("added {petname}"));
+                    whois.set(None);
+                    reload_messages(id); // sender labels flip to the petname
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    // Unknown participants of this conversation, deduped — the banner rows.
+    let unknown_keys = move || {
+        let mut keys: Vec<String> = messages
+            .get()
+            .into_iter()
+            .filter_map(|message| message.unknown_sender)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    };
+
     let send = move |_| {
         let body = draft.get_untracked();
         let image = attachment.get_untracked().map(|(image, _)| image);
@@ -379,6 +436,95 @@ fn ChatView(
     view! {
         <main>
             <h3>{label}</h3>
+            {move || {
+                let keys = unknown_keys();
+                (!keys.is_empty())
+                    .then(|| {
+                        view! {
+                            <div class="panel">
+                                {keys
+                                    .into_iter()
+                                    .map(|key| {
+                                        let short = key.chars().take(8).collect::<String>();
+                                        view! {
+                                            <div class="row">
+                                                <span class="dim">
+                                                    {format!("unknown participant {short}…")}
+                                                </span>
+                                                <button
+                                                    class="secondary"
+                                                    on:click=move |_| ask(key.clone())
+                                                >
+                                                    "who is this?"
+                                                </button>
+                                            </div>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()}
+                            </div>
+                        }
+                    })
+            }}
+            {move || {
+                whois
+                    .get()
+                    .map(|(_, report)| {
+                        view! {
+                            <div class="panel">
+                                {match report {
+                                    None => {
+                                        view! { <span class="dim">"asking your contacts…"</span> }
+                                            .into_any()
+                                    }
+                                    Some(report) => {
+                                        let verdict = match (&report.contact, report.candidates.is_empty()) {
+                                            (Some(petname), _) => Some(
+                                                format!(
+                                                    "already your contact {petname:?} — {} fresh answer(s)",
+                                                    report.answers,
+                                                ),
+                                            ),
+                                            (None, true) => Some(
+                                                "no answers — none of your reachable contacts know this key"
+                                                    .to_string(),
+                                            ),
+                                            (None, false) => None,
+                                        };
+                                        let candidates = report
+                                            .candidates
+                                            .into_iter()
+                                            .map(|candidate| {
+                                                view! {
+                                                    <div class="row">
+                                                        <b>{candidate.name}</b>
+                                                        <span class="dim">{candidate.provenance}</span>
+                                                        {candidate
+                                                            .payload
+                                                            .map(|payload| {
+                                                                view! {
+                                                                    <button on:click=move |_| add_learned(
+                                                                        payload.clone(),
+                                                                    )>"add as contact"</button>
+                                                                }
+                                                            })}
+                                                    </div>
+                                                }
+                                            })
+                                            .collect::<Vec<_>>();
+                                        view! {
+                                            {verdict.map(|text| view! { <span class="dim">{text}</span> })}
+                                            {candidates}
+                                        }
+                                            .into_any()
+                                    }
+                                }}
+                                <button class="secondary" on:click=move |_| whois.set(None)>
+                                    "close"
+                                </button>
+                            </div>
+                        }
+                    })
+            }}
             <div class="messages">
                 {move || {
                     messages
@@ -601,6 +747,26 @@ fn ContactsView(
         });
     };
 
+    // Freshness pull (D1c, who-is-this.md §7): re-ask the network about a
+    // contact. Fresh answers land in the learned store and sharpen relay
+    // resolution on their own — nothing to apply, nothing overwritten.
+    let refresh_contact = move |subject: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &subject };
+            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
+                Ok(report) => ok(&format!(
+                    "{} answer(s) — fresh records apply automatically",
+                    report.answers
+                )),
+                Err(e) => err(e),
+            }
+        });
+    };
+
     let cancel_scan = move |_| {
         spawn_local(async move {
             // Rejects the pending scan invoke, which resets `scanning`.
@@ -655,7 +821,20 @@ fn ContactsView(
                     .map(|state| state.contacts)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|petname| view! { <div class="row">{petname}</div> })
+                    .map(|contact| {
+                        let subject = contact.key.clone();
+                        view! {
+                            <div class="row">
+                                <b>{contact.petname}</b>
+                                <button
+                                    class="secondary"
+                                    on:click=move |_| refresh_contact(subject.clone())
+                                >
+                                    "who is?"
+                                </button>
+                            </div>
+                        }
+                    })
                     .collect::<Vec<_>>()
             }}
             {move || {

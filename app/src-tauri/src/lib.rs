@@ -8,8 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
-use zink_app_dto::{AppState, BlobInfo, Conversation, Message, OutgoingImage, QrPayload};
-use zink_client::{Client, hex};
+use zink_app_dto::{
+    AppState, BlobInfo, ContactRow, Conversation, Message, OutgoingImage, QrPayload,
+    WhoIsCandidate, WhoIsReport,
+};
+use zink_client::{Client, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
 
 /// The one `Client` for the app's lifetime, created on first use. A single
@@ -37,9 +40,12 @@ async fn client(
                 .map_err(|e| format!("app data dir: {e}"))?;
             std::fs::create_dir_all(&data_dir).map_err(|e| format!("create data dir: {e}"))?;
             let key_path = data_dir.join("device.key");
+            // Rendered via the De1 edge shim, keeping the closure's error
+            // type `String` like the rest of this layer.
             Client::open_or_create(&key_path.to_string_lossy())
                 .await
                 .map(Arc::new)
+                .map_err(String::from)
         })
         .await?
         .clone();
@@ -137,7 +143,14 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
         contacts: client
             .contacts()?
             .into_iter()
-            .map(|(petname, _)| petname)
+            .map(|(petname, record)| ContactRow {
+                petname,
+                key: record
+                    .keys
+                    .first()
+                    .map(|key| hex::encode(&key.0))
+                    .unwrap_or_default(),
+            })
             .collect(),
         record,
     })
@@ -227,6 +240,11 @@ async fn messages(
             } else {
                 label(&contacts, &message.sender)
             },
+            unknown_sender: (message.sender != me
+                && !contacts
+                    .iter()
+                    .any(|(_, record)| record.keys.contains(&message.sender)))
+            .then(|| hex::encode(&message.sender.0)),
             mine: message.sender == me,
             text: message
                 .body
@@ -339,6 +357,60 @@ fn blob_drafts(image: &OutgoingImage) -> Result<Vec<BlobDraft>, String> {
     ])
 }
 
+/// Ask contacts "who is this key?" (D1c, who-is-this.md §5) and return a
+/// render-ready report: name candidates with provenance for an unknown
+/// key, or just the answer count for a contact (the refresh flow — fresh
+/// answers sharpen relay resolution by themselves). Manual trigger only —
+/// asking reveals the interest to everyone asked.
+#[tauri::command]
+async fn who_is(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+) -> Result<WhoIsReport, String> {
+    let client = client(&app, &managed).await?;
+    let key = PublicKey(hex::parse32(&subject)?);
+    let answers = client.who_is(key).await?;
+    let (contact, candidates) = match client.resolve_name(key)? {
+        ResolvedName::Petname(petname) => (Some(petname), vec![]),
+        ResolvedName::Learned(names) => {
+            let candidates = names
+                .into_iter()
+                .map(|learned| {
+                    // The freshest served record claiming this name — what
+                    // add_contact promotes. Answers from earlier queries
+                    // whose responder is now offline have no payload.
+                    let payload = answers
+                        .iter()
+                        .find(|answer| {
+                            answer.record.self_claimed_name() == Some(learned.name.as_str())
+                        })
+                        .map(|answer| answer.record.to_qr_string());
+                    let mut provenance = Vec::new();
+                    if learned.confirmed_by_subject {
+                        provenance.push("confirmed by themself".to_string());
+                    }
+                    if !learned.held_by.is_empty() {
+                        provenance.push(format!("records held by {}", learned.held_by.join(", ")));
+                    }
+                    WhoIsCandidate {
+                        name: learned.name,
+                        provenance: provenance.join("; "),
+                        payload,
+                    }
+                })
+                .collect();
+            (None, candidates)
+        }
+        ResolvedName::Unknown => (None, vec![]),
+    };
+    Ok(WhoIsReport {
+        answers: answers.len(),
+        contact,
+        candidates,
+    })
+}
+
 /// Drain the home relays into the store; the UI re-renders from the stored
 /// DAG afterwards. Returns how many messages arrived.
 #[tauri::command]
@@ -415,7 +487,8 @@ pub fn run() {
             messages,
             send_message,
             fetch_blob,
-            refresh
+            refresh,
+            who_is
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")
