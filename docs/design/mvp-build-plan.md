@@ -590,7 +590,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     failure — diagnosed as `who_is`'s serial dials × the 10 s production
     connect timeout per unreachable contact, plus view-local avatar caches
     that never retry a miss; tracked as De3 below.
-- [ ] **De3 · who-is responsiveness (UX polish).** Field observation at D1's close:
+- [x] **De3 · who-is responsiveness (UX polish).** Field observation at D1's close:
   the who-is panel can stall for tens of seconds or read as a silent failure.
   Causes, diagnosed 2026-07-19: (a) `Client::who_is` dials contacts **serially**
   with the production 10 s `connect_timeout` each — one offline contact stalls
@@ -604,6 +604,20 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   avatar misses on who-is completion / view events. *Done when:* a who-is with
   one offline contact answers in ~one connect-timeout, and the panel says
   "asked N, M unreachable" honestly.
+  ✅ *(2026-07-19: `Client::who_is` now dials all targets at once
+  (`n0_future::join_all` — runtime-free, wasm-clean) with the deadline capped
+  at `min(connect_timeout, 5 s)` — no new config knob, so the CLI e2e's
+  `ZINK_CONNECT_TIMEOUT_MS` tightening still applies; returns `WhoIsOutcome
+  { answers, asked, unreachable }` (mailbox-only records aren't "asked").
+  Regression test: 3 TEST-NET-offline contacts + 1 live responder with a 1 s
+  deadline completes in ~1.3 s with `(asked, unreachable) = (4, 3)` — serial
+  would be ≥ 3 s. Edges: CLI prints the counts line; the app panel now
+  distinguishes "no dialable contacts", "none reachable — try again later",
+  and "the reachable ones don't know this key"; who-is completion and
+  add-as-contact re-fetch the subject's avatar past any cached miss, and the
+  contacts-view pull refreshes that row's avatar. The ~5 s `who_is.rs` e2e
+  is inherent subprocess cost (~15 CLI invocations, each a full client
+  open), left as is.)*
 - [ ] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
   on the contacts' side IS the membership-presentation pipeline, so it ships

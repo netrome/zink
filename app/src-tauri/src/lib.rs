@@ -425,7 +425,8 @@ async fn who_is(
 ) -> Result<WhoIsReport, String> {
     let client = client(&app, &managed).await?;
     let key = PublicKey(hex::parse32(&subject)?);
-    let answers = client.who_is(key).await?;
+    let outcome = client.who_is(key).await?;
+    let answers = outcome.answers;
     let (contact, candidates) = match client.resolve_name(key)? {
         ResolvedName::Petname(petname) => (Some(petname), vec![]),
         ResolvedName::Learned(names) => {
@@ -461,6 +462,8 @@ async fn who_is(
     };
     Ok(WhoIsReport {
         answers: answers.len(),
+        asked: outcome.asked,
+        unreachable: outcome.unreachable,
         contact,
         candidates,
     })

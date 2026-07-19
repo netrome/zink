@@ -91,7 +91,10 @@ The flow, best-effort like every peer op:
 
 1. Candidate responders = every dialable stored contact, **plus the subject
    itself** if a stored record makes it dialable (the freshness case, §7).
-2. Dial each by key (D0b), send `WhoIs { subject }`, collect answers.
+2. Dial each by key (D0b) — **all at once, deadline capped at
+   `min(connect_timeout, 5 s)`** (De3: an offline contact costs one bounded
+   dial, never a serial sum) — send `WhoIs { subject }`, collect answers
+   plus honest asked/unreachable counts.
 3. Validate each answer like a scanned QR: record decodes, `subject ∈
    record.keys`, self-attestations verify (`self_claimed_name` already
    enforces attester = subject ∈ keys). Unverifiable answers are dropped with

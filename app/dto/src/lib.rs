@@ -75,6 +75,11 @@ pub struct Message {
 pub struct WhoIsReport {
     /// How many contacts served a record just now.
     pub answers: usize,
+    /// The honest denominator (De3): dialable contacts queried, and how
+    /// many of those couldn't be reached — "nobody answered" and "nobody
+    /// was reachable" are different verdicts.
+    pub asked: usize,
+    pub unreachable: usize,
     /// The petname, when the key already belongs to a contact (the
     /// refresh flow — fresh answers sharpen relay resolution by
     /// themselves; there is nothing to promote).

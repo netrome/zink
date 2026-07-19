@@ -465,7 +465,12 @@ async fn who_is(args: &[String]) -> Result<(), String> {
     };
     let client = open_client(&flags).await?;
     let key = resolve_peer_key(&client, subject)?;
-    let answers = client.who_is(key).await?;
+    let outcome = client.who_is(key).await?;
+    println!(
+        "asked {} contact(s), {} unreachable",
+        outcome.asked, outcome.unreachable
+    );
+    let answers = outcome.answers;
     if answers.is_empty() {
         println!("no answers");
     }

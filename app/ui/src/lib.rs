@@ -383,6 +383,18 @@ fn ChatView(
         }
     });
 
+    // A who-is can have learned a fresh avatar claim (De3): re-fetch past
+    // the miss the lazy cache may have recorded for this key.
+    let refetch_avatar = move |key: String| {
+        spawn_local(async move {
+            if let Ok(Some(url)) = avatar_data_url(&key).await {
+                avatars.update(|avatars| {
+                    avatars.insert(key, url);
+                });
+            }
+        });
+    };
+
     // "who is this?" (D1c): `Some((subject, None))` = asking, `Some((_,
     // Some(report)))` = showing candidates. Manual trigger only — asking
     // reveals the interest to every contact asked (who-is-this.md §5).
@@ -396,7 +408,10 @@ fn ChatView(
             }
             let args = Args { subject: &subject };
             match invoke::invoke::<WhoIsReport>("who_is", &args).await {
-                Ok(report) => whois.set(Some((subject, Some(report)))),
+                Ok(report) => {
+                    refetch_avatar(subject.clone());
+                    whois.set(Some((subject, Some(report))));
+                }
                 Err(e) => {
                     whois.set(None);
                     err(e);
@@ -419,6 +434,9 @@ fn ChatView(
             match invoke::invoke::<String>("add_contact", &args).await {
                 Ok(petname) => {
                     ok(&format!("added {petname}"));
+                    if let Some((subject, _)) = whois.get_untracked() {
+                        refetch_avatar(subject); // their avatar may now resolve
+                    }
                     whois.set(None);
                     reload_messages(id); // sender labels flip to the petname
                 }
@@ -517,14 +535,24 @@ fn ChatView(
                                         let verdict = match (&report.contact, report.candidates.is_empty()) {
                                             (Some(petname), _) => Some(
                                                 format!(
-                                                    "already your contact {petname:?} — {} fresh answer(s)",
-                                                    report.answers,
+                                                    "already your contact {petname:?} — {} fresh answer(s), asked {}, {} unreachable",
+                                                    report.answers, report.asked, report.unreachable,
                                                 ),
                                             ),
-                                            (None, true) => Some(
-                                                "no answers — none of your reachable contacts know this key"
-                                                    .to_string(),
-                                            ),
+                                            (None, true) => Some(if report.asked == 0 {
+                                                "no dialable contacts to ask — add a mutual contact first"
+                                                    .to_string()
+                                            } else if report.unreachable == report.asked {
+                                                format!(
+                                                    "no answers — none of the {} contact(s) asked were reachable; try again later",
+                                                    report.asked,
+                                                )
+                                            } else {
+                                                format!(
+                                                    "no answers — asked {}, {} unreachable; the reachable ones don't know this key",
+                                                    report.asked, report.unreachable,
+                                                )
+                                            }),
                                             (None, false) => None,
                                         };
                                         let candidates = report
@@ -872,10 +900,19 @@ fn ContactsView(
             }
             let args = Args { subject: &subject };
             match invoke::invoke::<WhoIsReport>("who_is", &args).await {
-                Ok(report) => ok(&format!(
-                    "{} answer(s) — fresh records apply automatically",
-                    report.answers
-                )),
+                Ok(report) => {
+                    ok(&format!(
+                        "{} answer(s) (asked {}, {} unreachable) — fresh records apply automatically",
+                        report.answers, report.asked, report.unreachable
+                    ));
+                    // A fresh answer can carry a new avatar claim (De3):
+                    // re-fetch past any recorded miss.
+                    if let Ok(Some(url)) = avatar_data_url(&subject).await {
+                        contact_avatars.update(|avatars| {
+                            avatars.insert(subject, url);
+                        });
+                    }
+                }
                 Err(e) => err(e),
             }
         });

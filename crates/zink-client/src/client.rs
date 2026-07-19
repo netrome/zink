@@ -916,54 +916,89 @@ impl Client {
     /// the learned store with provenance. The contact store is never
     /// touched. **Manual trigger only** (§5): asking broadcasts your
     /// interest in the key to everyone asked, so no drain path calls this.
-    /// Best-effort: unreachable or declining responders are skipped.
-    /// Returns this call's validated answers; resolution over everything
-    /// learned so far is `resolve_name`.
-    pub async fn who_is(&self, subject: PublicKey) -> Result<Vec<WhoIsAnswer>, Error> {
-        let mut answers = Vec::new();
+    /// Best-effort — and **concurrent with a capped deadline** (De3): one
+    /// offline contact costs one bounded dial, never a serial sum of
+    /// timeouts. Resolution over everything learned so far is
+    /// `resolve_name`.
+    pub async fn who_is(&self, subject: PublicKey) -> Result<WhoIsOutcome, Error> {
+        /// A query is a burst of speculative dials for display/freshness —
+        /// it never inherits a send's patience. Effective deadline is
+        /// `min(connect_timeout, cap)`, so edge tunings only tighten it.
+        const WHO_IS_DIAL_CAP: Duration = Duration::from_secs(5);
+        enum Query {
+            Answer(WhoIsAnswer),
+            Nothing,
+            Unreachable,
+        }
+        let mut targets = Vec::new();
         for (petname, record) in self.state.contacts()? {
             let Some(&responder) = record.keys.first() else {
                 continue;
             };
-            let Ok(addr) = self.peer_addr_for(responder, &record) else {
-                continue; // mailbox-only record — not dialable
-            };
-            let connection = match net::connect_addr(
-                &self.endpoint,
-                addr,
-                SYNC_ALPN,
-                self.config.connect_timeout,
-            )
-            .await
-            {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::debug!(%petname, %error, "who-is: contact unreachable");
-                    continue;
-                }
-            };
+            match self.peer_addr_for(responder, &record) {
+                Ok(addr) => targets.push((petname, responder, addr)),
+                // Mailbox-only record — not dialable, so never "asked".
+                Err(_) => tracing::debug!(%petname, "who-is: mailbox-only record; skipped"),
+            }
+        }
+        let asked = targets.len();
+        let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
+        let queries = targets.into_iter().map(|(petname, responder, addr)| async move {
+            let connection =
+                match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout).await {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        tracing::debug!(%petname, %error, "who-is: contact unreachable");
+                        return Query::Unreachable;
+                    }
+                };
             match net::sync_request(&connection, SyncOp::WhoIs { key: subject }).await {
                 Ok(SyncResult::Known { record: served }) => {
                     // Validated like a scanned QR: the record must name the
                     // subject; name claims verify at read time (§5).
                     if !served.keys.contains(&subject) {
                         tracing::warn!(%petname, "who-is: answer does not name the subject; dropped");
-                        continue;
+                        return Query::Nothing;
                     }
-                    self.state
-                        .save_learned(&subject, &responder, &served, now_ms())?;
-                    answers.push(WhoIsAnswer {
+                    Query::Answer(WhoIsAnswer {
                         responder,
                         responder_petname: petname,
                         record: *served,
-                    });
+                    })
                 }
-                Ok(SyncResult::NotHeld) => {}
-                Ok(other) => tracing::warn!(%petname, ?other, "who-is: unexpected response"),
-                Err(error) => tracing::debug!(%petname, %error, "who-is: request failed"),
+                Ok(SyncResult::NotHeld) => Query::Nothing,
+                Ok(other) => {
+                    tracing::warn!(%petname, ?other, "who-is: unexpected response");
+                    Query::Nothing
+                }
+                Err(error) => {
+                    tracing::debug!(%petname, %error, "who-is: request failed");
+                    Query::Unreachable
+                }
+            }
+        });
+        let mut answers = Vec::new();
+        let mut unreachable = 0;
+        for outcome in n0_future::join_all(queries).await {
+            match outcome {
+                Query::Answer(answer) => {
+                    self.state.save_learned(
+                        &subject,
+                        &answer.responder,
+                        &answer.record,
+                        now_ms(),
+                    )?;
+                    answers.push(answer);
+                }
+                Query::Nothing => {}
+                Query::Unreachable => unreachable += 1,
             }
         }
-        Ok(answers)
+        Ok(WhoIsOutcome {
+            answers,
+            asked,
+            unreachable,
+        })
     }
 
     /// Set this device's avatar (D1d, who-is-this.md §8): encrypt once
@@ -1491,6 +1526,18 @@ pub struct AvatarReceipt {
     pub pushed_relays: usize,
 }
 
+/// What a `who_is` query accomplished (De3): the validated answers plus the
+/// honest denominator — "0 answers with 3 of 4 unreachable" and "0 answers,
+/// everyone reachable, nobody knows this key" are different verdicts, and
+/// the edge must be able to say which one happened.
+pub struct WhoIsOutcome {
+    pub answers: Vec<WhoIsAnswer>,
+    /// Dialable contacts queried (mailbox-only records are skipped).
+    pub asked: usize,
+    /// Of those, how many could not be reached or asked to completion.
+    pub unreachable: usize,
+}
+
 /// One validated `who-is` answer (already persisted to the learned store).
 /// `responder` — the contact who served it — vouches for *holding* this
 /// record, nothing more; the record's claims verify on their own.
@@ -2016,11 +2063,13 @@ mod tests {
         let before = dir_bytes(&contacts_dir);
 
         // When
-        let answers = a.who_is(carol.public()).await.expect("who_is");
+        let outcome = a.who_is(carol.public()).await.expect("who_is");
+        let answers = outcome.answers;
 
         // Then: one contact-served answer, persisted with provenance; the
-        // contact store byte-identical
+        // honest denominator says so; the contact store byte-identical
         assert_eq!(answers.len(), 1);
+        assert_eq!((outcome.asked, outcome.unreachable), (1, 0));
         assert_eq!(answers[0].responder_petname, "bob");
         assert_eq!(answers[0].record, carol_record);
         assert_eq!(dir_bytes(&contacts_dir), before);
@@ -2066,7 +2115,7 @@ mod tests {
         c.endpoint.online().await;
 
         // When
-        let answers = a.who_is(c.public_key()).await.expect("who_is");
+        let answers = a.who_is(c.public_key()).await.expect("who_is").answers;
 
         // Then: the subject's own answer wins relay resolution; the stored
         // record is untouched (freshness is read-time, never a mutation)
@@ -2171,6 +2220,81 @@ mod tests {
         assert_eq!(revision(&a), 1);
 
         let _ = std::fs::remove_dir_all(temp_root("rev"));
+    }
+
+    #[tokio::test]
+    async fn who_is__should_dial_contacts_concurrently_not_serially() {
+        // Given: one reachable responder and three offline contacts whose
+        // relay URLs point at TEST-NET (packets vanish — each dial runs out
+        // the full deadline, the exact field stall diagnosed at D1's close)
+        let (_relay, url) = spawn_test_relay().await;
+        // Like `open_homed`, but with a short dial deadline: A must be
+        // homed to have a relay transport to dial peers through at all.
+        let key_path = temp_key("conc", "asker");
+        ClientState::open(&key_path)
+            .save_profile(
+                "asker",
+                &[RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(url.clone()),
+                }],
+            )
+            .expect("save profile");
+        keystore::create(&key_path).expect("create key");
+        let a = Client::open_with(
+            &key_path,
+            ClientConfig {
+                connect_timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect("open A");
+        let b = open_homed("conc", "responder", &url).await;
+        befriend(&b, &a);
+        a.add_contact(
+            &ContactRecord::new(
+                vec![b.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(url.clone()),
+                }],
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+        for n in 0..3u8 {
+            a.add_contact(
+                &ContactRecord::new(
+                    vec![DeviceKey::from_seed([40 + n; 32]).public()],
+                    vec![],
+                    vec![RelayEntry {
+                        mailbox: format!("unused@203.0.113.{}:1", n + 2),
+                        relay_url: Some(format!("http://203.0.113.{}:1", n + 2)),
+                    }],
+                ),
+                Some(format!("offline{n}")),
+            )
+            .expect("add offline contact");
+        }
+        b.endpoint.online().await;
+
+        // When: asking about B's key (B answers with its self-record)
+        let started = std::time::Instant::now();
+        let outcome = a.who_is(b.public_key()).await.expect("who_is");
+        let elapsed = started.elapsed();
+
+        // Then: the answer arrived, the three dead dials are counted
+        // honestly — and the whole query cost ~one capped dial, not a
+        // serial sum (serial would be ≥ 3 s here)
+        assert_eq!(outcome.answers.len(), 1);
+        assert_eq!((outcome.asked, outcome.unreachable), (4, 3));
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "took {elapsed:?} — dials look serial"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("conc"));
     }
 
     #[tokio::test]

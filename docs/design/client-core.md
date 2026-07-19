@@ -94,9 +94,11 @@ client.home_relay_specs() -> Vec<String>      // full `dial[#relay-url]` specs �
 // identity discovery (D1a/D1b, who-is-this.md): the serve side answers
 // WhoIs with the fresh self-record (own key) or a user-added contact's
 // stored record — learned records are never re-served (hop 1, structural).
-client.who_is(PublicKey) -> Vec<WhoIsAnswer>  // dial every dialable contact, ask,
-                                              // validate like a scanned QR, append
-                                              // to the learned store with provenance.
+client.who_is(PublicKey) -> WhoIsOutcome      // dial every dialable contact AT ONCE
+                                              // (De3; deadline min(connect_timeout, 5s)),
+                                              // validate like a scanned QR, append to
+                                              // the learned store with provenance;
+                                              // answers + asked/unreachable counts.
                                               // MANUAL trigger only (privacy §5)
 client.resolve_name(PublicKey) -> ResolvedName // petname > learned self-claims
                                               // (revision-ranked, provenance +
