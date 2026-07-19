@@ -52,7 +52,8 @@ UX and tests target the pair case); any auto-pairing or device discovery
 | Decision | Resolution |
 |---|---|
 | Link shape | `Attestation { attester: K, subject: K, claim: SamePersonAs(L) }` — "I, K, am the same person as L". **Mutual** = both directions exist and verify (K→L and L→K); unilateral links are rendered but never trusted for clustering (SPEC §3.2 weights mutual above unilateral — an attacker can always *claim* your key). |
-| Where links live | In the **record's** `attestations`, like name/avatar claims (SPEC §3.6 says exactly this). The record becomes the *person record*: `keys` lists the device set, attestations carry both link directions once held. |
+| Where links live | In the **record's** `attestations`, like name/avatar claims (SPEC §3.6 says exactly this). **Records stay per-device** (resolved at review): `keys` remains the device's own key; the "pair" exists only as two verified links held across two ordinary records — there is no person record and no merged key list. (Listing sibling keys stays *permitted* as an advisory addressing offer; nothing reads it as authority.) |
+| Profiles are per-device | Each device self-claims its **own** name and avatar — "mårten phone" and "mårten laptop" are both correct, and a profile edit on one device syncs nowhere. Pairing may *prefill* the new device's name from the old one's claim; it never adopts or synchronizes profiles. |
 | Pairing flow | Two scans, reusing the C2 exchange in an explicit **pair mode** (§3) — no pairing server, no new wire op. The link exchange completes over the existing who-is freshness machinery. |
 | Contact identity | Fixed from `keys.first()` to **key-overlap** (§4) — the parked review note lands here. A contact entry is the observer's local grouping of keys under a petname; the record inside it is evidence, not authority. |
 | Key adoption by contacts | **None — automatic adoption is rejected** (the review's simplification). Sealing rules are unchanged from D1b/D2 (user-added records + signed cores); my devices reach contacts' sealing sets through *my* recipients lists, not through their evaluation of my claims. Updating a contact entry stays the one explicit act, now popup-assisted with link evidence (§7). D1b's "key-set changes wait for D3" resolves as: *they stay explicit forever; D3 adds the evidence.* |
@@ -68,18 +69,20 @@ The C2 mutual-scan exchange with an "this is my device" flag:
 1. **Old device O**: "pair a new device" → shows its QR (the normal record).
 2. **New device N** (fresh install — dial-by-key works pre-profile since
    De5): "pair with existing device" → scans O → stores O's record in the
-   **own-devices store** (not contacts, no petname) → signs `N: same-person-as
-   O` → **adopts O's profile** (name; avatar claim rides in O's record and
-   re-publishes with N's record) → shows its own QR, which now lists
-   `keys = [N, O]` and carries N's link.
+   **own-devices store** (not contacts, no petname) → signs `N:
+   same-person-as O` → sets its **own** profile (name prefilled from O's
+   claim as a convenience — "mårten laptop" is one edit away; never
+   synchronized) → shows its own QR: N's ordinary record, carrying N's
+   link.
 3. **O** scans N's QR → verifies N's link names O → stores N in its
-   own-devices store → signs `O: same-person-as N` → O's record now lists
-   both keys and O's link.
+   own-devices store → signs `O: same-person-as N`. O's record now carries
+   O's link; its `keys` and profile are unchanged.
 4. **Completion**: N still lacks O's link (signed after N's scan). Either
    device dialing the other with the existing record-freshness query
    (`who_is_among(partner, [partner])`) picks up the missing link — the
-   pairing UI does this automatically after step 3. From here both devices
-   publish the identical person record.
+   pairing UI does this automatically after step 3. Done means: **each
+   device holds both links.** Each keeps publishing its own record; the
+   pair exists only as that verified link evidence.
 
 **Confirm before signing** (the one real risk): pair mode signs a link after
 a scan, so scanning a *wrong* QR in pair mode must not silently link an
@@ -88,14 +91,12 @@ name and requires an explicit confirm before signing. Mutuality bounds the
 damage — an attacker also needs *your* device to sign them — but the confirm
 keeps the deliberate act deliberate.
 
-## 4. The person record & contact identity
+## 4. Records & contact identity
 
-- **`my_record`** gains: the own-device keys in `keys`, my `SamePersonAs`
-  links, and (once held) the partners' links. This is an *offer* of how to
-  address me — a contact holding the fresh record fans out to the whole set
-  (B2 machinery; `send` already seals to every key of a `Contact`), which
-  is welcome robustness but never required: my devices' completeness is my
-  clients' job (§5, §6).
+- **`my_record`** gains exactly one thing: the link attestations (mine, and
+  the partner's once held). `keys` stays my own key; my name stays my own
+  claim. Anyone holding my record *and* my sibling's can verify the pair —
+  what they render is theirs.
 - **Contact identity = key overlap** (the parked `keys.first()` fix):
   `add_contact` and the petname-collision check identify an existing contact
   by *any shared key*; a re-scan with reordered or added keys updates that
@@ -165,14 +166,16 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   petname. Edges dedup labels per person (a two-device contact renders
   once, not twice, in conversation labels and reply lists).
 - **The popup upgrade** (groups.md §5 hand-off): before rendering "a wild
-  key appeared", check the D2b-learned records: if one contains the unknown
-  key AND an already-trusted key of contact P, with **mutual links
-  verifying**, render *"P added a device (mutually verified)"* with a
-  one-tap **offer** to update P's contact entry — the same explicit
-  `add_contact` act, popup-assisted. Declining is fine: the key stays a
-  separate (hex or wild) entry, and messages still flow — nothing depends
-  on the observer merging. `same-person-as` evaluation enters here and in
-  the §6 gate — nowhere else.
+  key appeared", evaluate the held evidence (stored + learned records): if
+  the unknown key and an already-trusted key of contact P are joined by
+  **verified mutual links**, render *"P added a device (mutually
+  verified)"* with a one-tap **offer** — which is *purely a naming act*:
+  store the device's record as its own contact entry, petname prefilled
+  from its self-claim ("mårten laptop"), rendered clustered with P.
+  Delivery never depended on it — replies reach both of P's devices
+  through membership (P's own send-to-self put both keys there). Declining
+  costs a hex label, nothing more. `same-person-as` evaluation enters here
+  and in the §6 gate — nowhere else.
 - **Membership deltas**: "+ Alice's new device" renders via the same
   clustering (a joined key that clusters to a known person labels as that
   person).
@@ -208,15 +211,18 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 
 ## 9. Slices
 
-- **D3a · Identity core.** `ContactRecord::device_cluster()` (keys connected
-  to a given key by verified mutual links) in the protocol crate; the
-  key-overlap contact-identity fix + petname-collision by overlap; label
-  dedup per cluster in edges' data (membership/summary labels). *Done
-  when:* unit tests — mutual links cluster, unilateral/forged don't; a
-  re-scanned record with reordered/added keys updates the same contact.
+- **D3a · Identity core.** Link-evidence evaluation: verified mutual pairs
+  extracted from a *set* of held records (protocol helper over
+  attestations; the client aggregates stored + learned records into
+  `cluster_of(key)`); the key-overlap contact-identity fix +
+  petname-collision by overlap; clustered label dedup in edges' data.
+  *Done when:* unit tests — mutual links across two per-device records
+  cluster, unilateral/forged don't; a re-scanned record with
+  reordered/added keys updates the same contact.
 - **D3b · Pairing + gate.** Own-devices store; pair flow in `Client`
-  (store partner, sign link, adopt profile, `my_record` gains keys+links,
-  completion query); the D0c gate extension; CLI `pair-show` / `pair-scan`
+  (store partner, sign link, own profile prefilled — never synced;
+  `my_record` gains the links, completion query); the D0c gate extension;
+  CLI `pair-show` / `pair-scan`
   (dev shape TBD at implementation). *Done when:* headless e2e — two
   clients pair; both `my_record`s list both keys with mutual links; the
   partner is served by the gate like self.

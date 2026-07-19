@@ -786,7 +786,11 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   devices in my messages (send-to-self, the core mechanism) and sync each
   other; no key-adoption rule exists, because nobody else needs one: my
   devices join conversations through my own signed `recipients` and the D2
-  pipeline does the rest. Pairing = the C2 two-scan exchange in an explicit
+  pipeline does the rest. **Records and profiles stay per-device** — each
+  device its own key, own self-claimed name ("mårten phone" / "mårten
+  laptop"), never synchronized; the pair exists only as two verified links
+  across ordinary records, and the contact-side accept is purely a naming
+  act. Pairing = the C2 two-scan exchange in an explicit
   confirm-before-signing pair mode, completed over who-is freshness; contact
   identity moves to key-overlap; contact-entry updates stay explicit forever
   — D3 adds mutual-link *evidence* to the popup's offer, never automation;
@@ -800,10 +804,11 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     don't; a re-scanned record with reordered/added keys updates the same
     contact.
   - [ ] **D3b · Pairing + gate.** Own-devices store; pair flow (store
-    partner, sign link, adopt profile, `my_record` gains keys+links,
-    completion query); D0c gate: own cluster counts as self; CLI pair
-    commands. *Done when:* headless e2e — two clients pair, both records
-    list both keys with mutual links, the partner is served like self.
+    partner, sign link, own profile prefilled — never synced; `my_record`
+    gains the links, completion query); D0c gate: own cluster counts as
+    self; CLI pair commands. *Done when:* headless e2e — two clients pair,
+    each record stays per-device (own key, own name) and each holds both
+    links; the partner is served like self.
   - [ ] **D3c · Send-to-self + clustering offers.** Recipients gain own
     devices (the core mechanism); the popup upgrade — "P added a device
     (mutually verified)" as an evidence-ranked *offer*, accepted explicitly;
