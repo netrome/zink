@@ -635,14 +635,28 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   query reveals nothing; revise who-is-this.md §5 when this lands) →
   provenance-ranked candidates → the "a wild Charlie appeared" surface →
   add-as-contact or ignore, the user always in control of their own store.
-  Design doc first; its job is **defensive**: no new mechanisms (recipients
-  announce, who-is looks up), and document the responder-side-gate limit —
-  the scoped query is answered only by participants who hold *you* as a
-  contact; it degrades to hex + manual add, and the per-op gate can later
-  learn "answer about participants of shared conversations" without wire
-  changes if that ever bites. *Done when:* headless e2e — B adds C to a
-  conversation with A; A's client auto-queries, surfaces C with provenance,
-  A adds C and replies to all.
+  *Done when:* headless e2e — B adds C to a conversation with A; A's client
+  auto-queries, surfaces C with provenance, A adds C and replies to all.
+  Design: [groups.md](./groups.md) (drafted 2026-07-19 — defensive by
+  construction: membership = the **heads'** participant set, a lens on the
+  DAG, never an object; the `send_in` participant-index artifact-fork fix;
+  the scoped auto-query with introducing-sender-first responders + a
+  per-(subject, conversation) rate limit; the responder-side-gate limit
+  documented; SPEC untouched end to end).
+  - [ ] **D2a · Membership core + index fix.** Heads-based membership feeding
+    `reply_contacts` + summaries (union-fallback when the DAG can't build);
+    membership-delta info on history; `send_in` updates the participant-set
+    index like `remember` does. *Done when:* headless e2e — add-member with
+    everyone (including the adder, by name) threading one conversation; a
+    stop-including reply shrinks the reply set; delta lines derived.
+  - [ ] **D2b · Scoped auto-query.** Responder-scoped `who_is` variant; the
+    post-drain trigger (auto_sync's seam) with the rate limit;
+    who-is-this.md §5 revised. *Done when:* the acceptance flow headless —
+    A auto-learns C with zero manual action, adds C, replies to all.
+  - [ ] **D2c · Group UI.** Multi-select compose; add-to-conversation;
+    heads-based labels + delta lines; the wild-Charlie popup with persisted
+    dismissal. *Done when:* a live group chat across devices — create, add,
+    popup → add, reply-all reaches everyone.
 - [ ] **D3 · Multi-device.** 🎯 *(Was D2 — now genuinely thin: D2's pipeline
   does the propagation, since "your new device" and "a new member" are the
   same event under the hood (SPEC §5.2).)* QR pairing producing the mutual
@@ -719,7 +733,8 @@ Not scheduled into a stage; must land before any build leaves our hands.
   C1 client-core split ✅, C4 live delivery / foreground service ✅
   ([live-delivery.md](./live-delivery.md)), D0 sync primitives 📝
   ([sync-primitives.md](./sync-primitives.md)), D1 identity discovery 📝
-  ([who-is-this.md](./who-is-this.md)), D5 direct delivery 📝
+  ([who-is-this.md](./who-is-this.md)), D2 groups 📝 ([groups.md](./groups.md)),
+  D5 direct delivery 📝
   ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0). The app
   shell (C3) needed no design doc — it assembled resolved decisions; its
   as-built map lives in `app/README.md`.
