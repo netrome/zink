@@ -463,7 +463,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   (`online` < 2 s vs the 3 s probe timeout). Deploy: unit unchanged, but
   **4401/udp must be open** next to 4400/udp + 4401/tcp — DEV-SETUP §5
   updated; QAD failing is soft (falls back to the pre-De2 stall).)*
-- [ ] **D1 · Attestations & name resolution.** 🎯 Self-profile (name/avatar);
+- [x] **D1 · Attestations & name resolution.** 🎯 Self-profile (name/avatar);
   client-side petnames; `who-is-this` pull *(a peer request/response — rides D0b
   connectivity)*; client-side trust ranking. *(Profile + petnames are largely already
   built from Stage C: `set_profile`/`my_record`, `add_contact` petnames with collision
@@ -556,7 +556,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     UI wasm + aarch64 APK build. Groups aren't needed to exercise this —
     one-way adds are the no-groups unknown-sender case, and the same hook
     covers a re-keyed friend showing up as unknown.)*
-  - [ ] **D1d · Avatars.** `Claim::Avatar` gains the content key next to the blob
+  - [x] **D1d · Avatars.** `Claim::Avatar` gains the content key next to the blob
     hash (in-place at v1, dev-stage records re-exchanged — D0b norm): the key
     travels only in records / `WhoIs` answers (QR + E2E peer channels), never
     through a relay; encrypt-once (A3 AEAD + content address), pushed to the
@@ -584,14 +584,35 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     decrypted bytes magic-sniffed before the webview renders them. Note:
     contacts learn a *new* avatar only with a fresh record — re-scan QR or
     a `who-is` freshness pull; nothing announces it (by design, no
-    broadcast channel). Awaiting the two-device acceptance run — that run
-    also closes D1. 🎉)*
-- [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
-  resolution; history backfill via content-key re-wrap. *(Review note: contact
-  identity is currently keyed on `record.keys.first()` — revisit so a re-scanned
-  record with reordered/added device keys isn't treated as a different contact.)*
-- [ ] **D3 · Groups.** Multi-recipient conversations in the UI (delivery is already
-  fan-out; this is mostly membership *presentation* — client UX).
+    broadcast channel).)*
+    ✅ **Verified live 2026-07-19** (QR re-scan propagation path) — **D1
+    complete.** 🎉 Field note: the who-is UX can stall or look like a
+    failure — diagnosed as `who_is`'s serial dials × the 10 s production
+    connect timeout per unreachable contact, plus view-local avatar caches
+    that never retry a miss; tracked as De3 below.
+- [ ] **De3 · who-is responsiveness (UX polish).** Field observation at D1's close:
+  the who-is panel can stall for tens of seconds or read as a silent failure.
+  Causes, diagnosed 2026-07-19: (a) `Client::who_is` dials contacts **serially**
+  with the production 10 s `connect_timeout` each — one offline contact stalls
+  the whole query, N offline contacts stack to N×10 s; (b) `WhoIsReport` doesn't
+  say how many contacts were asked vs unreachable, so "0 answers after 20 s"
+  and "nobody knows this key" render identically; (c) the app's per-view avatar
+  caches mark a miss as done and never retry until the view remounts, and the
+  contacts-view "who is?" doesn't reload avatars/state after answers land.
+  Fix shape: dial concurrently (`n0_future` join — no runtime in the lib) with
+  a tighter per-peer bound, add asked/unreachable counts to the report, retry
+  avatar misses on who-is completion / view events. *Done when:* a who-is with
+  one offline contact answers in ~one connect-timeout, and the panel says
+  "asked N, M unreachable" honestly.
+- [ ] **D2 · Groups** *(was D3 — reorg 2026-07-19: groups before multi-device;
+  delivery is already fan-out, so this is mostly membership *presentation* —
+  client UX — and it makes D1's who-is hook earn its keep on every unknown
+  group participant).* Multi-recipient conversations in the UI.
+- [ ] **D3 · Multi-device** *(was D2).* QR pairing (mutual `same-person-as`);
+  device set in resolution; history backfill via content-key re-wrap. *(Review
+  note: contact identity is currently keyed on `record.keys.first()` — revisit
+  so a re-scanned record with reordered/added device keys isn't treated as a
+  different contact.)*
 - [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?" answers
   from contacts; concurrency-aware message views.
 - [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
