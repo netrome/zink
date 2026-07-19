@@ -91,6 +91,16 @@ client.backfill_by_key(conversation, PublicKey) -> usize   // via the relay_url 
 client.home_relay_specs() -> Vec<String>      // full `dial[#relay-url]` specs — the
                                               // round-trip form for profile forms;
                                               // home_relays() stays mailbox-only
+// identity discovery (D1a/D1b, who-is-this.md): the serve side answers
+// WhoIs with the fresh self-record (own key) or a user-added contact's
+// stored record — learned records are never re-served (hop 1, structural).
+client.who_is(PublicKey) -> Vec<WhoIsAnswer>  // dial every dialable contact, ask,
+                                              // validate like a scanned QR, append
+                                              // to the learned store with provenance.
+                                              // MANUAL trigger only (privacy §5)
+client.resolve_name(PublicKey) -> ResolvedName // petname > learned self-claims
+                                              // (revision-ranked, provenance +
+                                              // agreement surfaced) > Unknown
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened
@@ -114,6 +124,14 @@ not a contract.
   exchange are C2. Since D0b an entry pairs the mailbox dial string with the same
   service's iroh relay URL (`RelayEntry`); the resolved `Contact` used by sends
   carries the mailbox strings, the relay URL feeds dial-by-key.
+- **Learned records are not contacts (D1b, who-is-this.md §5/§7).**
+  `<key-file>.state/learned/<subject>/<responder>.record` (+ receipt-time sibling)
+  holds `who-is` answers with provenance — multiple records per key, latest per
+  responder. Network input never mutates the contact store; freshness is read-time
+  relay resolution (subject-served > user-added > contact-served, latest within a
+  class), sealing keys come only from the user-added record until D2, and the
+  profile name-attestation revision persists in `profile.revision` (bumped per
+  rename — SPEC §3.2 supersession).
 - **Errors are one crate-wide enum (`zink_client::Error`, De1).** Precise variants
   where an edge or test branches (`NoRelayUrl`, `NotAContact`, `ProfileIncomplete`,
   …), kind-grouped variants with a human payload elsewhere (`Storage`, `Transport`,

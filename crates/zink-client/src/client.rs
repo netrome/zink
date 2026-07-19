@@ -217,7 +217,11 @@ impl Client {
             {
                 Some((_, record)) => contacts.push(Contact {
                     keys: vec![key],
-                    relays: record.relays.iter().map(|r| r.mailbox.clone()).collect(),
+                    relays: self
+                        .effective_relays(key, record)
+                        .into_iter()
+                        .map(|entry| entry.mailbox)
+                        .collect(),
                 }),
                 None => unknown.push(key),
             }
@@ -738,6 +742,16 @@ impl Client {
                 net::parse_relay_url(url)?;
             }
         }
+        // A rename supersedes the previous name attestation (SPEC §3.2):
+        // bump the persisted revision so receivers holding both claims have
+        // a winner. Only *name* changes bump — the counter is scoped per
+        // claim-kind; relay changes order by receipt time instead (D1b).
+        if let Some(previous) = self.state.profile_name()
+            && previous != name.trim()
+        {
+            self.state
+                .save_profile_revision(self.state.profile_revision() + 1)?;
+        }
         self.state.save_profile(name.trim(), &entries)
     }
 
@@ -829,14 +843,181 @@ impl Client {
         self.state.contacts()
     }
 
-    /// Petname → the Contact to send to.
+    /// Petname → the Contact to send to. Keys come from the user-added
+    /// record alone; relays resolve at read time (D1b, who-is-this.md §7).
     pub fn resolve_contact(&self, petname: &str) -> Result<Contact, Error> {
         self.state
             .contacts()?
             .into_iter()
             .find(|(name, _)| name == petname)
-            .map(|(_, record)| Contact::from_record(&record))
+            .map(|(_, record)| self.contact_from(&record))
             .ok_or_else(|| Error::NotAContact(format!("no contact named {petname:?}")))
+    }
+
+    /// Keys from the stored record; relays resolved at read time (§7).
+    fn contact_from(&self, record: &ContactRecord) -> Contact {
+        let relays = match record.keys.first() {
+            Some(&key) => self.effective_relays(key, record),
+            None => record.relays.clone(),
+        };
+        Contact {
+            keys: record.keys.clone(),
+            relays: relays.into_iter().map(|entry| entry.mailbox).collect(),
+        }
+    }
+
+    /// The relay entries to reach a person at, resolved at read time
+    /// (who-is-this.md §7) — nothing stored is ever mutated. Provenance
+    /// classes, first non-empty class wins, latest receipt within one:
+    /// **subject-served** (authenticated by the connection key) > the
+    /// **user-added record** (authenticated by the scan / explicit add) >
+    /// **contact-served** hearsay (only ever decisive in the one-way-add
+    /// bootstrap, where it's the whole point). Keys never come from
+    /// learned records — sealing stays on the user-added record until D2.
+    fn effective_relays(&self, key: PublicKey, stored: &ContactRecord) -> Vec<RelayEntry> {
+        let learned = self.state.learned(&key);
+        let best = |from_subject: bool| {
+            learned
+                .iter()
+                .filter(|entry| (entry.responder == key) == from_subject)
+                .filter(|entry| !entry.record.relays.is_empty())
+                .max_by_key(|entry| entry.received_ms)
+                .map(|entry| entry.record.relays.clone())
+        };
+        best(true)
+            .or_else(|| (!stored.relays.is_empty()).then(|| stored.relays.clone()))
+            .or_else(|| best(false))
+            .unwrap_or_default()
+    }
+
+    /// The dialable peer address for a person: their key, routed via the
+    /// relay URLs their records resolve to at read time.
+    fn peer_addr_for(
+        &self,
+        key: PublicKey,
+        stored: &ContactRecord,
+    ) -> Result<iroh::EndpointAddr, Error> {
+        let relay_urls: Vec<iroh::RelayUrl> = self
+            .effective_relays(key, stored)
+            .iter()
+            .filter_map(|entry| entry.relay_url.as_deref())
+            .map(net::parse_relay_url)
+            .collect::<Result<_, _>>()?;
+        if relay_urls.is_empty() {
+            return Err(Error::NoRelayUrl);
+        }
+        net::peer_addr(&key, &relay_urls)
+    }
+
+    /// Ask the network "who is this key?" (D1b, who-is-this.md §5): dial
+    /// every dialable contact — the subject itself among them, if stored —
+    /// send `WhoIs`, validate answers like scanned QRs, and append them to
+    /// the learned store with provenance. The contact store is never
+    /// touched. **Manual trigger only** (§5): asking broadcasts your
+    /// interest in the key to everyone asked, so no drain path calls this.
+    /// Best-effort: unreachable or declining responders are skipped.
+    /// Returns this call's validated answers; resolution over everything
+    /// learned so far is `resolve_name`.
+    pub async fn who_is(&self, subject: PublicKey) -> Result<Vec<WhoIsAnswer>, Error> {
+        let mut answers = Vec::new();
+        for (petname, record) in self.state.contacts()? {
+            let Some(&responder) = record.keys.first() else {
+                continue;
+            };
+            let Ok(addr) = self.peer_addr_for(responder, &record) else {
+                continue; // mailbox-only record — not dialable
+            };
+            let connection = match net::connect_addr(
+                &self.endpoint,
+                addr,
+                SYNC_ALPN,
+                self.config.connect_timeout,
+            )
+            .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::debug!(%petname, %error, "who-is: contact unreachable");
+                    continue;
+                }
+            };
+            match net::sync_request(&connection, SyncOp::WhoIs { key: subject }).await {
+                Ok(SyncResult::Known { record: served }) => {
+                    // Validated like a scanned QR: the record must name the
+                    // subject; name claims verify at read time (§5).
+                    if !served.keys.contains(&subject) {
+                        tracing::warn!(%petname, "who-is: answer does not name the subject; dropped");
+                        continue;
+                    }
+                    self.state
+                        .save_learned(&subject, &responder, &served, now_ms())?;
+                    answers.push(WhoIsAnswer {
+                        responder,
+                        responder_petname: petname,
+                        record: *served,
+                    });
+                }
+                Ok(SyncResult::NotHeld) => {}
+                Ok(other) => tracing::warn!(%petname, ?other, "who-is: unexpected response"),
+                Err(error) => tracing::debug!(%petname, %error, "who-is: request failed"),
+            }
+        }
+        Ok(answers)
+    }
+
+    /// Resolve a key to the best-believed name (who-is-this.md §6):
+    /// petname (manual, always wins) > learned self-claims (grouped by
+    /// name, highest revision first — a genuine tie surfaces both, never
+    /// arbitrated) > unknown (the edge renders the key). Provenance rides
+    /// along: which contacts hold a record claiming each name, and whether
+    /// the subject itself served one.
+    pub fn resolve_name(&self, key: PublicKey) -> Result<ResolvedName, Error> {
+        let contacts = self.state.contacts()?;
+        if let Some((petname, _)) = contacts
+            .iter()
+            .find(|(_, record)| record.keys.contains(&key))
+        {
+            return Ok(ResolvedName::Petname(petname.clone()));
+        }
+        let petname_of = |responder: PublicKey| {
+            contacts
+                .iter()
+                .find(|(_, record)| record.keys.contains(&responder))
+                .map(|(petname, _)| petname.clone())
+                // A learned entry can outlive its responder's contact
+                // status; fall back to an honest key prefix.
+                .unwrap_or_else(|| hex::encode(&responder.0[..4]))
+        };
+        let mut by_name: BTreeMap<String, LearnedName> = BTreeMap::new();
+        for entry in self.state.learned(&key) {
+            let Some((name, revision)) = entry.record.self_name_claim() else {
+                continue; // no verifiable self-claim — relays-only evidence
+            };
+            let learned = by_name
+                .entry(name.to_string())
+                .or_insert_with(|| LearnedName {
+                    name: name.to_string(),
+                    revision,
+                    held_by: Vec::new(),
+                    confirmed_by_subject: false,
+                });
+            learned.revision = learned.revision.max(revision);
+            if entry.responder == key {
+                learned.confirmed_by_subject = true;
+            } else {
+                learned.held_by.push(petname_of(entry.responder));
+            }
+        }
+        if by_name.is_empty() {
+            return Ok(ResolvedName::Unknown);
+        }
+        let mut names: Vec<LearnedName> = by_name.into_values().collect();
+        names.sort_by(|a, b| {
+            b.revision
+                .cmp(&a.revision)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(ResolvedName::Learned(names))
     }
 
     /// Sync a partially-known conversation with a peer (SPEC §5.2): walk
@@ -874,16 +1055,7 @@ impl Client {
             .find(|(_, record)| record.keys.contains(&peer))
             .map(|(_, record)| record)
             .ok_or_else(|| Error::NotAContact("no stored contact record for that key".into()))?;
-        let relay_urls: Vec<iroh::RelayUrl> = record
-            .relays
-            .iter()
-            .filter_map(|entry| entry.relay_url.as_deref())
-            .map(net::parse_relay_url)
-            .collect::<Result<_, _>>()?;
-        if relay_urls.is_empty() {
-            return Err(Error::NoRelayUrl);
-        }
-        self.backfill_addr(conversation, net::peer_addr(&peer, &relay_urls)?)
+        self.backfill_addr(conversation, self.peer_addr_for(peer, record)?)
             .await
     }
 
@@ -1088,8 +1260,8 @@ impl Client {
 /// The self-record — key, self-attested name, home relays — or `None`
 /// until the profile is complete (both parts). Shared by `my_record` (the
 /// QR/paste publishing path) and the sync handler (serving `WhoIs` about
-/// our own key, D1a), so the two can't drift. Attestation `revision` is
-/// hardcoded 0 until D1b persists a counter (the supersession fix).
+/// our own key, D1a), so the two can't drift. The attestation `revision`
+/// is the persisted supersession counter, bumped per rename (D1b).
 pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Option<ContactRecord> {
     let name = state.profile_name()?;
     let relays = state.home_relay_entries();
@@ -1103,7 +1275,7 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
             attester: me,
             subject: me,
             claim: Claim::Name(name),
-            revision: 0,
+            revision: state.profile_revision(),
         },
         device,
     );
@@ -1134,13 +1306,6 @@ impl Contact {
             relays,
         })
     }
-
-    fn from_record(record: &ContactRecord) -> Self {
-        Contact {
-            keys: record.keys.clone(),
-            relays: record.relays.iter().map(|r| r.mailbox.clone()).collect(),
-        }
-    }
 }
 
 pub struct SendReceipt {
@@ -1170,6 +1335,39 @@ pub struct Received {
     /// The relay it arrived through — where its blobs can be fetched.
     pub relay: String,
     pub body: Result<Vec<u8>, OpenError>,
+}
+
+/// One validated `who-is` answer (already persisted to the learned store).
+/// `responder` — the contact who served it — vouches for *holding* this
+/// record, nothing more; the record's claims verify on their own.
+pub struct WhoIsAnswer {
+    pub responder: PublicKey,
+    /// The petname the responder is stored under (the contact we asked).
+    pub responder_petname: String,
+    pub record: ContactRecord,
+}
+
+/// `resolve_name`'s verdict (who-is-this.md §6).
+pub enum ResolvedName {
+    /// The key belongs to a contact — the manual label always wins.
+    Petname(String),
+    /// Not a contact; what the learned store supports, best first
+    /// (highest revision; a genuine tie keeps both, surfaced honestly).
+    Learned(Vec<LearnedName>),
+    /// Nothing known — the edge renders the key itself.
+    Unknown,
+}
+
+/// One name the learned store supports, with its provenance.
+pub struct LearnedName {
+    pub name: String,
+    /// The claim's supersession counter (SPEC §3.2) — orders conflicting
+    /// names across answers.
+    pub revision: u64,
+    /// Petnames of the contacts serving a record with this claim.
+    pub held_by: Vec<String>,
+    /// The subject itself served a record claiming this name.
+    pub confirmed_by_subject: bool,
 }
 
 /// Whom a reply reaches: the resolvable participants, and the keys we hold
@@ -1589,6 +1787,272 @@ mod tests {
         assert!(b.state.load_dag(conversation).is_ok());
 
         let _ = std::fs::remove_dir_all(temp_root("autosync"));
+    }
+
+    /// A one-key record with a verified self-claimed name at `revision`.
+    fn signed_record(
+        device: &DeviceKey,
+        name: &str,
+        revision: u64,
+        relays: Vec<RelayEntry>,
+    ) -> ContactRecord {
+        let attestation = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: device.public(),
+                subject: device.public(),
+                claim: Claim::Name(name.to_string()),
+                revision,
+            },
+            device,
+        );
+        ContactRecord::new(vec![device.public()], vec![attestation], relays)
+    }
+
+    /// Every file under `dir` with its bytes — the store-was-not-touched
+    /// probe for the D1b "network input never mutates stored records" rule.
+    fn dir_bytes(dir: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            out.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read(entry.path()).unwrap_or_default(),
+            );
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn who_is__should_learn_a_record_from_a_contact_without_touching_the_contact_store() {
+        // Given: B (homed, serving) holds Carol's record; A holds B as a
+        // dialable contact and is in B's contact store. Carol herself is
+        // unknown to A and offline — the one-way-add shape (design §1).
+        let (_relay, url) = spawn_test_relay().await;
+        let a = open_homed("learn", "asker", &url).await;
+        let b = open_homed("learn", "responder", &url).await;
+        befriend(&b, &a); // B's gate serves A
+        let carol = DeviceKey::from_seed([21; 32]);
+        let carol_record = signed_record(
+            &carol,
+            "Carol",
+            0,
+            vec![RelayEntry {
+                mailbox: "cc@203.0.113.9:9".to_string(),
+                relay_url: Some("http://203.0.113.9:10".to_string()),
+            }],
+        );
+        b.state.save_contact("carol", &carol_record).expect("save");
+        let b_record = ContactRecord::new(
+            vec![b.public_key()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "unused@203.0.113.1:1".to_string(),
+                relay_url: Some(url.clone()),
+            }],
+        );
+        a.add_contact(&b_record, Some("bob".to_string()))
+            .expect("add bob");
+        b.endpoint.online().await;
+        let contacts_dir =
+            std::path::PathBuf::from(format!("{}.state", temp_key("learn", "asker")))
+                .join("contacts");
+        let before = dir_bytes(&contacts_dir);
+
+        // When
+        let answers = a.who_is(carol.public()).await.expect("who_is");
+
+        // Then: one contact-served answer, persisted with provenance; the
+        // contact store byte-identical
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].responder_petname, "bob");
+        assert_eq!(answers[0].record, carol_record);
+        assert_eq!(dir_bytes(&contacts_dir), before);
+        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).expect("resolve") else {
+            panic!("expected a learned name");
+        };
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].name, "Carol");
+        assert_eq!(names[0].held_by, vec!["bob".to_string()]);
+        assert!(!names[0].confirmed_by_subject);
+
+        // When: promoted by the one explicit act — reply becomes possible
+        let petname = a.add_contact(&answers[0].record, None).expect("promote");
+
+        // Then: petname prefilled from the self-claim; keys + relays ready
+        assert_eq!(petname, "Carol");
+        let contact = a.resolve_contact("Carol").expect("resolve contact");
+        assert_eq!(contact.keys, vec![carol.public()]);
+        assert_eq!(contact.relays, vec!["cc@203.0.113.9:9".to_string()]);
+
+        let _ = std::fs::remove_dir_all(temp_root("learn"));
+    }
+
+    #[tokio::test]
+    async fn who_is__the_subjects_own_answer_should_win_relay_resolution() {
+        // Given: Carol is A's contact via a *stale* record (right relay
+        // URL, outdated mailbox); Carol is online with a fresh profile and
+        // serves A (the record-freshness case, design §7)
+        let (_relay, url) = spawn_test_relay().await;
+        let a = open_homed("fresh", "asker", &url).await;
+        let c = open_homed("fresh", "carol", &url).await;
+        befriend(&c, &a);
+        let stale = ContactRecord::new(
+            vec![c.public_key()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "stale@203.0.113.1:1".to_string(),
+                relay_url: Some(url.clone()),
+            }],
+        );
+        a.add_contact(&stale, Some("carol".to_string()))
+            .expect("add carol");
+        c.endpoint.online().await;
+
+        // When
+        let answers = a.who_is(c.public_key()).await.expect("who_is");
+
+        // Then: the subject's own answer wins relay resolution; the stored
+        // record is untouched (freshness is read-time, never a mutation)
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].responder, c.public_key());
+        let contact = a.resolve_contact("carol").expect("resolve");
+        assert_eq!(
+            contact.relays,
+            vec!["unused@203.0.113.1:1".to_string()],
+            "fresh mailbox from the subject-served answer"
+        );
+        assert_eq!(a.contacts().expect("contacts")[0].1, stale);
+
+        let _ = std::fs::remove_dir_all(temp_root("fresh"));
+    }
+
+    #[tokio::test]
+    async fn resolve_contact__should_take_keys_from_the_stored_record_only() {
+        // Given: carol stored with relay X; a subject-served learned record
+        // with relay Y and a smuggled extra key; *newer* contact-served
+        // hearsay with relay Z
+        let a = Client::open_or_create(&temp_key("keys", "asker"))
+            .await
+            .expect("open A");
+        let carol = DeviceKey::from_seed([22; 32]);
+        let extra = DeviceKey::from_seed([23; 32]).public();
+        let stored = ContactRecord::new(
+            vec![carol.public()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "xx@203.0.113.1:1".to_string(),
+                relay_url: None,
+            }],
+        );
+        a.add_contact(&stored, Some("carol".to_string()))
+            .expect("add");
+        let served = ContactRecord::new(
+            vec![carol.public(), extra],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "yy@203.0.113.2:2".to_string(),
+                relay_url: None,
+            }],
+        );
+        a.state
+            .save_learned(&carol.public(), &carol.public(), &served, 1)
+            .expect("learn subject-served");
+        let hearsay = ContactRecord::new(
+            vec![carol.public()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "zz@203.0.113.3:3".to_string(),
+                relay_url: None,
+            }],
+        );
+        a.state
+            .save_learned(
+                &carol.public(),
+                &DeviceKey::from_seed([24; 32]).public(),
+                &hearsay,
+                2,
+            )
+            .expect("learn hearsay");
+
+        // When
+        let contact = a.resolve_contact("carol").expect("resolve");
+
+        // Then: subject-served relays beat newer hearsay; sealing keys come
+        // strictly from the user-added record — the smuggled key is inert
+        assert_eq!(contact.relays, vec!["yy@203.0.113.2:2".to_string()]);
+        assert_eq!(contact.keys, vec![carol.public()]);
+
+        let _ = std::fs::remove_dir_all(temp_root("keys"));
+    }
+
+    #[tokio::test]
+    async fn set_profile__should_bump_the_name_attestation_revision_on_rename_only() {
+        // Given: a valid dial string (any 32-byte key is an endpoint id)
+        let a = Client::open_or_create(&temp_key("rev", "me"))
+            .await
+            .expect("open");
+        let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
+        let revision = |client: &Client| {
+            client
+                .my_record()
+                .expect("record")
+                .self_name_claim()
+                .expect("claim")
+                .1
+        };
+
+        // When / Then: first profile starts at 0; a re-save of the same
+        // name doesn't bump; a rename supersedes (SPEC §3.2)
+        a.set_profile("alice", std::slice::from_ref(&relay))
+            .expect("set");
+        assert_eq!(revision(&a), 0);
+        a.set_profile("alice", std::slice::from_ref(&relay))
+            .expect("re-set");
+        assert_eq!(revision(&a), 0);
+        a.set_profile("alicia", std::slice::from_ref(&relay))
+            .expect("rename");
+        assert_eq!(revision(&a), 1);
+
+        let _ = std::fs::remove_dir_all(temp_root("rev"));
+    }
+
+    #[tokio::test]
+    async fn resolve_name__should_rank_by_revision_and_group_agreement() {
+        // Given: two responders hold Carol's old name (revision 0), one
+        // holds the rename (revision 1) — a rename caught mid-propagation
+        let a = Client::open_or_create(&temp_key("names", "asker"))
+            .await
+            .expect("open A");
+        let carol = DeviceKey::from_seed([25; 32]);
+        let old = signed_record(&carol, "Carol", 0, vec![]);
+        let new = signed_record(&carol, "Caroline", 1, vec![]);
+        for (n, record, at) in [(26u8, &old, 1u64), (27, &old, 2), (28, &new, 3)] {
+            a.state
+                .save_learned(
+                    &carol.public(),
+                    &DeviceKey::from_seed([n; 32]).public(),
+                    record,
+                    at,
+                )
+                .expect("learn");
+        }
+
+        // When
+        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).expect("resolve") else {
+            panic!("expected learned names");
+        };
+
+        // Then: the rename ranks first by revision; the superseded name
+        // stays surfaced with its two holders — evidence, not arbitration
+        assert_eq!(names.len(), 2);
+        assert_eq!((names[0].name.as_str(), names[0].revision), ("Caroline", 1));
+        assert_eq!(names[1].name, "Carol");
+        assert_eq!(names[1].held_by.len(), 2);
+
+        let _ = std::fs::remove_dir_all(temp_root("names"));
     }
 
     #[tokio::test]

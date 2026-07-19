@@ -5194,6 +5194,7 @@ version = "0.1.0"
 dependencies = [
  "iroh",
  "iroh-blobs",
+ "iroh-relay",
  "qrcode",
  "tokio",
  "tracing",

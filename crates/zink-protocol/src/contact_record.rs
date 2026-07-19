@@ -89,21 +89,33 @@ impl ContactRecord {
         }
     }
 
-    /// The name this person claims for themselves: the first `Name`
-    /// attestation that verifies and is genuinely *self*-issued (attester =
-    /// subject, and that key is in the record). Anything else — forged
-    /// signatures, third-party claims, keys outside the record — is ignored,
-    /// never an error: the record came from an untrusted channel.
+    /// The name this person claims for themselves: the **highest-revision**
+    /// `Name` attestation (SPEC §3.2 supersession) that verifies and is
+    /// genuinely *self*-issued (attester = subject, and that key is in the
+    /// record). Anything else — forged signatures, third-party claims, keys
+    /// outside the record — is ignored, never an error: the record came
+    /// from an untrusted channel.
     pub fn self_claimed_name(&self) -> Option<&str> {
-        self.attestations.iter().find_map(|signed| {
-            let attestation = &signed.attestation;
-            let Claim::Name(name) = &attestation.claim else {
-                return None;
-            };
-            let self_issued = attestation.attester == attestation.subject
-                && self.keys.contains(&attestation.attester);
-            (self_issued && signed.verify().is_ok()).then_some(name.as_str())
-        })
+        self.self_name_claim().map(|(name, _)| name)
+    }
+
+    /// `self_claimed_name` with its `revision` — what a client compares
+    /// when answers from different peers disagree (a rename caught
+    /// mid-propagation): the higher revision supersedes (SPEC §3.2).
+    pub fn self_name_claim(&self) -> Option<(&str, u64)> {
+        self.attestations
+            .iter()
+            .filter_map(|signed| {
+                let attestation = &signed.attestation;
+                let Claim::Name(name) = &attestation.claim else {
+                    return None;
+                };
+                let self_issued = attestation.attester == attestation.subject
+                    && self.keys.contains(&attestation.attester);
+                (self_issued && signed.verify().is_ok())
+                    .then_some((name.as_str(), attestation.revision))
+            })
+            .max_by_key(|(_, revision)| *revision)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -251,6 +263,47 @@ mod tests {
     fn self_claimed_name__should_return_a_valid_self_attested_name() {
         let record = record_for(&device_key(1), "Alice");
         assert_eq!(record.self_claimed_name(), Some("Alice"));
+    }
+
+    #[test]
+    fn self_name_claim__should_pick_the_highest_revision_among_valid_claims() {
+        // Given: two valid self-issued names — a rename; and a *forged*
+        // claim at a yet-higher revision, which must not win
+        let me = device_key(1);
+        let forger = device_key(9);
+        let renamed = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: me.public(),
+                subject: me.public(),
+                claim: Claim::Name("Alice II".to_string()),
+                revision: 3,
+            },
+            &me,
+        );
+        let forged = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: me.public(),
+                subject: me.public(),
+                claim: Claim::Name("Mallory".to_string()),
+                revision: 9,
+            },
+            &forger, // signature won't verify against `attester`
+        );
+        let record = ContactRecord::new(
+            vec![me.public()],
+            vec![
+                name_attestation(&me, me.public(), "Alice"), // revision 0
+                forged,
+                renamed,
+            ],
+            vec![],
+        );
+
+        // Then: supersession picks the valid rename, not order or forgery
+        assert_eq!(record.self_name_claim(), Some(("Alice II", 3)));
+        assert_eq!(record.self_claimed_name(), Some("Alice II"));
     }
 
     #[test]

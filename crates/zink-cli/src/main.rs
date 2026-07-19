@@ -23,7 +23,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use zink_client::{Client, ClientConfig, Contact, Received, hex, keystore};
+use zink_client::{Client, ClientConfig, Contact, Received, ResolvedName, hex, keystore};
 use zink_protocol::{
     BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey, RelayEntry,
 };
@@ -51,6 +51,7 @@ async fn main() -> ExitCode {
         Some("reply") => reply(&args[1..]).await,
         Some("listen") => listen(&args[1..]).await,
         Some("backfill") => backfill(&args[1..]).await,
+        Some("who-is") => who_is(&args[1..]).await,
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -77,6 +78,7 @@ const USAGE: &str = "usage:
   zink-cli listen --key <file> [--relay <relay> ...]
   zink-cli backfill --key <file> <conversation-id | prefix>
                     <peer-addr | petname | pubkey-hex>
+  zink-cli who-is --key <file> <petname | pubkey-hex>
 (<relay> = <endpoint-id>@<ip:port>[#<relay-url>] as printed by zink-relay;
  <peer-addr> = <endpoint-id>@<ip:port> as printed by `listen`. A petname or
  key backfills by key via the relay url in the stored contact record. recv
@@ -443,6 +445,61 @@ fn resolve_peer_key(client: &Client, peer: &str) -> Result<zink_protocol::Public
         }
     }
     Ok(zink_protocol::PublicKey(zink_client::hex::parse32(peer)?))
+}
+
+/// Ask every dialable contact "who is this key?" (D1b, who-is-this.md §5).
+/// Prints each answer with its provenance and shareable payload (feed it
+/// to `contact-add` to promote), then the ranked resolution over
+/// everything learned so far. Manual by design — asking reveals your
+/// interest in the key to everyone asked.
+async fn who_is(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [subject] = positionals.as_slice() else {
+        return Err(format!(
+            "exactly one subject (petname or key hex) expected\n{USAGE}"
+        ));
+    };
+    let client = open_client(&flags).await?;
+    let key = resolve_peer_key(&client, subject)?;
+    let answers = client.who_is(key).await?;
+    if answers.is_empty() {
+        println!("no answers");
+    }
+    for answer in &answers {
+        let name = answer
+            .record
+            .self_claimed_name()
+            .unwrap_or("(no valid self-claim)");
+        println!(
+            "{} holds a record: calls themself {name:?} — {}",
+            answer.responder_petname,
+            answer.record.to_qr_string()
+        );
+    }
+    match client.resolve_name(key)? {
+        ResolvedName::Petname(petname) => println!("resolved: contact {petname:?}"),
+        ResolvedName::Learned(names) => {
+            for name in names {
+                let confirmed = if name.confirmed_by_subject {
+                    ", confirmed by themself"
+                } else {
+                    ""
+                };
+                let held = if name.held_by.is_empty() {
+                    String::new()
+                } else {
+                    format!(", records held by {}", name.held_by.join(", "))
+                };
+                println!(
+                    "resolved: {:?} (revision {}){confirmed}{held}",
+                    name.name, name.revision
+                );
+            }
+        }
+        ResolvedName::Unknown => println!("resolved: unknown key"),
+    }
+    client.close().await;
+    Ok(())
 }
 
 /// Live delivery: subscribe to every relay and print messages as they are

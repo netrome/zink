@@ -328,6 +328,23 @@ impl ClientState {
             .collect()
     }
 
+    /// The profile name-attestation's supersession counter (SPEC §3.2):
+    /// 0 until the first rename, bumped by `Client::set_profile` on every
+    /// name change so receivers holding two claims have a winner (D1b).
+    pub fn profile_revision(&self) -> u64 {
+        std::fs::read_to_string(self.root.join("profile.revision"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn save_profile_revision(&self, revision: u64) -> Result<(), Error> {
+        let path = self.root.join("profile.revision");
+        create_parent(&path)?;
+        write_atomic(&path, revision.to_string().as_bytes())
+            .map_err(|e| Error::Storage(format!("write profile revision: {e}")))
+    }
+
     /// Store a contact under a petname. The record is kept in wire form;
     /// the petname is a sibling file (local convention, never protocol).
     pub fn save_contact(&self, petname: &str, record: &ContactRecord) -> Result<(), Error> {
@@ -372,6 +389,72 @@ impl ClientState {
         }
         contacts.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(contacts)
+    }
+
+    /// Store a `who-is` answer (D1b, who-is-this.md §5):
+    /// `learned/<subject>/<responder>.record` + a receipt-time sibling.
+    /// Latest answer per responder wins; nothing else is ever overwritten,
+    /// and the contact store is never touched by this path. Learned records
+    /// don't get petnames, aren't served onward, and don't open the D0c
+    /// serving gate — advisory input with provenance, not contacts.
+    pub fn save_learned(
+        &self,
+        subject: &PublicKey,
+        responder: &PublicKey,
+        record: &ContactRecord,
+        received_ms: u64,
+    ) -> Result<(), Error> {
+        let stem = self
+            .root
+            .join("learned")
+            .join(hex(&subject.0))
+            .join(hex(&responder.0));
+        create_parent(&stem.with_extension("record"))?;
+        write_atomic(&stem.with_extension("record"), &record.to_bytes())
+            .map_err(|e| Error::Storage(format!("write learned record: {e}")))?;
+        write_atomic(
+            &stem.with_extension("time"),
+            received_ms.to_string().as_bytes(),
+        )
+        .map_err(|e| Error::Storage(format!("write learned time: {e}")))
+    }
+
+    /// Every learned record for a subject, unordered. Damaged entries are
+    /// skipped with a warning — advisory data, never fatal.
+    pub fn learned(&self, subject: &PublicKey) -> Vec<LearnedRecord> {
+        let dir = self.root.join("learned").join(hex(&subject.0));
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut learned = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "record") {
+                continue;
+            }
+            let responder = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| crate::hex::parse32(stem).ok())
+                .map(PublicKey);
+            let record = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| ContactRecord::try_from_bytes(&bytes).ok());
+            let (Some(responder), Some(record)) = (responder, record) else {
+                tracing::warn!(?path, "skipping a damaged learned entry");
+                continue;
+            };
+            let received_ms = std::fs::read_to_string(path.with_extension("time"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            learned.push(LearnedRecord {
+                responder,
+                record,
+                received_ms,
+            });
+        }
+        learned
     }
 
     fn contact_stem(&self, key: &PublicKey) -> PathBuf {
@@ -421,6 +504,18 @@ fn parse_outbox_entry(path: &std::path::Path) -> Option<OutboxEntry> {
         conversation,
         created_ms,
     })
+}
+
+/// One learned record (D1b): an answer `responder` served for a subject
+/// via `who-is`. Multiple per subject is the data model — advisory inputs
+/// ranked at read time (who-is-this.md §7), never merged or promoted
+/// implicitly.
+pub struct LearnedRecord {
+    pub responder: PublicKey,
+    pub record: ContactRecord,
+    /// Local receipt time (ms) — orders answers *within* a provenance
+    /// class; trusted because we wrote it, unlike anything in the record.
+    pub received_ms: u64,
 }
 
 fn create_parent(path: &std::path::Path) -> Result<(), Error> {

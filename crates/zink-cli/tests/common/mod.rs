@@ -80,3 +80,31 @@ pub async fn spawn_relay_at(
     );
     (router, dial)
 }
+
+/// An in-process iroh relay *server* (peer rendezvous + QAD at the same
+/// picked port number, the De2 same-port convention) — what makes clients
+/// dialable by key. Pair its URL with a mailbox dial as
+/// `<dial>#<url>` to form a full relay spec. Port picked up front (two
+/// `:0` binds would land on different numbers); retried against races.
+pub async fn spawn_iroh_relay() -> (iroh_relay::server::Server, String) {
+    use iroh_relay::server::{QuicConfig, RelayConfig, Server, ServerConfig};
+    use std::net::Ipv4Addr;
+    for _ in 0..3 {
+        let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("pick a port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let mut config = ServerConfig::default();
+        config.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, port)));
+        let mut quic = QuicConfig::new((Ipv4Addr::LOCALHOST, port));
+        let (_certs, tls) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
+        quic.server_config = Some(tls);
+        config.quic = Some(quic);
+        if let Ok(server) = Server::spawn(config).await {
+            let url = format!("http://{}", server.http_addr().expect("http addr"));
+            return (server, url);
+        }
+    }
+    panic!("no free port pair for a test iroh relay in 3 attempts");
+}

@@ -499,7 +499,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     record verbatim; unknown subject `NotHeld` even to a contact; own-key query
     `NotHeld` until the profile completes, then a verified self-record. SPEC §11:
     who-is-this format/hops moved from still-to-pin-down to a resolved row.)*
-  - [ ] **D1b · Pull, learned store, resolution.** `Client::who_is(key)` dialing
+  - [x] **D1b · Pull, learned store, resolution.** `Client::who_is(key)` dialing
     the subject (if held) + all dialable contacts; answers validated like scanned
     QRs and stored in a **learned store** with provenance, keyed
     (subject, responder), outside the contact store (the D0c gate must not
@@ -514,6 +514,23 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     adds C, replies); a subject-served answer wins relay resolution with the
     contact store byte-identical after any sequence of `who_is` calls; sealing
     keys ignore learned records.
+    ✅ *(2026-07-19: learned store at `state/learned/<subject>/<responder>.record`
+    + receipt-time sibling; resolution went in as one read-time seam —
+    `effective_relays` (provenance classes, latest within class) now feeds
+    `resolve_contact`, `reply_contacts`, `backfill_by_key` **and `who_is`'s own
+    dialing**, so every by-key path benefits from freshness. `resolve_name`
+    groups by name, ranks by attestation revision (protocol gained
+    `self_name_claim` — and `self_claimed_name` now picks the *highest-revision*
+    valid claim rather than the first, the SPEC §3.2 rule; forged
+    higher-revision claims still lose, tested). Revision fix: `profile.revision`
+    persists, bumped on rename only (per claim-kind scope; relay changes order
+    by receipt time instead). e2e: client-crate — learn-via-contact with the
+    contact store byte-compared, subject-served beats newer hearsay, smuggled
+    keys inert, rename supersession; CLI — full one-way-add acceptance
+    (`tests/who_is.rs`): Carol messages Alice one-way, Alice `who-is`es her key,
+    Bob (listening) serves Carol's record, Alice promotes the printed payload
+    via `contact-add` and her reply reaches Carol. `who-is` prints answers with
+    provenance + shareable payload, then the ranked resolution.)*
   - [ ] **D1c · Messaging-UI hook.** Unknown participant → "who is this?" action;
     candidate names with provenance ("records held by B, D"); add-as-contact with
     the petname prefilled; refresh from the contact view. *Done when:* the

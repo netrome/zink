@@ -14,4 +14,6 @@ zink-protocol = { path = "../zink-protocol" }
 [dev-dependencies]
 iroh = "1.0.2"
 iroh-blobs = "0.103"
+# In-process iroh relay server for the dial-by-key e2e (who-is).
+iroh-relay = { version = "1.0.2", features = ["server", "test-utils"] }
 zink-relay = { path = "../zink-relay" }

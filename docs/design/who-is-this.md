@@ -219,11 +219,15 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
   e2e: stranger `NotHeld`, contact gets the stored record verbatim, unknown
   subject `NotHeld` even to a contact, own-key `NotHeld` until the profile
   completes.
-- **D1b · Pull, learned store, resolution.** §5–§7, CLI `who-is` for e2e.
-  *Done when:* the one-way-add flow headless — A learns C's record via
-  contact B, adds C, replies to C; a subject-served answer wins relay
-  resolution **without modifying the contact store** (byte-identical after
-  any sequence of `who_is` calls); sealing keys ignore learned records.
+- **D1b · Pull, learned store, resolution — done (2026-07-19).** §5–§7, CLI
+  `who-is` for e2e. Read-time resolution shipped as one seam
+  (`effective_relays`) feeding every by-key path; `resolve_name` ranks by
+  attestation revision (the protocol's `self_claimed_name` now applies
+  supersession, new `self_name_claim` exposes the revision); the profile
+  revision persists and bumps per rename. e2e: the one-way-add flow through
+  the CLI (learn from a mutual contact → promote → reply delivered), the
+  contact store byte-compared across `who_is` calls, subject-served beating
+  newer hearsay, smuggled learned keys inert.
 - **D1c · UI.** Unknown participant → "who is this?" action; candidates with
   provenance; add-as-contact prefilled; refresh surfaced on contact view.
   *Done when:* the acceptance flow runs live on two devices.
