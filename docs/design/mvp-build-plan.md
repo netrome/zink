@@ -531,10 +531,15 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     Bob (listening) serves Carol's record, Alice promotes the printed payload
     via `contact-add` and her reply reaches Carol. `who-is` prints answers with
     provenance + shareable payload, then the ranked resolution.)*
-  - [ ] **D1c · Messaging-UI hook.** Unknown participant → "who is this?" action;
+  - [x] **D1c · Messaging-UI hook.** Unknown participant → "who is this?" action;
     candidate names with provenance ("records held by B, D"); add-as-contact with
     the petname prefilled; refresh from the contact view. *Done when:* the
     acceptance flow runs live on two devices.
+    ✅ **Verified live 2026-07-19** — phone + two laptop instances (second
+    instance: `cargo tauri dev --no-watch` with a distinct app identifier for
+    its own data dir, the C3b technique): one-way add from the phone, banner on
+    the unknown key, who-is resolved via the third identity, add-as-contact
+    prefilled, reply delivered.
     *(2026-07-19: code complete — `Message.unknown_sender` (hex key iff the
     sender is no stored contact) drives a per-conversation banner; "who is
     this?" opens a panel: candidates with name + provenance ("confirmed by
@@ -548,12 +553,9 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     key. No auto-query anywhere, per the D1 privacy decision. Also fixed: a
     **latent De1 breakage** in the managed-client init (the app is outside
     the workspace, so nothing had compiled it since the error-enum landed).
-    UI wasm + aarch64 APK build. **Awaiting the two-device acceptance run** —
-    suggested shape: laptop = Alice, phone = Carol (adds Alice one-way via
-    QR, messages her), Bob = a third identity on `zink-cli listen` as the
-    mutual contact serving Carol's record; groups aren't needed — one-way
-    adds are the no-groups unknown-sender case, and the same hook covers a
-    re-keyed friend showing up as unknown.)*
+    UI wasm + aarch64 APK build. Groups aren't needed to exercise this —
+    one-way adds are the no-groups unknown-sender case, and the same hook
+    covers a re-keyed friend showing up as unknown.)*
   - [ ] **D1d · Avatars.** `Claim::Avatar` gains the content key next to the blob
     hash (in-place at v1, dev-stage records re-exchanged — D0b norm): the key
     travels only in records / `WhoIs` answers (QR + E2E peer channels), never

@@ -228,13 +228,13 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
   the CLI (learn from a mutual contact → promote → reply delivered), the
   contact store byte-compared across `who_is` calls, subject-served beating
   newer hearsay, smuggled learned keys inert.
-- **D1c · UI.** Unknown participant → "who is this?" action; candidates with
-  provenance; add-as-contact prefilled; refresh surfaced on contact view.
-  *Done when:* the acceptance flow runs live on two devices.
-  *(2026-07-19: code complete — unknown-sender banner + who-is panel in the
-  chat view, per-contact freshness pull in the contacts view, one
-  render-ready `who_is` command. Verifiable without groups: one-way adds
-  are the no-groups unknown-sender case (§1). Awaiting the two-device run.)*
+- **D1c · UI — done (2026-07-19, verified live).** Unknown-sender banner +
+  who-is panel in the chat view, per-contact freshness pull in the contacts
+  view, one render-ready `who_is` command. Exercised without groups —
+  one-way adds are the no-groups unknown-sender case (§1): phone added the
+  laptop one-way and messaged it; the banner appeared, a third identity
+  served the record, add-as-contact prefilled the petname, the reply
+  delivered.
 - **D1d · Avatars.** §8. *Done when:* two devices see each other's avatars in
   contacts + conversation views, and the blobs on the relay are ciphertext.
 
