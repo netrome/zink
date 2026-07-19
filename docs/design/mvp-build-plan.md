@@ -775,21 +775,41 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   does the propagation, since "your new device" and "a new member" are the
   same event under the hood (SPEC §5.2).)* QR pairing producing the mutual
   `same-person-as`; the clustering rule that upgrades the popup from "wild
-  Charlie" to "Alice added a device" — cluster iff a mutual link involving an
-  already-trusted key verifies; otherwise it stays an unknown key added by
-  Alice (the one real anti-spoofing rule, and the only place `same-person-as`
-  evaluation enters); the re-wrap op + the D0c gate extension (keys mutually
-  attested as mine count as self); send-to-self deposits (the SPEC §6
-  extension of self-wrap); the parked `keys.first()` contact-identity fix
-  (a re-scanned record with reordered/added keys must not read as a new
-  contact). Design doc should state the completeness hierarchy: own sibling
-  devices are the *primary* history/freshness channel (send-to-self +
-  own-device sync); contacts' fan-out is robustness, never load-bearing —
-  and park the honest repudiation-lag note (quiet conversations keep
-  addressing a dead key until someone speaks; lazy by design). *Done when:*
-  pair a second device, it sends one message per active conversation,
-  contacts' clients cluster it under the person, and it reads old history
-  via re-wrap.
+  Charlie" to "Alice added a device"; the re-wrap op + the D0c gate
+  extension; send-to-self deposits; the parked `keys.first()` fix. *Done
+  when:* pair a second device, introduce it, contacts' clients cluster it
+  under the person, and it reads old history via re-wrap. Design:
+  [multi-device.md](./multi-device.md) (drafted 2026-07-19 — mutual-or-
+  nothing links in the person record; pairing = the C2 two-scan exchange in
+  an explicit confirm-before-signing pair mode, completed over who-is
+  freshness; contact identity moves to key-overlap; the adoption rule
+  resolves D1b's deferral: added keys are sealed to iff mutually linked to
+  an already-trusted key; the introduction reuses the D2c add-member gesture
+  — membership machinery IS the transfer protocol, no enumeration op;
+  `GetKeys` re-wraps served to own devices only; sibling devices primary,
+  contacts' fan-out never load-bearing; repudiation lag parked with D4).*
+  - [ ] **D3a · Identity core.** `ContactRecord::device_cluster()` (verified
+    mutual links); the key-overlap contact-identity + collision fix; label
+    dedup per cluster. *Done when:* mutual links cluster, unilateral/forged
+    don't; a re-scanned record with reordered/added keys updates the same
+    contact.
+  - [ ] **D3b · Pairing + gate.** Own-devices store; pair flow (store
+    partner, sign link, adopt profile, `my_record` gains keys+links,
+    completion query); D0c gate: own cluster counts as self; CLI pair
+    commands. *Done when:* headless e2e — two clients pair, both records
+    list both keys with mutual links, the partner is served like self.
+  - [ ] **D3c · Send-to-self + introduction + clustering.** Recipients gain
+    own devices; introduce-per-conversation action; adoption + the popup
+    upgrade ("P added a device"). *Done when:* headless e2e — a contact
+    clusters the introduced key, adopts on tap, and both devices of P get
+    the contact's reply.
+  - [ ] **D3d · Re-wrap.** `SyncOp::GetKeys { ids }` → wraps re-sealed to
+    the caller (own devices only); wrap-append storage; opportunistic run
+    after pairing/sync. *Done when:* headless e2e — the paired device reads
+    bodies from before it existed; a non-own-device caller gets `NotHeld`.
+  - [ ] **D3e · App UI + acceptance.** Pair mode (show/scan + fingerprint
+    confirm), device list, introduction button, popup upgrade. *Done when:*
+    the acceptance flow runs live across devices.
 - [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?"
   answers from contacts; concurrency-aware message views. *(Position confirmed
   at the 2026-07-19 reorg: D2's pipeline runs entirely on D1's
@@ -852,7 +872,7 @@ Not scheduled into a stage; must land before any build leaves our hands.
   ([live-delivery.md](./live-delivery.md)), D0 sync primitives 📝
   ([sync-primitives.md](./sync-primitives.md)), D1 identity discovery 📝
   ([who-is-this.md](./who-is-this.md)), D2 groups 📝 ([groups.md](./groups.md)),
-  D5 direct delivery 📝
+  D3 multi-device 📝 ([multi-device.md](./multi-device.md)), D5 direct delivery 📝
   ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0). The app
   shell (C3) needed no design doc — it assembled resolved decisions; its
   as-built map lives in `app/README.md`.
