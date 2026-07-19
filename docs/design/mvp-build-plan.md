@@ -802,24 +802,40 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   new-device bootstrap is lazy via send-to-self (introduce-now is optional
   sugar); `GetKeys` re-wraps served to own devices only; sibling devices
   primary, contacts' fan-out never load-bearing; repudiation lag +
-  labels-vs-addressing-names relaxation parked).*
+  labels-vs-addressing-names relaxation parked. **Gap review
+  (2026-07-19):** the `WhoIs` serve set gains recognized-device *subjects*
+  — else nobody can serve a new device's record (its contact store is
+  empty, siblings hold it only in the own-devices store); the fresh
+  device's empty contact store is bootstrapped by two own-device
+  allowances (own-device authorship counts as a contributing contact,
+  siblings answer its scoped auto-queries); one-way recognition is
+  receive-only — pulling requires recognizing back; key-overlap contact
+  updates are explicitly confirmed, never silent — an unauthenticated
+  `keys` list must not rewrite a contact's trust anchor.)*
   - [ ] **D3a · Identity core.** `ContactRecord::device_cluster()` (verified
-    mutual links); the key-overlap contact-identity + collision fix; label
-    dedup per cluster. *Done when:* mutual links cluster, unilateral/forged
-    don't; a re-scanned record with reordered/added keys updates the same
-    contact.
+    mutual links); the key-overlap contact-identity + collision fix, with
+    the overlap confirm; label dedup per cluster. *Done when:* mutual links
+    cluster, unilateral/forged don't; a re-scanned record with
+    reordered/added keys updates the same contact through the confirm; a
+    record smuggling another contact's key, or overlapping two contacts,
+    surfaces instead of silently merging.
   - [ ] **D3b · Recognize + gate.** Own-devices store; the one-way
     recognize act (store key + record, sign the vouch, `my_record` carries
-    it); D0c gate: recognized keys served like self; CLI `recognize`.
+    it); D0c gate: recognized keys served like self, and `WhoIs` serves
+    recognized-device subjects; CLI `recognize`.
     *Done when:* headless e2e — A recognizes B: A serves B like self while
-    the reverse stays closed until B recognizes A back; each record
+    the reverse stays closed until B recognizes A back; a contact's
+    `WhoIs` for B's key at A returns B's stored record; each record
     carries only its own vouches.
   - [ ] **D3c · Send-to-self + clustering offers.** Recipients gain own
-    devices (the core mechanism); the popup upgrade — "P added a device
-    (mutually verified)" as an evidence-ranked *offer*, accepted explicitly;
-    introduce-now as optional sugar. *Done when:* headless e2e — after
-    pairing, P's next message carries both keys; the contact accepts the
-    offer and both of P's devices receive the reply.
+    devices (the core mechanism); the fresh-device bootstrap (own-device
+    authorship legitimizes, own devices as auto-query responders); the
+    popup upgrade — "P added a device (mutually verified)" as an
+    evidence-ranked *offer*, accepted explicitly; introduce-now as optional
+    sugar. *Done when:* headless e2e — after pairing, P's next message
+    carries both keys; the contact accepts the offer and both of P's
+    devices receive the reply; a reply from the new device reaches the
+    contact directly.
   - [ ] **D3d · Re-wrap.** `SyncOp::GetKeys { ids }` → wraps re-sealed to
     the caller (own devices only); wrap-append storage; opportunistic run
     after pairing/sync. *Done when:* headless e2e — the paired device reads
