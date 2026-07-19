@@ -591,6 +591,14 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 
 Not scheduled into a stage; must land before any build leaves our hands.
 
+- [ ] **Unknown-sender quarantine.** Anyone holding a record can deposit
+  (mutuality is not required — that's what makes one-way adds work), so an
+  unknown key can fill a mailbox and the conversation list with noise. Client
+  policy, no protocol change: conversations whose participants resolve to no
+  contact land in a bounded "message requests" view instead of the main list
+  (oldest evicted at the cap); D1c's who-is hook is the promote-out path.
+  Complements the relay-side caps (C0) until send-capabilities (SPEC §8,
+  deferred) provide the real gate. *(Noted 2026-07-19 while wiring D1c.)*
 - [ ] **Per-type format versions.** One global `FORMAT_VERSION` is stamped into every
   versioned object and `decode_versioned` accepts only the exact current value — so any
   single object's version bump forks the whole protocol at once (v1 clients silently
