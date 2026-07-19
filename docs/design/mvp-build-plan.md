@@ -676,10 +676,28 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     no fork. Client-crate: heads-vs-union membership incl. concurrent-head
     union, delta derivation, the grown-set index mapping recorded even when
     every relay is down.)*
-  - [ ] **D2b · Scoped auto-query.** Responder-scoped `who_is` variant; the
+  - [x] **D2b · Scoped auto-query.** Responder-scoped `who_is` variant; the
     post-drain trigger (auto_sync's seam) with the rate limit;
     who-is-this.md §5 revised. *Done when:* the acceptance flow headless —
     A auto-learns C with zero manual action, adds C, replies to all.
+    ✅ *(2026-07-19: `who_is_among(subject, responders)` — `who_is` is now
+    a thin wrapper passing the contact list; responders resolve to routes
+    like reply targets (contact or learned records; a non-contact responder
+    labels as short hex). `auto_who_is` runs after `auto_sync` on every
+    drain path: touched conversations → contributing-contact gate
+    (`has_contributing_contact`, pub — it's also the parked quarantine's
+    predicate) → unknown members with no learned record → ask that
+    conversation's participants only, once per (subject, conversation) per
+    run (in-memory; the manual trigger re-asks). Answers land in the
+    learned store; edges render via `resolve_name` at the next paint — no
+    new event plumbing, as designed. Responder *ordering* became moot: De3
+    made the dials concurrent, so all participants are asked at once. e2e
+    (`groups.rs`): bob grows the 1:1 with carol and goes online; alice
+    only drains — with bob then killed, carol still resolves ("records
+    held by Bob") and alice's reply-to-all reaches her via the
+    auto-learned route; client-crate tests pin provenance, the rate limit
+    (wiped learned store not re-asked), and the gate short-circuiting
+    before the rate limit for a stranger-authored conversation.)*
   - [ ] **D2c · Group UI.** Multi-select compose; add-to-conversation;
     heads-based labels + delta lines; the wild-Charlie popup with persisted
     dismissal. *Done when:* a live group chat across devices — create, add,

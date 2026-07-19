@@ -43,6 +43,10 @@ pub struct Client {
     endpoint: Endpoint,
     state: ClientState,
     config: ClientConfig,
+    /// The auto-query rate limit (D2b, groups.md §4): (subject, conversation)
+    /// pairs already asked this run — a drain loop must not re-broadcast
+    /// interest in a key. In-memory on purpose; the manual trigger re-asks.
+    queried: std::sync::Mutex<BTreeSet<([u8; 32], [u8; 32])>>,
     /// The client is also a server: this router serves `SYNC_ALPN` (peer
     /// history sync, D0) for as long as the client lives. Held, not called.
     _sync_router: iroh::protocol::Router,
@@ -101,6 +105,7 @@ impl Client {
             endpoint,
             state,
             config,
+            queried: std::sync::Mutex::default(),
             _sync_router: sync_router,
         })
     }
@@ -432,6 +437,7 @@ impl Client {
         // the caller sees a threadable history. Cheap when nothing is
         // orphaned (one missing-ancestors scan per touched conversation).
         self.auto_sync(&received).await;
+        self.auto_who_is(&received).await;
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
@@ -503,6 +509,7 @@ impl Client {
             // Heal before rendering (D0d): the edge's re-render then shows
             // the whole conversation, not an unthreadable orphan.
             self.auto_sync(&received).await;
+            self.auto_who_is(&received).await;
             on_new(received);
         }
         let _ = self.flush_outbox().await;
@@ -528,6 +535,7 @@ impl Client {
                 // conversation is ancestor-closed (the common case); dials
                 // the sender only on an actual orphan.
                 self.auto_sync(&received).await;
+                self.auto_who_is(&received).await;
                 on_new(received);
             }
         }
@@ -927,10 +935,10 @@ impl Client {
     fn peer_addr_for(
         &self,
         key: PublicKey,
-        stored: &ContactRecord,
+        stored: Option<&ContactRecord>,
     ) -> Result<iroh::EndpointAddr, Error> {
         let relay_urls: Vec<iroh::RelayUrl> = self
-            .effective_relays(key, Some(stored))
+            .effective_relays(key, stored)
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref())
             .map(net::parse_relay_url)
@@ -952,6 +960,26 @@ impl Client {
     /// timeouts. Resolution over everything learned so far is
     /// `resolve_name`.
     pub async fn who_is(&self, subject: PublicKey) -> Result<WhoIsOutcome, Error> {
+        let responders: Vec<PublicKey> = self
+            .state
+            .contacts()?
+            .iter()
+            .filter_map(|(_, record)| record.keys.first().copied())
+            .collect();
+        self.who_is_among(subject, &responders).await
+    }
+
+    /// `who_is` scoped to specific responders (D2b, groups.md §4) — the
+    /// auto-query's shape: inside a conversation, asking its *own
+    /// participants* about a member key reveals nothing they don't already
+    /// know, unlike asking the whole contact list. Responders resolve to
+    /// routes like reply targets do (contact or learned records);
+    /// undialable ones are skipped and never counted as "asked".
+    pub async fn who_is_among(
+        &self,
+        subject: PublicKey,
+        responders: &[PublicKey],
+    ) -> Result<WhoIsOutcome, Error> {
         /// A query is a burst of speculative dials for display/freshness —
         /// it never inherits a send's patience. Effective deadline is
         /// `min(connect_timeout, cap)`, so edge tunings only tighten it.
@@ -961,15 +989,24 @@ impl Client {
             Nothing,
             Unreachable,
         }
+        let records = self.state.contacts()?;
+        let me = self.device.public();
         let mut targets = Vec::new();
-        for (petname, record) in self.state.contacts()? {
-            let Some(&responder) = record.keys.first() else {
+        for &responder in responders {
+            if responder == me {
                 continue;
-            };
-            match self.peer_addr_for(responder, &record) {
+            }
+            let named = records
+                .iter()
+                .find(|(_, record)| record.keys.contains(&responder));
+            let petname = named
+                .map(|(petname, _)| petname.clone())
+                .unwrap_or_else(|| hex::encode(&responder.0)[..8].to_string());
+            let stored = named.map(|(_, record)| record);
+            match self.peer_addr_for(responder, stored) {
                 Ok(addr) => targets.push((petname, responder, addr)),
-                // Mailbox-only record — not dialable, so never "asked".
-                Err(_) => tracing::debug!(%petname, "who-is: mailbox-only record; skipped"),
+                // No dialable route — never counted as "asked".
+                Err(_) => tracing::debug!(%petname, "who-is: no dialable route; skipped"),
             }
         }
         let asked = targets.len();
@@ -1166,6 +1203,88 @@ impl Client {
         Ok(None)
     }
 
+    /// The contributing-contact rule (D2b, groups.md §6): a conversation
+    /// is legitimate iff at least one stored contact **authored** a held
+    /// message in it. Presence in `recipients` is attacker-controlled — a
+    /// spammer can list your friends for free — authorship is not (every
+    /// stored envelope verified its sender's signature). Presentation and
+    /// auto-query policy, never storage: a conversation upgrades
+    /// retroactively the moment a contact's message arrives.
+    pub fn has_contributing_contact(&self, conversation: MessageId) -> Result<bool, Error> {
+        let records = self.state.contacts()?;
+        Ok(self
+            .state
+            .load_envelopes(conversation)?
+            .iter()
+            .any(|envelope| {
+                records
+                    .iter()
+                    .any(|(_, record)| record.keys.contains(&envelope.core.sender))
+            }))
+    }
+
+    /// The scoped auto-query (D2b, groups.md §4 — the who-is-this.md §5
+    /// carve-out): after a drain, resolve unknown members of the touched
+    /// conversations by asking those conversations' *own participants* —
+    /// their presence in the signed `recipients` is already mutual
+    /// knowledge there, so the query reveals nothing (unlike asking the
+    /// whole contact list, which stays forbidden). Gated on the
+    /// contributing-contact rule (§6) so a fabricated group can't make
+    /// this client broadcast queries, and rate-limited per
+    /// (subject, conversation) per run. Best-effort and non-fatal: answers
+    /// land in the learned store; edges pick them up via `resolve_name`
+    /// at the next render.
+    async fn auto_who_is(&self, received: &[Received]) {
+        let me = self.device.public();
+        let Ok(records) = self.state.contacts() else {
+            return;
+        };
+        let known = |key: &PublicKey| records.iter().any(|(_, record)| record.keys.contains(key));
+        let conversations: BTreeSet<MessageId> = received
+            .iter()
+            .map(|message| {
+                message
+                    .envelope
+                    .core
+                    .conversation
+                    .unwrap_or_else(|| message.envelope.id())
+            })
+            .collect();
+        for conversation in conversations {
+            if !self.has_contributing_contact(conversation).unwrap_or(false) {
+                continue;
+            }
+            let Ok(members) = self.membership(conversation) else {
+                continue;
+            };
+            let responders: Vec<PublicKey> =
+                members.iter().copied().filter(|key| *key != me).collect();
+            for subject in members.iter().copied() {
+                if subject == me || known(&subject) || !self.state.learned(&subject).is_empty() {
+                    continue;
+                }
+                if !self
+                    .queried
+                    .lock()
+                    .expect("queried lock")
+                    .insert((subject.0, conversation.0))
+                {
+                    continue;
+                }
+                match self.who_is_among(subject, &responders).await {
+                    Ok(outcome) if !outcome.answers.is_empty() => {
+                        tracing::info!(
+                            answers = outcome.answers.len(),
+                            "auto who-is resolved a member"
+                        )
+                    }
+                    Ok(_) => tracing::debug!("auto who-is: no answers"),
+                    Err(error) => tracing::debug!(%error, "auto who-is failed"),
+                }
+            }
+        }
+    }
+
     /// Resolve a key to the best-believed name (who-is-this.md §6):
     /// petname (manual, always wins) > learned self-claims (grouped by
     /// name, highest revision first — a genuine tie surfaces both, never
@@ -1256,7 +1375,7 @@ impl Client {
             .find(|(_, record)| record.keys.contains(&peer))
             .map(|(_, record)| record)
             .ok_or_else(|| Error::NotAContact("no stored contact record for that key".into()))?;
-        self.backfill_addr(conversation, self.peer_addr_for(peer, record)?)
+        self.backfill_addr(conversation, self.peer_addr_for(peer, Some(record))?)
             .await
     }
 
@@ -2544,6 +2663,119 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("conc"));
+    }
+
+    #[tokio::test]
+    async fn auto_who_is__should_learn_unknown_members_from_the_conversations_participants() {
+        // Given: B (A's contact, homed, serving) authored a conversation
+        // that includes the unknown key C, and holds C's record. The drain
+        // hands A the message — nothing else happens manually.
+        let (_relay, url) = spawn_test_relay().await;
+        let a = open_homed("autowho", "asker", &url).await;
+        let b = open_homed("autowho", "responder", &url).await;
+        befriend(&b, &a);
+        let carol = DeviceKey::from_seed([31; 32]);
+        let carol_record = signed_record(
+            &carol,
+            "Carol",
+            0,
+            vec![RelayEntry {
+                mailbox: "cc@203.0.113.9:9".to_string(),
+                relay_url: Some("http://203.0.113.9:10".to_string()),
+            }],
+        );
+        b.state.save_contact("carol", &carol_record).expect("save");
+        a.add_contact(
+            &ContactRecord::new(
+                vec![b.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(url.clone()),
+                }],
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+        b.endpoint.online().await;
+        let genesis = message(
+            &b.device,
+            vec![a.public_key(), carol.public()],
+            None,
+            vec![],
+            0,
+            0,
+        );
+        let conversation = genesis.id();
+        a.state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+        let received = [Received {
+            envelope: genesis.clone(),
+            relay: String::new(),
+            body: Ok(vec![]),
+        }];
+
+        // When
+        a.auto_who_is(&received).await;
+
+        // Then: C resolves with provenance — learned from a participant,
+        // with zero manual action
+        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).expect("resolve") else {
+            panic!("expected a learned candidate");
+        };
+        assert_eq!(names[0].name, "Carol");
+        assert_eq!(names[0].held_by, vec!["bob".to_string()]);
+
+        // And: the rate limit holds — wipe what was learned and re-run;
+        // nothing is re-asked this run
+        let learned_dir =
+            std::path::PathBuf::from(format!("{}.state", temp_key("autowho", "asker")))
+                .join("learned");
+        std::fs::remove_dir_all(&learned_dir).expect("wipe learned");
+        a.auto_who_is(&received).await;
+        assert!(
+            matches!(
+                a.resolve_name(carol.public()).expect("resolve"),
+                ResolvedName::Unknown
+            ),
+            "a second drain must not re-broadcast the query"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("autowho"));
+    }
+
+    #[tokio::test]
+    async fn auto_who_is__should_stay_silent_without_a_contributing_contact() {
+        // Given: a conversation authored only by a stranger — presence of
+        // A in `recipients` is the spammer-controlled part (groups.md §6)
+        let a = Client::open_or_create(&temp_key("nogate", "asker"))
+            .await
+            .expect("open");
+        let stranger = DeviceKey::from_seed([32; 32]);
+        let carol = DeviceKey::from_seed([33; 32]).public();
+        let genesis = message(&stranger, vec![a.public_key(), carol], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        a.state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+
+        // When
+        a.auto_who_is(&[Received {
+            envelope: genesis.clone(),
+            relay: String::new(),
+            body: Ok(vec![]),
+        }])
+        .await;
+
+        // Then: gated before the rate limit — no query was even recorded
+        assert!(a.queried.lock().expect("lock").is_empty());
+        assert!(matches!(
+            a.resolve_name(carol).expect("resolve"),
+            ResolvedName::Unknown
+        ));
+
+        let _ = std::fs::remove_dir_all(temp_root("nogate"));
     }
 
     #[tokio::test]

@@ -208,13 +208,18 @@ is attacker-controlled* — a spammer can list your friends for free —
   every registered recipient), so the e2e runs Carol on her own relay.
   All done-when criteria met, incl. the never-promoted member reached
   through a who-is-learned route.
-- **D2b · Scoped auto-query.** The `who_is` responder-scoped variant; the
-  post-drain trigger with the rate limit, gated on the contributing-contact
-  rule (§4, §6); who-is-this.md §5 revised. *Done when:* the plan's
-  acceptance headless — B adds C to a conversation with A; A's client
-  auto-learns C's record with zero manual action (`resolve_name` returns
-  the candidate), A adds C and replies to all; a conversation with no
-  contributing contact triggers no query.
+- **D2b · Scoped auto-query — done (2026-07-19).** `who_is_among`
+  (responder-scoped; `who_is` is now a thin wrapper over it with the
+  contact list as responders); `has_contributing_contact`; `auto_who_is`
+  at the drain seam (recv / catch-up / nudge, after `auto_sync`), gated +
+  rate-limited; who-is-this.md §5 revised (blockquote → resolved
+  carve-out). Responder ordering became moot — De3 made all dials
+  concurrent, so every participant is asked at once. e2e: the CLI
+  acceptance (bob adds carol, alice drains, carol resolves from the store
+  with bob offline, reply-to-all reaches her — zero manual identity work);
+  client-crate: learned-from-participant with provenance, the per-run rate
+  limit, and the no-contributing-contact gate short-circuiting before the
+  rate limit.
 - **D2c · Group UI.** Multi-select compose; add-to-conversation action;
   membership deltas + heads-based labels; the wild-Charlie popup with
   persisted dismissal (§5). *Done when:* a three-device (or

@@ -30,7 +30,7 @@ decision, not a missing feature).
 | Response payload | The **full record** (attestations *and* relays) — `who-is-this` is one of the three record-freshness channels SPEC §3.6 names, so rendezvous info must ride along. |
 | Serving policy | **Contacts-only, uniformly** — same gate as `get`/`get-successors`; strangers get `NotHeld` for every subject, including the responder's own keys. (The D0c note anticipated a *looser* per-op policy here; resolved the other way for maximum privacy. The gate stays per-op structurally — the policies just coincide.) |
 | Hop limit | 1, structurally: learned records are never re-served (§4), and there is no forwarding. No `hops` field on the wire — forwarding is a responder-side choice added at D4 via a version bump. |
-| Auto-query | None. Manual trigger only (§5). |
+| Auto-query | None against the contact list — manual trigger only (§5). *Revised at D2b (2026-07-19):* scoped auto-query of a conversation's own participants for its unknown members, gated + rate-limited (§5 carve-out; groups.md §4). |
 | Learned records | Stored **outside** the contact store, with provenance (§5) — they must never widen the D0c serving gate. Multiple records per subject is the data model, one per `(subject, responder)`. |
 | Record refresh | **Nothing is ever overwritten** (revised 2026-07-19 — an earlier draft auto-refreshed the stored record in place; rejected as needless mutation of a trust anchor). The contact store is never touched by network input; subject-served answers append to the learned store like any other, with provenance "the subject"; freshness is a **read-time** resolution (§7). |
 | Avatars | Content key travels **inside `Claim::Avatar`**, next to the blob hash; ciphertext on relay caches, key only ever on E2E channels (§8). |
@@ -78,14 +78,17 @@ command). Auto-querying on unknown-sender receipt would broadcast "I just got
 a message from X" to every contact asked; that's a live privacy leak for a
 marginal UX gain, so it's a deliberate non-goal, not a follow-up.
 
-> **Scoped revision pending (agreed 2026-07-19; lands with D2 · Groups).**
-> The blanket rule above is about *unsolicited senders*. Inside a
-> conversation, a key's presence in the signed `recipients` is already
-> mutual knowledge among participants — auto-querying *those participants*
-> about it reveals nothing they don't know. D2 revises this section with
-> that carve-out (query scoped to co-participants, or just the introducing
-> sender); manual control over the contact store stays absolute
-> (add-or-ignore), and the responder-side gate is unchanged.
+> **Scoped carve-out (resolved 2026-07-19; shipped with D2b — groups.md
+> §4).** The blanket rule above is about *unsolicited senders*, and it
+> stands for them. Inside a conversation, a key's presence in the signed
+> `recipients` is already mutual knowledge among participants — so
+> `who_is_among`, the responder-scoped variant, is auto-triggered after a
+> drain for unknown members of conversations passing the
+> contributing-contact rule (groups.md §6), asking **only that
+> conversation's participants**, rate-limited per (subject, conversation)
+> per run. The whole contact list is never auto-queried. Manual control
+> over the contact store stays absolute (add-or-ignore), and the
+> responder-side gate is unchanged.
 
 The flow, best-effort like every peer op:
 

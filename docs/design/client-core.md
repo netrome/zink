@@ -107,6 +107,13 @@ client.who_is(PublicKey) -> WhoIsOutcome      // dial every dialable contact AT 
 client.resolve_name(PublicKey) -> ResolvedName // petname > learned self-claims
                                               // (revision-ranked, provenance +
                                               // agreement surfaced) > Unknown
+client.who_is_among(PublicKey, &[PublicKey]) -> WhoIsOutcome
+                                              // responder-scoped who_is (D2b) — the
+                                              // auto-query's shape; also auto-run
+                                              // per drain for unknown members of
+                                              // legitimate conversations (gated by
+                                              // has_contributing_contact, rate-
+                                              // limited per (subject, conversation))
 // avatars (D1d, who-is-this.md §8): encrypt-once; the key rides inside the
 // signed Avatar claim (E2E channels only) — relays cache ciphertext.
 client.set_avatar(Vec<u8>) -> AvatarReceipt   // cache + claim at next revision +
