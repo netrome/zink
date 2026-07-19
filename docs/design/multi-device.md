@@ -10,17 +10,34 @@ deferred: the **mutual link** (who counts as the same person), the **re-wrap
 op** (reading history from before the key existed), and **send-to-self**
 (your own devices as implicit recipients).
 
+**The governing principle (sharpened at review, 2026-07-19): clustering is
+the observer's choice.** Identity is local belief (tenet 1): Alice may treat
+Bob's phone and laptop as two contacts, Carol may merge them — both are
+correct. Links are *advisory evidence*, never instructions; labels↔keys is
+many-to-many (one may even label several *people* "someone from the soccer
+team" — future latitude, §7). And **completeness is the owner's
+responsibility**: MY clients include MY devices in MY messages
+(send-to-self) and sync each other (own-device sync + re-wrap). Contacts'
+clients owe my devices nothing — their fan-out to my record's device set is
+robustness, never load-bearing. This dissolves what would otherwise be the
+hardest machinery: there is no key-adoption rule, because nobody else ever
+needs one — my devices join conversations through my own signed
+`recipients`, and the D2 pipeline does the rest.
+
 **Defensive framing, continued.** One new wire op (`GetKeys`), one new claim
 *use* (no new claim kinds), one new client store (own devices). If a step
-seems to need a device registry, a family key, a transfer protocol, or a
-pairing server — stop; it doesn't.
+seems to need a device registry, a family key, a transfer protocol, a
+pairing server — or *any behavior another client must adopt for my devices
+to work* — stop; it doesn't.
 
 ## 1. Goal & non-goals
 
-**Goal.** Pair a second device by QR; from then on it behaves as you: it
-receives what you receive (contacts fan out to your device set), what you
-send from either device lands on both, contacts' clients render both keys
-as one person, and the new device can *read* history from before it existed.
+**Goal.** Pair a second device by QR; from then on *my clients* make it
+behave as me: everything I send from either device lands on both
+(send-to-self), it joins my conversations through my own signed
+`recipients`, it can *read* history from before it existed (re-wrap), and
+contacts' clients get honest *evidence* to cluster both keys as one person
+— if and how they render that is theirs.
 
 **Non-goals (deferred, with homes):** repudiation / lost-device recovery
 (`Negative` claims + the social flow — D4/post-MVP; the repudiation-lag note
@@ -37,10 +54,10 @@ UX and tests target the pair case); any auto-pairing or device discovery
 | Link shape | `Attestation { attester: K, subject: K, claim: SamePersonAs(L) }` — "I, K, am the same person as L". **Mutual** = both directions exist and verify (K→L and L→K); unilateral links are rendered but never trusted for clustering (SPEC §3.2 weights mutual above unilateral — an attacker can always *claim* your key). |
 | Where links live | In the **record's** `attestations`, like name/avatar claims (SPEC §3.6 says exactly this). The record becomes the *person record*: `keys` lists the device set, attestations carry both link directions once held. |
 | Pairing flow | Two scans, reusing the C2 exchange in an explicit **pair mode** (§3) — no pairing server, no new wire op. The link exchange completes over the existing who-is freshness machinery. |
-| Contact identity | Fixed from `keys.first()` to **key-overlap** (§4) — the parked review note lands here. |
-| Device-set adoption for contacts | A record's *added* keys are auto-adopted iff mutually linked to an already-trusted key (§4) — this is the evaluation D1b deferred ("sealing keys only from the user-added record **until D3**"). Anything else stays evidence in the learned store. |
-| Send-to-self | Own other devices are appended to every send's `recipients` and deposited like any recipient (§5) — devices are honest conversation members (they render clustered, §7). The SPEC §6 note gets recorded when this lands. |
-| New-device bootstrap | No enumeration op: the old device **introduces** the new key per conversation with the D2c add-member gesture (§5). Membership machinery is the transfer protocol. |
+| Contact identity | Fixed from `keys.first()` to **key-overlap** (§4) — the parked review note lands here. A contact entry is the observer's local grouping of keys under a petname; the record inside it is evidence, not authority. |
+| Key adoption by contacts | **None — automatic adoption is rejected** (the review's simplification). Sealing rules are unchanged from D1b/D2 (user-added records + signed cores); my devices reach contacts' sealing sets through *my* recipients lists, not through their evaluation of my claims. Updating a contact entry stays the one explicit act, now popup-assisted with link evidence (§7). D1b's "key-set changes wait for D3" resolves as: *they stay explicit forever; D3 adds the evidence.* |
+| Send-to-self | **The core mechanism.** Own other devices are appended to every send's `recipients` and deposited like any recipient (§5) — devices are honest conversation members, joined by their owner's signature. The SPEC §6 note gets recorded when this lands. |
+| New-device bootstrap | Lazy by default: send-to-self makes the *next organic message* per conversation carry the new key — no enumeration op, no new mechanism. An optional "introduce now" button (the D2c add-member gesture per conversation) is pure UX sugar for the impatient (§5). |
 | Re-wrap | `SyncOp::GetKeys { ids }` → per-id `KeyWrap`s re-sealed to the caller (§6); served to **own devices only** at D3. Wraps append outside the hashed core — ids never move. |
 | Gate extension | The D0c `serves` self-allowance widens from `caller == me` to `caller ∈ my verified device cluster` (§6) — evaluated against the local own-device store, never against claims in the request. |
 
@@ -74,21 +91,23 @@ keeps the deliberate act deliberate.
 ## 4. The person record & contact identity
 
 - **`my_record`** gains: the own-device keys in `keys`, my `SamePersonAs`
-  links, and (once held) the partners' links. Contacts holding the fresh
-  record fan out to the whole device set with the existing B2 machinery —
-  `send` already seals to every key of a `Contact`.
+  links, and (once held) the partners' links. This is an *offer* of how to
+  address me — a contact holding the fresh record fans out to the whole set
+  (B2 machinery; `send` already seals to every key of a `Contact`), which
+  is welcome robustness but never required: my devices' completeness is my
+  clients' job (§5, §6).
 - **Contact identity = key overlap** (the parked `keys.first()` fix):
   `add_contact` and the petname-collision check identify an existing contact
   by *any shared key*; a re-scan with reordered or added keys updates that
   contact instead of forking a duplicate. The store stem is re-derived from
   the updated record; the petname is untouched.
-- **Adoption rule** (the D1b deferral, resolved): when a fresh record for a
-  known contact arrives (re-scan, who-is answer), keys *added* relative to
-  the stored record are trusted for sealing iff a **mutual link between the
-  added key and an already-trusted key verifies** — the attacker who can't
-  make your friend's device sign their key gets nothing. Records failing
-  the rule stay in the learned store as evidence (D1b semantics unchanged);
-  the popup can still offer them as a *separate* person.
+- **No adoption rule.** Updating a contact's entry with a fresh record
+  remains the one explicit act it has always been (`add_contact` — re-scan,
+  paste, or the popup's one-tap offer). What D3 adds is *evidence quality*:
+  the offer can say "these keys are mutually linked, verified" vs "this
+  record merely lists an extra key". The observer decides; nothing updates
+  itself. (D1b's "key-set changes wait for D3" resolves as: they stay
+  explicit forever — D3 supplies the evidence, not the automation.)
 
 ## 5. Send-to-self & the introduction
 
@@ -99,15 +118,15 @@ keeps the deliberate act deliberate.
   recipient. Each device keeps its own `seq` per conversation (already
   per-sender-key). The C3 self-wrap stays — it's what lets the *sending*
   device reopen its copy; deposits are for the *other* devices.
-- **Introduction**: after pairing, the old device offers "bring the new
-  device into my conversations" — for each active conversation, one
-  add-member message (D2c gesture, empty body allowed). Contacts' clients
-  see the new key in the signed `recipients`, auto-query scoped to the
-  conversation (D2b), learn the person record, and cluster (§7). The new
-  device receives from that message onward; D0 auto-sync heals the skeleton;
-  §6 re-wraps make the backlog readable. Lazy alternative (include the new
-  key starting with the next organic message) stays available by just not
-  pressing the button.
+- **The new device joins lazily and automatically**: because send-to-self
+  appends own devices to *every* send, the next organic message in each
+  conversation carries the new key into the signed `recipients` — contacts'
+  clients then run the ordinary D2 pipeline (scoped auto-query → evidence →
+  their choice). No introduction mechanism exists; an optional "introduce
+  now" button (one empty-body add-member message per conversation, the D2c
+  gesture) is UX sugar for the impatient. Either way the new device
+  receives from its first inclusion onward; D0 auto-sync heals the
+  skeleton; §6 re-wraps make the backlog readable — all owner-side.
 
 ## 6. Re-wrap: `GetKeys` and the gate extension
 
@@ -148,19 +167,31 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 - **The popup upgrade** (groups.md §5 hand-off): before rendering "a wild
   key appeared", check the D2b-learned records: if one contains the unknown
   key AND an already-trusted key of contact P, with **mutual links
-  verifying**, render *"P added a device"* with a one-tap "update P's
-  contact entry" (the §4 adoption applied). Otherwise the wild-key flow is
-  unchanged. `same-person-as` evaluation enters here and in §4/§6 — nowhere
-  else.
+  verifying**, render *"P added a device (mutually verified)"* with a
+  one-tap **offer** to update P's contact entry — the same explicit
+  `add_contact` act, popup-assisted. Declining is fine: the key stays a
+  separate (hex or wild) entry, and messages still flow — nothing depends
+  on the observer merging. `same-person-as` evaluation enters here and in
+  the §6 gate — nowhere else.
 - **Membership deltas**: "+ Alice's new device" renders via the same
   clustering (a joined key that clusters to a known person labels as that
   person).
+- **Many-to-many latitude (future, parked)**: labels↔keys is the observer's
+  many-to-many relation — merging several *people* under one label
+  ("someone from the soccer team") is a legitimate client policy this
+  model must not preclude. The one current hardening against it is the
+  petname-collision check (one petname → one record, so send-by-name stays
+  unambiguous); relaxing it means separating *display labels* from
+  *addressing names* — deliberate future work, nothing in D3 makes it
+  harder.
 
 ## 8. Security notes
 
-- **Mutual-or-nothing**: unilateral links never cluster, never adopt keys,
-  never widen the gate. A stolen record can't be upgraded into a device
-  claim without both signatures.
+- **Mutual-or-nothing**: unilateral links never rank as verified evidence
+  and never widen the gate. A stolen record can't be upgraded into a
+  device claim without both signatures. And since nothing auto-adopts,
+  even a verified link only ever produces an *offer* on other people's
+  screens.
 - **Local trust anchors**: the own-devices store is written only by the
   pairing flow (explicit scans + confirms on both sides); serving decisions
   read it, never the wire.
@@ -189,11 +220,12 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   (dev shape TBD at implementation). *Done when:* headless e2e — two
   clients pair; both `my_record`s list both keys with mutual links; the
   partner is served by the gate like self.
-- **D3c · Send-to-self + introduction + clustering.** Recipients gain own
-  devices; introduction action (add-member per conversation); §4 adoption +
-  §7 popup upgrade. *Done when:* headless e2e — a contact's client renders
-  the introduced key as "P added a device", adopts on tap, and both of P's
-  devices receive the contact's reply.
+- **D3c · Send-to-self + clustering offers.** Recipients gain own devices
+  (the core mechanism); §7 popup upgrade (evidence-ranked offer, explicit
+  accept); optional introduce-now sugar. *Done when:* headless e2e — after
+  pairing, P's next message carries both keys; the contact's client
+  renders "P added a device" evidence and, on the explicit accept, both of
+  P's devices receive the contact's reply.
 - **D3d · Re-wrap.** `GetKeys` op + serve/request sides + wrap-append
   storage; opportunistic run after pairing/sync. *Done when:* headless e2e
   — the paired device reads bodies from before it existed (the D2a-style
@@ -208,7 +240,7 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 - SPEC §6: record the full send-to-self (the C3 note's pending line) (D3c).
 - SPEC §11: pin `GetKeys` shape + own-device-only serving (D3d).
 - client-core.md: pairing APIs, own-devices store, gate rule (D3b–d).
-- who-is-this.md §7: the adoption rule supersedes "key-set changes wait for
-  D3" (D3c).
+- who-is-this.md §7: resolve "key-set changes wait for D3" as
+  explicit-forever, evidence-assisted (D3c).
 - groups.md §5: popup upgrade cross-reference (D3c).
 - mvp-build-plan.md: tick sub-slices as they land.

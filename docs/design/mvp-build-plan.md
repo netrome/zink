@@ -779,15 +779,21 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   extension; send-to-self deposits; the parked `keys.first()` fix. *Done
   when:* pair a second device, introduce it, contacts' clients cluster it
   under the person, and it reads old history via re-wrap. Design:
-  [multi-device.md](./multi-device.md) (drafted 2026-07-19 — mutual-or-
-  nothing links in the person record; pairing = the C2 two-scan exchange in
-  an explicit confirm-before-signing pair mode, completed over who-is
-  freshness; contact identity moves to key-overlap; the adoption rule
-  resolves D1b's deferral: added keys are sealed to iff mutually linked to
-  an already-trusted key; the introduction reuses the D2c add-member gesture
-  — membership machinery IS the transfer protocol, no enumeration op;
-  `GetKeys` re-wraps served to own devices only; sibling devices primary,
-  contacts' fan-out never load-bearing; repudiation lag parked with D4).*
+  [multi-device.md](./multi-device.md) (drafted + sharpened at review
+  2026-07-19 — **clustering is the observer's choice**: identity is local
+  belief, links are advisory evidence, labels↔keys is many-to-many, and
+  **completeness is the owner's responsibility** — my clients include my
+  devices in my messages (send-to-self, the core mechanism) and sync each
+  other; no key-adoption rule exists, because nobody else needs one: my
+  devices join conversations through my own signed `recipients` and the D2
+  pipeline does the rest. Pairing = the C2 two-scan exchange in an explicit
+  confirm-before-signing pair mode, completed over who-is freshness; contact
+  identity moves to key-overlap; contact-entry updates stay explicit forever
+  — D3 adds mutual-link *evidence* to the popup's offer, never automation;
+  new-device bootstrap is lazy via send-to-self (introduce-now is optional
+  sugar); `GetKeys` re-wraps served to own devices only; sibling devices
+  primary, contacts' fan-out never load-bearing; repudiation lag +
+  labels-vs-addressing-names relaxation parked).*
   - [ ] **D3a · Identity core.** `ContactRecord::device_cluster()` (verified
     mutual links); the key-overlap contact-identity + collision fix; label
     dedup per cluster. *Done when:* mutual links cluster, unilateral/forged
@@ -798,11 +804,12 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     completion query); D0c gate: own cluster counts as self; CLI pair
     commands. *Done when:* headless e2e — two clients pair, both records
     list both keys with mutual links, the partner is served like self.
-  - [ ] **D3c · Send-to-self + introduction + clustering.** Recipients gain
-    own devices; introduce-per-conversation action; adoption + the popup
-    upgrade ("P added a device"). *Done when:* headless e2e — a contact
-    clusters the introduced key, adopts on tap, and both devices of P get
-    the contact's reply.
+  - [ ] **D3c · Send-to-self + clustering offers.** Recipients gain own
+    devices (the core mechanism); the popup upgrade — "P added a device
+    (mutually verified)" as an evidence-ranked *offer*, accepted explicitly;
+    introduce-now as optional sugar. *Done when:* headless e2e — after
+    pairing, P's next message carries both keys; the contact accepts the
+    offer and both of P's devices receive the reply.
   - [ ] **D3d · Re-wrap.** `SyncOp::GetKeys { ids }` → wraps re-sealed to
     the caller (own devices only); wrap-append storage; opportunistic run
     after pairing/sync. *Done when:* headless e2e — the paired device reads
