@@ -137,7 +137,7 @@ async fn reply__should_thread_into_the_conversation_and_skip_unknown_participant
     let replied = stdout_of(&output);
     assert!(replied.contains("to 1 relay(s)"), "got: {replied}");
     assert!(
-        stderr.contains(&pubkey_c[..8]) && stderr.contains("no contact record"),
+        stderr.contains(&pubkey_c[..8]) && stderr.contains("no route for participant"),
         "unknown participant not surfaced: {stderr}"
     );
 

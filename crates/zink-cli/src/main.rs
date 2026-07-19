@@ -76,7 +76,7 @@ const USAGE: &str = "usage:
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
   zink-cli conversations --key <file>
   zink-cli history --key <file> [--blobs-dir <dir>] <conversation-id | prefix>
-  zink-cli reply --key <file> <conversation-id | prefix> <text>
+  zink-cli reply --key <file> [--add <petname> ...] <conversation-id | prefix> <text>
   zink-cli listen --key <file> [--relay <relay> ...]
   zink-cli backfill --key <file> <conversation-id | prefix>
                     <peer-addr | petname | pubkey-hex>
@@ -344,6 +344,13 @@ async fn history(args: &[String]) -> Result<(), String> {
         } else {
             label(&contacts, &message.sender)
         };
+        // Membership deltas (groups.md §2) — derived, rendered inline.
+        for key in &message.joined {
+            println!("  [+ {}]", label(&contacts, key));
+        }
+        for key in &message.left {
+            println!("  [- {}]", label(&contacts, key));
+        }
         let pending = if message.pending { " [pending]" } else { "" };
         match &message.body {
             Ok(plaintext) => println!("{from}: {}{pending}", String::from_utf8_lossy(plaintext)),
@@ -383,20 +390,22 @@ async fn reply(args: &[String]) -> Result<(), String> {
     let resolved = client.reply_contacts(conversation)?;
     for key in &resolved.unknown {
         eprintln!(
-            "warning: no contact record for participant {} — they will not receive this reply",
+            "warning: no route for participant {} — they stay a recipient \
+             (membership holds) but receive nothing until a route is learned",
             &hex::encode(&key.0)[..8]
         );
     }
-    if resolved.contacts.is_empty() {
-        return Err("no reachable participants — add their contact records first".into());
+    // --add grows the recipient set (groups.md §2): the signed recipients
+    // list is the membership announcement — no other mechanism exists.
+    let mut contacts = resolved.contacts;
+    for petname in values(&flags, "--add") {
+        contacts.push(client.resolve_contact(&petname)?);
+    }
+    if contacts.iter().all(|contact| contact.relays.is_empty()) {
+        return Err("no routable participants — add or learn their records first".into());
     }
     let receipt = client
-        .send_in(
-            conversation,
-            &resolved.contacts,
-            text.clone().into_bytes(),
-            vec![],
-        )
+        .send_in(conversation, &contacts, text.clone().into_bytes(), vec![])
         .await?;
     println!(
         "replied in {} (seq {}) to {} relay(s){}",

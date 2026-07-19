@@ -78,8 +78,15 @@ alternative — dropping non-contacts from the reply set — makes membership
 viewer-dependent and interacts badly with the heads rule: one skeptical
 participant's reply, as the momentary sole head, would shrink the group for
 *everyone*. Removal stays a deliberate act (stop-including), never a side
-effect of not trusting. A member with no route at all (auto-query failed —
-the gate limit, §4) stays in `unknown`, surfaced, best-effort.
+effect of not trusting. A member with **no route at all** (auto-query
+failed — the gate limit, §4) **stays in the sealed `recipients`
+regardless** — sealing needs only the key; only *delivery* is skipped.
+Dropping them from the signed list would shrink membership for everyone
+through this reply's head — the same accidental-removal hazard, arriving
+via routelessness instead of distrust (caught by the D2a e2e, 2026-07-19).
+Membership is not deliverability: their copy stays fetchable via peer sync
+once they have a route; the edge surfaces them as `unknown`, and only an
+*all*-unroutable set refuses the send.
 
 ## 3. The participant-set index fix
 
@@ -190,17 +197,17 @@ is attacker-controlled* — a spammer can list your friends for free —
 
 ## 8. Slices
 
-- **D2a · Membership core + index fix.** Heads-based membership (one
-  helper: conversation → participant set, DAG-first with union fallback)
-  feeding `reply_contacts` + `ConversationSummary`; membership-delta info
-  on `HistoryMessage`; the `send_in` index fix (§3); `reply_contacts`
-  routes non-contact members via learned records (§2 — `unknown` only when
-  no route exists at all). CLI already creates groups (`send --to X --to
-  Y`). *Done when:* headless e2e — a 3-party conversation where a member
-  is added mid-conversation: everyone (including the adder, by name — the
-  regression) threads one conversation; a stop-including reply shrinks the
-  reply set; a reply reaches a non-contact member through a learned route;
-  delta lines derived correctly.
+- **D2a · Membership core + index fix — done (2026-07-19).** Heads-based
+  membership (one helper, DAG-first with union fallback) feeding
+  `reply_contacts` + `ConversationSummary`; `HistoryMessage.{joined,left}`;
+  the index fix landed in `finish_send` (every send records its sealed
+  core's set — strictly more general than patching `send_in`); CLI
+  `reply --add` + delta lines. The e2e sharpened §2: unroutable members
+  stay in the sealed `recipients` (dropping them shrank membership through
+  that head), and a shared relay masks routelessness (deposits fan out to
+  every registered recipient), so the e2e runs Carol on her own relay.
+  All done-when criteria met, incl. the never-promoted member reached
+  through a who-is-learned route.
 - **D2b · Scoped auto-query.** The `who_is` responder-scoped variant; the
   post-drain trigger with the rate limit, gated on the contributing-contact
   rule (§4, §6); who-is-this.md §5 revised. *Done when:* the plan's

@@ -648,12 +648,34 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   merely listed — authorship is unforgeable), triaged at presentation and
   gating the auto-query, never storage; the responder-side-gate limit
   documented; SPEC untouched end to end).
-  - [ ] **D2a · Membership core + index fix.** Heads-based membership feeding
+  - [x] **D2a · Membership core + index fix.** Heads-based membership feeding
     `reply_contacts` + summaries (union-fallback when the DAG can't build);
     membership-delta info on history; `send_in` updates the participant-set
     index like `remember` does. *Done when:* headless e2e — add-member with
     everyone (including the adder, by name) threading one conversation; a
     stop-including reply shrinks the reply set; delta lines derived.
+    ✅ *(2026-07-19: `Client::membership` + heads-based `reply_contacts` /
+    `ConversationSummary.participants`; `HistoryMessage.{joined,left}`
+    derived per message vs held parents (empty for genesis / partial view);
+    the index fix moved into `finish_send` — every send now records its
+    sealed core's participant set, mirroring `remember`, so the old
+    only-on-create param is gone. CLI: `reply --add <petname>` (the grow
+    gesture) + `[+ x]`/`[- x]` delta lines in `history`. **Design sharpened
+    by the e2e** (groups.md §2 updated): a member with no route must STAY in
+    the sealed `recipients` — dropping them shrank membership for everyone
+    through that reply's head, the §2 hazard arriving via routelessness
+    instead of distrust; membership ≠ deliverability, so they're sealed to,
+    surfaced as `unknown`, delivered nothing until a route is learned (their
+    copy heals via peer sync), and only an all-unroutable set refuses the
+    send. Also observed: a *shared* relay masks routelessness — deposits fan
+    out to every registered recipient in the envelope, so the no-route case
+    only manifests across distinct relays (the e2e gives Carol her own).
+    e2e `groups.rs`: 1:1 grows via `reply --add`; the adder's send-by-name
+    threads (fork regression, both ends); Bob reaches never-promoted Carol
+    through a who-is-learned route; stop-include shrinks the reply set with
+    no fork. Client-crate: heads-vs-union membership incl. concurrent-head
+    union, delta derivation, the grown-set index mapping recorded even when
+    every relay is down.)*
   - [ ] **D2b · Scoped auto-query.** Responder-scoped `who_is` variant; the
     post-drain trigger (auto_sync's seam) with the rate limit;
     who-is-this.md §5 revised. *Done when:* the acceptance flow headless —

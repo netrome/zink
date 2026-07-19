@@ -322,8 +322,14 @@ async fn send_message(
         (Some(conversation), _) => {
             let conversation = parse_id(&conversation)?;
             let resolved = client.reply_contacts(conversation)?;
-            if resolved.contacts.is_empty() {
-                return Err("no reachable participants — add their contacts first".into());
+            // Unroutable members stay recipients (groups.md §2 — membership
+            // is not deliverability); only an all-unroutable set is an error.
+            if resolved
+                .contacts
+                .iter()
+                .all(|contact| contact.relays.is_empty())
+            {
+                return Err("no routable participants — add their contacts first".into());
             }
             client
                 .send_in(conversation, &resolved.contacts, text.into_bytes(), blobs)

@@ -163,8 +163,7 @@ impl Client {
                 blobs: vec![],
             },
         };
-        let record_mapping = existing.is_none().then_some(&participants);
-        self.finish_send(draft, plaintext, blob_drafts, contacts, record_mapping)
+        self.finish_send(draft, plaintext, blob_drafts, contacts)
             .await
     }
 
@@ -183,49 +182,46 @@ impl Client {
         }
         let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
         let draft = self.threaded_draft(conversation, recipients)?;
-        self.finish_send(draft, plaintext, blob_drafts, contacts, None)
+        self.finish_send(draft, plaintext, blob_drafts, contacts)
             .await
     }
 
-    /// Whom a reply in this conversation goes to: every participant except
-    /// this device, resolved through the contact store. Participants with
-    /// no stored record are returned as `unknown` — there is no relay to
-    /// reach them at, so a reply is best-effort by design (the edge decides
-    /// how loudly to say so).
+    /// Whom a reply in this conversation goes to: the current membership
+    /// (heads-based, groups.md §2) minus this device. A member resolves to
+    /// a route through their contact record **or learned records** —
+    /// address, don't trust (§2): promotion to a contact is never required
+    /// to keep a group whole. A member with no route at all is STILL a
+    /// recipient (empty relays: sealed to, delivered nowhere) — dropping
+    /// them from the signed recipients would shrink membership for
+    /// everyone through this reply's head. Membership is not
+    /// deliverability: their copy stays fetchable via peer sync once they
+    /// have a route. Such keys are also listed in `unknown`, so the edge
+    /// can say so.
     pub fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, Error> {
         let me = self.device.public();
-        let participants: BTreeSet<PublicKey> = self
-            .state
-            .load_envelopes(conversation)?
-            .iter()
-            .flat_map(|envelope| {
-                envelope
-                    .core
-                    .recipients
-                    .iter()
-                    .copied()
-                    .chain([envelope.core.sender])
-            })
-            .filter(|key| *key != me)
-            .collect();
         let records = self.state.contacts()?;
         let mut contacts = Vec::new();
         let mut unknown = Vec::new();
-        for key in participants {
-            match records
+        for key in self.membership(conversation)? {
+            if key == me {
+                continue;
+            }
+            let stored = records
                 .iter()
                 .find(|(_, record)| record.keys.contains(&key))
-            {
-                Some((_, record)) => contacts.push(Contact {
-                    keys: vec![key],
-                    relays: self
-                        .effective_relays(key, record)
-                        .into_iter()
-                        .map(|entry| entry.mailbox)
-                        .collect(),
-                }),
-                None => unknown.push(key),
+                .map(|(_, record)| record);
+            let relays: Vec<String> = self
+                .effective_relays(key, stored)
+                .into_iter()
+                .map(|entry| entry.mailbox)
+                .collect();
+            if relays.is_empty() {
+                unknown.push(key);
             }
+            contacts.push(Contact {
+                keys: vec![key],
+                relays,
+            });
         }
         Ok(ReplyContacts { contacts, unknown })
     }
@@ -262,7 +258,6 @@ impl Client {
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
         contacts: &[Contact],
-        record_mapping: Option<&BTreeSet<PublicKey>>,
     ) -> Result<SendReceipt, Error> {
         // NOTE: the outbox is NOT flushed here. Flushing on the send path
         // coupled a new message's latency to the health of the *backlog* —
@@ -279,9 +274,14 @@ impl Client {
         let id = sealed.envelope.id();
         let conversation = existing.unwrap_or(id);
         self.state.store_envelope(conversation, &sealed.envelope)?;
-        if let Some(participants) = record_mapping {
-            self.state.record_conversation(participants, conversation)?;
-        }
+        // The participant-set index (groups.md §3): every send maps its
+        // message's set -> conversation, exactly like `remember` does on
+        // receipt -- sender and receivers agree by construction, so adding
+        // a member via a reply can't artifact-fork the adder's next
+        // send-by-name. Latest writer wins per set.
+        let participants: BTreeSet<PublicKey> = participants_of(&sealed.envelope).collect();
+        self.state
+            .record_conversation(&participants, conversation)?;
         // Own blobs go straight into the local cache: they get pushed to the
         // *recipients'* relays, so this is the only place we can refetch
         // them from when rendering our own history.
@@ -661,6 +661,40 @@ impl Client {
         Err(Error::BlobUnavailable(last_error))
     }
 
+    /// A conversation's current membership (groups.md §2): the union over
+    /// the DAG heads of each head's `recipients` ∪ `sender` — membership
+    /// is a lens on the DAG, never an object. Adding someone = a message
+    /// that includes them (the next heads carry them); stop-including
+    /// shrinks it; concurrent heads union — honest over-inclusion that
+    /// converges when the fork merges.
+    pub fn membership(&self, conversation: MessageId) -> Result<BTreeSet<PublicKey>, Error> {
+        Ok(self.membership_of(conversation, &self.state.load_envelopes(conversation)?))
+    }
+
+    /// `membership` over already-loaded envelopes. When the DAG can't
+    /// build (missing genesis — the pre-heal window), falls back to the
+    /// union over every stored message: best-effort, converges with sync.
+    fn membership_of(
+        &self,
+        conversation: MessageId,
+        envelopes: &[MessageEnvelope],
+    ) -> BTreeSet<PublicKey> {
+        let heads = self
+            .state
+            .load_dag(conversation)
+            .ok()
+            .map(|dag| dag.heads());
+        envelopes
+            .iter()
+            .filter(|envelope| {
+                heads
+                    .as_ref()
+                    .is_none_or(|heads| heads.contains(&envelope.id()))
+            })
+            .flat_map(participants_of)
+            .collect()
+    }
+
     /// Every stored conversation, newest first (by wall-clock hint — a
     /// display ordering, like everything timestamp-based).
     pub fn conversations(&self) -> Result<Vec<ConversationSummary>, Error> {
@@ -670,17 +704,7 @@ impl Client {
             if envelopes.is_empty() {
                 continue;
             }
-            let participants: BTreeSet<PublicKey> = envelopes
-                .iter()
-                .flat_map(|envelope| {
-                    envelope
-                        .core
-                        .recipients
-                        .iter()
-                        .copied()
-                        .chain([envelope.core.sender])
-                })
-                .collect();
+            let participants = self.membership_of(id, &envelopes);
             summaries.push(ConversationSummary {
                 id,
                 participants: participants.into_iter().collect(),
@@ -714,6 +738,7 @@ impl Client {
             .filter_map(|id| by_id.get(id))
             .map(|envelope| {
                 let id = envelope.id();
+                let (joined, left) = membership_delta(envelope, &by_id);
                 HistoryMessage {
                     id,
                     sender: envelope.core.sender,
@@ -721,6 +746,8 @@ impl Client {
                     body: envelope.open(&self.device),
                     blob_refs: envelope.core.blob_refs.clone(),
                     pending: pending.contains(&id),
+                    joined,
+                    left,
                 }
             })
             .collect())
@@ -858,7 +885,7 @@ impl Client {
     /// Keys from the stored record; relays resolved at read time (§7).
     fn contact_from(&self, record: &ContactRecord) -> Contact {
         let relays = match record.keys.first() {
-            Some(&key) => self.effective_relays(key, record),
+            Some(&key) => self.effective_relays(key, Some(record)),
             None => record.relays.clone(),
         };
         Contact {
@@ -875,7 +902,7 @@ impl Client {
     /// **contact-served** hearsay (only ever decisive in the one-way-add
     /// bootstrap, where it's the whole point). Keys never come from
     /// learned records — sealing stays on the user-added record until D3.
-    fn effective_relays(&self, key: PublicKey, stored: &ContactRecord) -> Vec<RelayEntry> {
+    fn effective_relays(&self, key: PublicKey, stored: Option<&ContactRecord>) -> Vec<RelayEntry> {
         let learned = self.state.learned(&key);
         let best = |from_subject: bool| {
             learned
@@ -886,7 +913,11 @@ impl Client {
                 .map(|entry| entry.record.relays.clone())
         };
         best(true)
-            .or_else(|| (!stored.relays.is_empty()).then(|| stored.relays.clone()))
+            .or_else(|| {
+                stored
+                    .filter(|record| !record.relays.is_empty())
+                    .map(|record| record.relays.clone())
+            })
             .or_else(|| best(false))
             .unwrap_or_default()
     }
@@ -899,7 +930,7 @@ impl Client {
         stored: &ContactRecord,
     ) -> Result<iroh::EndpointAddr, Error> {
         let relay_urls: Vec<iroh::RelayUrl> = self
-            .effective_relays(key, stored)
+            .effective_relays(key, Some(stored))
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref())
             .map(net::parse_relay_url)
@@ -1582,8 +1613,9 @@ pub struct ReplyContacts {
 /// naming them is the edge's policy (petnames, hex, whatever).
 pub struct ConversationSummary {
     pub id: MessageId,
-    /// Every key seen in the conversation (senders ∪ recipients), sorted;
-    /// includes this device.
+    /// The current membership — heads-based (groups.md §2), sorted;
+    /// includes this device. Union over all messages when the DAG can't
+    /// build yet (pre-heal partial view).
     pub participants: Vec<PublicKey>,
     pub message_count: usize,
     /// Largest wall-clock hint seen — display ordering only, never trusted.
@@ -1601,6 +1633,51 @@ pub struct HistoryMessage {
     /// True while ≥1 relay is still owed this message (outbox entry
     /// present) — including entries past the give-up window (undelivered).
     pub pending: bool,
+    /// Membership delta vs this message's parents (groups.md §2): keys
+    /// this message added to / dropped from the addressed set — derived
+    /// from the signed cores, not a message type. Empty for the genesis
+    /// and when no parent is held (partial view).
+    pub joined: Vec<PublicKey>,
+    pub left: Vec<PublicKey>,
+}
+
+/// One message's participant set: `recipients` ∪ `sender` (signed core).
+fn participants_of(envelope: &MessageEnvelope) -> impl Iterator<Item = PublicKey> + '_ {
+    envelope
+        .core
+        .recipients
+        .iter()
+        .copied()
+        .chain([envelope.core.sender])
+}
+
+/// This message's membership delta vs its parents — `(joined, left)`,
+/// derived from signed cores (groups.md §2), never a message type. Empty
+/// for the genesis and when no parent is held (partial view — honest
+/// silence over guessing).
+fn membership_delta(
+    envelope: &MessageEnvelope,
+    by_id: &BTreeMap<MessageId, &MessageEnvelope>,
+) -> (Vec<PublicKey>, Vec<PublicKey>) {
+    let held_parents: Vec<&MessageEnvelope> = envelope
+        .core
+        .parents
+        .iter()
+        .filter_map(|parent| by_id.get(parent).copied())
+        .collect();
+    if held_parents.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let before: BTreeSet<PublicKey> = held_parents
+        .iter()
+        .copied()
+        .flat_map(participants_of)
+        .collect();
+    let now: BTreeSet<PublicKey> = participants_of(envelope).collect();
+    (
+        now.difference(&before).copied().collect(),
+        before.difference(&now).copied().collect(),
+    )
 }
 
 fn now_ms() -> u64 {
@@ -1655,6 +1732,178 @@ mod tests {
             envelopes.push(MessageEnvelope::new(core, author));
         }
         envelopes
+    }
+
+    /// One signed message with an explicit shape — the group-membership
+    /// tests need varying recipient sets and forks (bodies empty, never
+    /// opened).
+    fn message(
+        author: &DeviceKey,
+        recipients: Vec<PublicKey>,
+        conversation: Option<MessageId>,
+        parents: Vec<MessageId>,
+        seq: u64,
+        logical: u64,
+    ) -> MessageEnvelope {
+        MessageEnvelope::new(
+            MessageCore {
+                version: FORMAT_VERSION,
+                conversation,
+                parents,
+                recipients,
+                sender: author.public(),
+                seq,
+                logical,
+                timestamp_ms: 0,
+                body: vec![],
+                key_commit: KeyCommitment([0; 32]),
+                blob_refs: vec![],
+            },
+            author,
+        )
+    }
+
+    #[tokio::test]
+    async fn membership__should_follow_the_heads_not_the_full_history() {
+        // Given: A→{B}; A adds C; A stops including C
+        let client = Client::open_or_create(&temp_key("members", "viewer"))
+            .await
+            .expect("open");
+        let a = DeviceKey::from_seed([1; 32]);
+        let b = DeviceKey::from_seed([2; 32]);
+        let (pa, pb) = (a.public(), b.public());
+        let pc = DeviceKey::from_seed([3; 32]).public();
+        let genesis = message(&a, vec![pb], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        let add = message(
+            &a,
+            vec![pb, pc],
+            Some(conversation),
+            vec![genesis.id()],
+            1,
+            1,
+        );
+        let drop_c = message(&a, vec![pb], Some(conversation), vec![add.id()], 2, 2);
+        for envelope in [&genesis, &add, &drop_c] {
+            client
+                .state
+                .store_envelope(conversation, envelope)
+                .expect("store");
+        }
+
+        // Then: the sole head excludes C — membership shrank (a full-
+        // history union could never)
+        assert_eq!(
+            client.membership(conversation).expect("membership"),
+            BTreeSet::from([pa, pb])
+        );
+
+        // When: a concurrent head (B replying off the add) still holds C
+        let fork = message(&b, vec![pa, pc], Some(conversation), vec![add.id()], 0, 2);
+        client
+            .state
+            .store_envelope(conversation, &fork)
+            .expect("store fork");
+
+        // Then: heads union — honest over-inclusion until the fork merges
+        assert_eq!(
+            client.membership(conversation).expect("membership"),
+            BTreeSet::from([pa, pb, pc])
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("members"));
+    }
+
+    #[tokio::test]
+    async fn history__should_derive_membership_deltas_from_signed_cores() {
+        // Given: A→{B}, then C added, then C stop-included
+        let client = Client::open_or_create(&temp_key("deltas", "viewer"))
+            .await
+            .expect("open");
+        let a = DeviceKey::from_seed([1; 32]);
+        let pb = DeviceKey::from_seed([2; 32]).public();
+        let pc = DeviceKey::from_seed([3; 32]).public();
+        let genesis = message(&a, vec![pb], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        let add = message(
+            &a,
+            vec![pb, pc],
+            Some(conversation),
+            vec![genesis.id()],
+            1,
+            1,
+        );
+        let drop_c = message(&a, vec![pb], Some(conversation), vec![add.id()], 2, 2);
+        for envelope in [&genesis, &add, &drop_c] {
+            client
+                .state
+                .store_envelope(conversation, envelope)
+                .expect("store");
+        }
+
+        // When
+        let history = client.history(conversation).expect("history");
+
+        // Then: deltas derive per message — genesis has none, the add
+        // joined C, the stop-include left C
+        assert!(history[0].joined.is_empty() && history[0].left.is_empty());
+        assert_eq!(history[1].joined, vec![pc]);
+        assert!(history[1].left.is_empty());
+        assert_eq!(history[2].left, vec![pc]);
+        assert!(history[2].joined.is_empty());
+
+        let _ = std::fs::remove_dir_all(temp_root("deltas"));
+    }
+
+    #[tokio::test]
+    async fn send_in__should_record_the_grown_participant_set() {
+        // Given: an existing 1:1 A↔B; C joins via a reply. Previously the
+        // sender's own index never learned the grown set, so the next
+        // send-by-name forked a parallel conversation while everyone
+        // else's `remember` threaded the old one (groups.md §3).
+        let key_path = temp_key("index", "a");
+        keystore::create(&key_path).expect("key");
+        let a = Client::open_with(
+            &key_path,
+            ClientConfig {
+                connect_timeout: Duration::from_millis(300),
+            },
+        )
+        .await
+        .expect("open");
+        let b = DeviceKey::from_seed([21; 32]).public();
+        let c = DeviceKey::from_seed([22; 32]).public();
+        let genesis = message(&a.device, vec![b], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        a.state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+        a.state
+            .record_conversation(&BTreeSet::from([a.public_key(), b]), conversation)
+            .expect("map");
+        let contact = |key: PublicKey| Contact {
+            keys: vec![key],
+            relays: vec![format!("{}@203.0.113.7:1", hex::encode(&key.0))],
+        };
+
+        // When: replying with C added — the relay is unreachable, so the
+        // send reports "queued", but store + index are written first
+        let result = a
+            .send_in(
+                conversation,
+                &[contact(b), contact(c)],
+                b"welcome".to_vec(),
+                vec![],
+            )
+            .await;
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+
+        // Then: the sender's own index maps the grown set — a send-by-name
+        // to {B, C} now threads instead of forking
+        let grown = BTreeSet::from([a.public_key(), b, c]);
+        assert_eq!(a.state.conversation_for(&grown), Some(conversation));
+
+        let _ = std::fs::remove_dir_all(temp_root("index"));
     }
 
     #[tokio::test]

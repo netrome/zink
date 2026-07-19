@@ -54,10 +54,14 @@ client.history(conversation) -> Vec<HistoryMessage>  // linearized; bodies opene
 client.fetch_stored_blob(conversation, message, &BlobHash) -> Vec<u8>
                                               // cache, else own home relays (that's
                                               // where senders push blobs for us)
-// replying (C3b):
-client.reply_contacts(conversation) -> ReplyContacts // participants → contact records;
-                                              // keys without a record come back as
-                                              // `unknown` (unreachable, surfaced)
+// replying (C3b; membership semantics from D2a, groups.md §2):
+client.membership(conversation) -> BTreeSet<PublicKey> // heads-based — the current
+                                              // participant set, a lens on the DAG
+client.reply_contacts(conversation) -> ReplyContacts // membership minus me; routes
+                                              // via contact OR learned records
+                                              // (address, don't trust). Routeless
+                                              // members stay recipients (sealed,
+                                              // undelivered) + listed in `unknown`
 client.send_in(conversation, &[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt
                                               // thread into a *given* conversation
                                               // (send-by-contacts uses the participant
