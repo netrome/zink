@@ -788,12 +788,17 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   devices join conversations through my own signed `recipients` and the D2
   pipeline does the rest. **Records and profiles stay per-device** — each
   device its own key, own self-claimed name ("mårten phone" / "mårten
-  laptop"), never synchronized; the pair exists only as two verified links
-  across ordinary records, and the contact-side accept is purely a naming
-  act. Pairing = the C2 two-scan exchange in an explicit
-  confirm-before-signing pair mode, completed over who-is freshness; contact
-  identity moves to key-overlap; contact-entry updates stay explicit forever
-  — D3 adds mutual-link *evidence* to the popup's offer, never automation;
+  laptop"), never synchronized; the contact-side accept is purely a naming
+  act. **Recognition is one-way and asymmetric** (resolved at review):
+  "recognize this device as me" = scan an ordinary QR + fingerprint confirm
+  + sign the vouch + local own-devices entry — the shown side is passive,
+  no pair mode, no handshake; the usual pairing is the act run once in each
+  direction, and one-way setups (a read-mostly car) are legitimate.
+  Evidence for observers is *tiered*, never gated: a trusted key's vouch
+  offers ("P says this is their device"), both directions upgrade to
+  "mutually confirmed", the reverse alone is the spoof direction and never
+  clusters. Contact identity moves to key-overlap; contact-entry updates
+  stay explicit forever — evidence, never automation;
   new-device bootstrap is lazy via send-to-self (introduce-now is optional
   sugar); `GetKeys` re-wraps served to own devices only; sibling devices
   primary, contacts' fan-out never load-bearing; repudiation lag +
@@ -803,12 +808,12 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     dedup per cluster. *Done when:* mutual links cluster, unilateral/forged
     don't; a re-scanned record with reordered/added keys updates the same
     contact.
-  - [ ] **D3b · Pairing + gate.** Own-devices store; pair flow (store
-    partner, sign link, own profile prefilled — never synced; `my_record`
-    gains the links, completion query); D0c gate: own cluster counts as
-    self; CLI pair commands. *Done when:* headless e2e — two clients pair,
-    each record stays per-device (own key, own name) and each holds both
-    links; the partner is served like self.
+  - [ ] **D3b · Recognize + gate.** Own-devices store; the one-way
+    recognize act (store key + record, sign the vouch, `my_record` carries
+    it); D0c gate: recognized keys served like self; CLI `recognize`.
+    *Done when:* headless e2e — A recognizes B: A serves B like self while
+    the reverse stays closed until B recognizes A back; each record
+    carries only its own vouches.
   - [ ] **D3c · Send-to-self + clustering offers.** Recipients gain own
     devices (the core mechanism); the popup upgrade — "P added a device
     (mutually verified)" as an evidence-ranked *offer*, accepted explicitly;

@@ -6,9 +6,10 @@ Design for the D3 sub-slices. Downstream of [SPEC](../SPEC.md) §3.2
 member"), §6 (send-to-self); rides [groups.md](./groups.md) end to end — a
 new device IS a new member, propagated by the signed `recipients` list and
 resolved by the D2 pipeline. D3 adds the three things groups deliberately
-deferred: the **mutual link** (who counts as the same person), the **re-wrap
-op** (reading history from before the key existed), and **send-to-self**
-(your own devices as implicit recipients).
+deferred: the **recognition link** (which keys this device treats — and
+vouches — as itself), the **re-wrap op** (reading history from before the
+key existed), and **send-to-self** (your own devices as implicit
+recipients).
 
 **The governing principle (sharpened at review, 2026-07-19): clustering is
 the observer's choice.** Identity is local belief (tenet 1): Alice may treat
@@ -51,10 +52,10 @@ UX and tests target the pair case); any auto-pairing or device discovery
 
 | Decision | Resolution |
 |---|---|
-| Link shape | `Attestation { attester: K, subject: K, claim: SamePersonAs(L) }` — "I, K, am the same person as L". **Mutual** = both directions exist and verify (K→L and L→K); unilateral links are rendered but never trusted for clustering (SPEC §3.2 weights mutual above unilateral — an attacker can always *claim* your key). |
+| Link shape | `Attestation { attester: K, subject: K, claim: SamePersonAs(L) }` — "I, K, am the same person as L". **Links are asymmetric, like everything else** (resolved at review): each direction is an independent act, and evidence is *tiered*, never gated on mutuality (SPEC §3.2 weights, not requires). For observers, the load-bearing direction is **trusted-key → new-key** (a key you already trust vouches the new one — unforgeable); the reverse alone (a stranger claiming a trusted key) is the spoof direction and never clusters; both together upgrade the label to "mutually confirmed" — consent-proof against vouching an unrelated victim's key into your identity (§8). |
 | Where links live | In the **record's** `attestations`, like name/avatar claims (SPEC §3.6 says exactly this). **Records stay per-device** (resolved at review): `keys` remains the device's own key; the "pair" exists only as two verified links held across two ordinary records — there is no person record and no merged key list. (Listing sibling keys stays *permitted* as an advisory addressing offer; nothing reads it as authority.) |
 | Profiles are per-device | Each device self-claims its **own** name and avatar — "mårten phone" and "mårten laptop" are both correct, and a profile edit on one device syncs nowhere. Pairing may *prefill* the new device's name from the old one's claim; it never adopts or synchronizes profiles. |
-| Pairing flow | Two scans, reusing the C2 exchange in an explicit **pair mode** (§3) — no pairing server, no new wire op. The link exchange completes over the existing who-is freshness machinery. |
+| Pairing flow | **A one-way "recognize this device as me" act** (§3): scan the other device's ordinary QR, confirm the fingerprint, sign the link, store the key in the own-devices set. The shown side is passive — no pair mode, no handshake, no completion choreography. The common two-way case is the same act run once in each direction; "pairing" is the colloquial name for that composite. |
 | Contact identity | Fixed from `keys.first()` to **key-overlap** (§4) — the parked review note lands here. A contact entry is the observer's local grouping of keys under a petname; the record inside it is evidence, not authority. |
 | Key adoption by contacts | **None — automatic adoption is rejected** (the review's simplification). Sealing rules are unchanged from D1b/D2 (user-added records + signed cores); my devices reach contacts' sealing sets through *my* recipients lists, not through their evaluation of my claims. Updating a contact entry stays the one explicit act, now popup-assisted with link evidence (§7). D1b's "key-set changes wait for D3" resolves as: *they stay explicit forever; D3 adds the evidence.* |
 | Send-to-self | **The core mechanism.** Own other devices are appended to every send's `recipients` and deposited like any recipient (§5) — devices are honest conversation members, joined by their owner's signature. The SPEC §6 note gets recorded when this lands. |
@@ -62,41 +63,42 @@ UX and tests target the pair case); any auto-pairing or device discovery
 | Re-wrap | `SyncOp::GetKeys { ids }` → per-id `KeyWrap`s re-sealed to the caller (§6); served to **own devices only** at D3. Wraps append outside the hashed core — ids never move. |
 | Gate extension | The D0c `serves` self-allowance widens from `caller == me` to `caller ∈ my verified device cluster` (§6) — evaluated against the local own-device store, never against claims in the request. |
 
-## 3. Pairing (two scans, one mode)
+## 3. Recognizing a device (one-way; run twice for the usual case)
 
-The C2 mutual-scan exchange with an "this is my device" flag:
+One act, one direction: **"recognize this device as me."**
 
-1. **Old device O**: "pair a new device" → shows its QR (the normal record).
-2. **New device N** (fresh install — dial-by-key works pre-profile since
-   De5): "pair with existing device" → scans O → stores O's record in the
-   **own-devices store** (not contacts, no petname) → signs `N:
-   same-person-as O` → sets its **own** profile (name prefilled from O's
-   claim as a convenience — "mårten laptop" is one edit away; never
-   synchronized) → shows its own QR: N's ordinary record, carrying N's
-   link.
-3. **O** scans N's QR → verifies N's link names O → stores N in its
-   own-devices store → signs `O: same-person-as N`. O's record now carries
-   O's link; its `keys` and profile are unchanged.
-4. **Completion**: N still lacks O's link (signed after N's scan). Either
-   device dialing the other with the existing record-freshness query
-   (`who_is_among(partner, [partner])`) picks up the missing link — the
-   pairing UI does this automatically after step 3. Done means: **each
-   device holds both links.** Each keeps publishing its own record; the
-   pair exists only as that verified link evidence.
+1. The device to be recognized shows its **ordinary QR** (its record —
+   nothing special; a fresh install sets its own profile first, name
+   prefilled-by-hand from whatever its owner likes: "mårten laptop").
+2. The recognizing device scans it, shows the fingerprint + claimed name,
+   and on an explicit **confirm** signs its link (`me: same-person-as
+   scanned-key`) and stores the key + record in the **own-devices store**
+   (not contacts, no petname).
 
-**Confirm before signing** (the one real risk): pair mode signs a link after
-a scan, so scanning a *wrong* QR in pair mode must not silently link an
-attacker. Each device shows the scanned key's short fingerprint + claimed
-name and requires an explicit confirm before signing. Mutuality bounds the
-damage — an attacker also needs *your* device to sign them — but the confirm
-keeps the deliberate act deliberate.
+From that moment, *this* device includes the recognized key in everything
+it sends (§5), serves it like itself (§6), and its record carries the vouch
+(§4). That's the whole transaction — the shown side did nothing but be
+scanned.
+
+The usual "pair both ways" is the same act run from the other device (scan
+back, confirm, sign); the UI suggests it, nothing requires it. Asymmetric
+setups are legitimate: a phone can recognize a read-mostly car that never
+recognizes anything back — the car still receives everything the phone
+sends and can pull history from it. Each device's recognition set is its
+own social-graph decision, like everything else in the app.
+
+**Confirm before signing** (the one real risk): the recognize act signs
+after a scan, so scanning a wrong QR must not silently vouch an attacker —
+hence the fingerprint + explicit confirm. What a mistaken vouch *can't* do
+is silently move the other direction: the scanned key gains serving and
+inclusion from *this* device only.
 
 ## 4. Records & contact identity
 
-- **`my_record`** gains exactly one thing: the link attestations (mine, and
-  the partner's once held). `keys` stays my own key; my name stays my own
-  claim. Anyone holding my record *and* my sibling's can verify the pair —
-  what they render is theirs.
+- **`my_record`** gains exactly one thing: my outgoing link attestations
+  (the vouches this device signed). `keys` stays my own key; my name stays
+  my own claim. Observers gather link evidence across the records they
+  hold; what they render is theirs.
 - **Contact identity = key overlap** (the parked `keys.first()` fix):
   `add_contact` and the petname-collision check identify an existing contact
   by *any shared key*; a re-scan with reordered or added keys updates that
@@ -166,16 +168,19 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   petname. Edges dedup labels per person (a two-device contact renders
   once, not twice, in conversation labels and reply lists).
 - **The popup upgrade** (groups.md §5 hand-off): before rendering "a wild
-  key appeared", evaluate the held evidence (stored + learned records): if
-  the unknown key and an already-trusted key of contact P are joined by
-  **verified mutual links**, render *"P added a device (mutually
-  verified)"* with a one-tap **offer** — which is *purely a naming act*:
-  store the device's record as its own contact entry, petname prefilled
-  from its self-claim ("mårten laptop"), rendered clustered with P.
-  Delivery never depended on it — replies reach both of P's devices
-  through membership (P's own send-to-self put both keys there). Declining
-  costs a hex label, nothing more. `same-person-as` evaluation enters here
-  and in the §6 gate — nowhere else.
+  key appeared", evaluate the held evidence (stored + learned records),
+  tiered: a verified link **from an already-trusted key of contact P**
+  vouching the unknown key → *"P says this is their device"*; both
+  directions verified → *"…mutually confirmed"*. Either tier is a one-tap
+  **offer** — purely a naming act: store the device's record as its own
+  contact entry, petname prefilled from its self-claim ("mårten laptop"),
+  rendered clustered with P. The reverse direction alone (the unknown key
+  claiming P) never clusters — that's the spoof direction; it stays a wild
+  key whose claim renders as exactly that. Delivery never depended on any
+  of it — replies reach both of P's devices through membership (P's own
+  send-to-self put both keys there). Declining costs a hex label, nothing
+  more. `same-person-as` evaluation enters here and in the §6 gate —
+  nowhere else.
 - **Membership deltas**: "+ Alice's new device" renders via the same
   clustering (a joined key that clusters to a known person labels as that
   person).
@@ -190,14 +195,18 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 
 ## 8. Security notes
 
-- **Mutual-or-nothing**: unilateral links never rank as verified evidence
-  and never widen the gate. A stolen record can't be upgraded into a
-  device claim without both signatures. And since nothing auto-adopts,
-  even a verified link only ever produces an *offer* on other people's
-  screens.
-- **Local trust anchors**: the own-devices store is written only by the
-  pairing flow (explicit scans + confirms on both sides); serving decisions
-  read it, never the wire.
+- **Tiered, never gated**: the spoof direction (a stranger's key claiming
+  a trusted one) never clusters — vouching must come *from* trust. The
+  one-way-vouch tier admits a subtler misuse: a malicious contact can
+  vouch an *unrelated victim's* key as "their device", misattributing the
+  victim's messages to themselves on accepting observers' screens — which
+  is why the tier labels say who claims what ("P *says* this is their
+  device") and mutual confirmation upgrades, not gates. And since nothing
+  auto-adopts, any tier only ever produces an *offer*.
+- **Local trust anchors**: the own-devices store is written only by this
+  device's own recognize acts (explicit scan + confirm); serving decisions
+  read it, never the wire. Recognition is per-device and per-direction —
+  there is no global device set anywhere.
 - **Re-wrap scope**: own-device-only serving keeps "willingness to re-wrap"
   (SPEC §5.2) at its narrowest until the recovery flows (D4+) need more.
   A compromised paired device can read everything — that is the honest
@@ -211,21 +220,22 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 
 ## 9. Slices
 
-- **D3a · Identity core.** Link-evidence evaluation: verified mutual pairs
-  extracted from a *set* of held records (protocol helper over
-  attestations; the client aggregates stored + learned records into
-  `cluster_of(key)`); the key-overlap contact-identity fix +
+- **D3a · Identity core.** Tiered link-evidence evaluation over a *set* of
+  held records (protocol helper over attestations; the client aggregates
+  stored + learned records): vouched-from-trust vs mutually-confirmed vs
+  spoof-direction-only; the key-overlap contact-identity fix +
   petname-collision by overlap; clustered label dedup in edges' data.
-  *Done when:* unit tests — mutual links across two per-device records
-  cluster, unilateral/forged don't; a re-scanned record with
-  reordered/added keys updates the same contact.
-- **D3b · Pairing + gate.** Own-devices store; pair flow in `Client`
-  (store partner, sign link, own profile prefilled — never synced;
-  `my_record` gains the links, completion query); the D0c gate extension;
-  CLI `pair-show` / `pair-scan`
-  (dev shape TBD at implementation). *Done when:* headless e2e — two
-  clients pair; both `my_record`s list both keys with mutual links; the
-  partner is served by the gate like self.
+  *Done when:* unit tests — a trusted key's vouch tiers as offerable, both
+  directions upgrade, the reverse direction alone and forged signatures
+  tier as nothing; a re-scanned record with reordered/added keys updates
+  the same contact.
+- **D3b · Recognize + gate.** Own-devices store; the one-way recognize act
+  in `Client` (store key + record, sign link, `my_record` gains the
+  vouch); the D0c gate extension (recognized keys served like self); CLI
+  `recognize` (dev shape TBD at implementation). *Done when:* headless e2e
+  — A recognizes B: A serves B like self while the reverse direction stays
+  closed until B recognizes A back; each record carries only its own
+  vouches.
 - **D3c · Send-to-self + clustering offers.** Recipients gain own devices
   (the core mechanism); §7 popup upgrade (evidence-ranked offer, explicit
   accept); optional introduce-now sugar. *Done when:* headless e2e — after
