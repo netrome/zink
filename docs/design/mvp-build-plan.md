@@ -479,7 +479,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   privacy decision), and **network input never mutates stored records** — answers
   accumulate in a learned store (multiple records per key) and freshness is a
   read-time resolution, the same keep-evidence-rank-at-use stance as the DAG.
-  - [ ] **D1a · Protocol op + serve side.** `SyncOp::WhoIs { key }` →
+  - [x] **D1a · Protocol op + serve side.** `SyncOp::WhoIs { key }` →
     `SyncResult::Known { record }` / `NotHeld` on the existing sync ALPN (in-place
     at v1); `SyncHandler` serves a contact caller the fresh self-record (own key)
     or a *user-added* contact's stored record — learned records are never
@@ -487,6 +487,18 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     *Done when:* headless e2e — a contact's `WhoIs` returns the stored record; a
     stranger's returns `NotHeld`; a learned-only subject is `NotHeld` even to a
     contact.
+    ✅ *(2026-07-19: variants **appended** so existing BORSH tags stay stable;
+    round-trip + hostile-input tests extended. Self-record construction extracted
+    to `build_own_record`, shared by `my_record` and the handler so the two can't
+    drift (revision stays hardcoded 0 until D1b's supersession fix); the handler
+    now holds its own `DeviceKey` (rebuilt from the seed — deliberately not
+    `Clone`) with a hand-written redacting `Debug`, since serving a *fresh*
+    self-record needs signing at request time — a profile change is served
+    immediately, no restart (unlike endpoint homing). Contact-store read errors
+    fail closed, like the gate. e2e: stranger `NotHeld` → befriend → stored
+    record verbatim; unknown subject `NotHeld` even to a contact; own-key query
+    `NotHeld` until the profile completes, then a verified self-record. SPEC §11:
+    who-is-this format/hops moved from still-to-pin-down to a resolved row.)*
   - [ ] **D1b · Pull, learned store, resolution.** `Client::who_is(key)` dialing
     the subject (if held) + all dialable contacts; answers validated like scanned
     QRs and stored in a **learned store** with provenance, keyed

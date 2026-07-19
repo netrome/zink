@@ -212,10 +212,13 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
 
 ## 9. Slices
 
-- **D1a · Protocol op + serve side.** Wire types + `SyncHandler` policy (§3,
-  §4). *Done when:* headless e2e — a contact's `WhoIs` returns the stored
-  record; a stranger's returns `NotHeld`; a learned-only subject returns
-  `NotHeld` even to a contact.
+- **D1a · Protocol op + serve side — done (2026-07-19).** Wire types +
+  `SyncHandler` policy (§3, §4). Variants appended (BORSH tags stable);
+  self-record construction shared with `my_record` via `build_own_record`;
+  a fresh profile is served immediately (signed per request, no restart).
+  e2e: stranger `NotHeld`, contact gets the stored record verbatim, unknown
+  subject `NotHeld` even to a contact, own-key `NotHeld` until the profile
+  completes.
 - **D1b · Pull, learned store, resolution.** §5–§7, CLI `who-is` for e2e.
   *Done when:* the one-way-add flow headless — A learns C's record via
   contact B, adds C, replies to C; a subject-served answer wins relay

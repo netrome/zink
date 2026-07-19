@@ -464,9 +464,10 @@ custom conversation views — is **client policy/UX**.
 | AEAD + commitment | **XChaCha20-Poly1305** (fresh random nonce, `nonce ‖ ct`); commitment = BLAKE3 `derive_key("zink v1 key-commit", content-key)` | Random-nonce-safe AEAD; domain-separated commitment, not a bare hash. |
 | Key sealing | **libsodium-style sealed box** (X25519 via the standard Ed25519 conversions) | Anonymous, per-recipient, vetted construction — nothing hand-rolled. |
 | `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |
+| `who-is-this` format & hops | **`WhoIs{key}` on the peer sync ALPN → the responder's stored ContactRecord (self-claims verbatim) or `NotHeld`; default policy contacts-only; hop limit 1, structurally** (learned answers are never re-served; no forwarding — a later version bump may add it) | One primitive doubles as identity discovery *and* record freshness (§3.6); social graph as the trust boundary; declining ≡ not-knowing on the wire ([who-is-this.md](../docs/design/who-is-this.md), resolved 2026-07-19). |
 
-**Still to pin down (implementation-level):** the `who-is-this` query format and
-default hop limit, sync-time head/`seq` exchange, relay discovery/config UX, and the
+**Still to pin down (implementation-level):** sync-time head/`seq` exchange, relay
+discovery/config UX, and the
 deferred capability/token gating mechanism (added as a versioned field when needed).
 *(The mailbox auth/handshake is resolved and shipped — connection-key auth over the
 `zink-mailbox/1` ALPN, [mailbox-wire-protocol.md](../docs/design/mailbox-wire-protocol.md).

@@ -8,6 +8,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::FORMAT_VERSION;
 use crate::codec::{self, DecodeError};
+use crate::contact_record::ContactRecord;
+use crate::keys::PublicKey;
 use crate::message::{MessageEnvelope, MessageId};
 
 /// ALPN for the peer sync protocol. The generation lives here, so
@@ -53,6 +55,10 @@ pub enum SyncOp {
     Get { id: MessageId },
     /// Ids of held messages whose `parents` include `id` — pull forward.
     GetSuccessors { id: MessageId },
+    /// Identity discovery (SPEC §3.5, D1): "who is this key?" Answered with
+    /// the responder's stored record for it — or `NotHeld`, at discretion.
+    /// (Appended so existing BORSH variant tags stay stable.)
+    WhoIs { key: PublicKey },
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -84,7 +90,8 @@ pub enum SyncResult {
     Envelope {
         envelope: Box<MessageEnvelope>,
     },
-    /// `Get` miss, or the peer declined to serve this id.
+    /// `Get` miss, or the peer declined to serve this id. Also the `WhoIs`
+    /// miss: not-knowing and declining are indistinguishable (SPEC §5.2).
     NotHeld,
     /// `GetSuccessors` — known children (possibly empty).
     Successors {
@@ -92,6 +99,12 @@ pub enum SyncResult {
     },
     Error {
         code: SyncErrorCode,
+    },
+    /// `WhoIs` hit: the responder's stored record — the subject's signed
+    /// self-claims relayed verbatim, which the requester verifies like a
+    /// scanned QR. (Appended so existing BORSH variant tags stay stable.)
+    Known {
+        record: Box<ContactRecord>,
     },
 }
 
@@ -128,6 +141,32 @@ mod tests {
         MessageEnvelope::new(core, &sender)
     }
 
+    /// A record with every field populated, so the `Known` round-trip
+    /// exercises the nested attestation + relay-entry decode.
+    fn sample_record() -> ContactRecord {
+        use crate::attestation::{Attestation, Claim, SignedAttestation};
+        use crate::contact_record::RelayEntry;
+        let subject = DeviceKey::from_seed([4; 32]);
+        let attestation = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: subject.public(),
+                subject: subject.public(),
+                claim: Claim::Name("Carol".to_string()),
+                revision: 1,
+            },
+            &subject,
+        );
+        ContactRecord::new(
+            vec![subject.public()],
+            vec![attestation],
+            vec![RelayEntry {
+                mailbox: "aa@203.0.113.1:1".to_string(),
+                relay_url: Some("http://203.0.113.1:2".to_string()),
+            }],
+        )
+    }
+
     #[test]
     fn request_roundtrip__should_decode_every_op_to_the_original() {
         // Given
@@ -137,6 +176,9 @@ mod tests {
             },
             SyncOp::GetSuccessors {
                 id: sample_envelope().id(),
+            },
+            SyncOp::WhoIs {
+                key: DeviceKey::from_seed([3; 32]).public(),
             },
         ];
 
@@ -163,6 +205,9 @@ mod tests {
             },
             SyncResult::Error {
                 code: SyncErrorCode::Malformed,
+            },
+            SyncResult::Known {
+                record: Box::new(sample_record()),
             },
         ];
 

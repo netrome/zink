@@ -1,15 +1,17 @@
-//! Peer sync edge (D0): the client's *serving* side — an accepting router on
-//! `SYNC_ALPN` answering `get` / `get-successors` from local storage, at the
-//! peer's discretion (SPEC §5.2, `docs/design/sync-primitives.md`). This is
-//! the first place the client is a server, not just a dialer. The fetching
-//! side (`Client::backfill`) lives in `client`.
+//! Peer sync edge (D0, D1a): the client's *serving* side — an accepting
+//! router on `SYNC_ALPN` answering `get` / `get-successors` from local
+//! storage and `who-is` from the contact store, at the peer's discretion
+//! (SPEC §5.2/§3.5, `docs/design/sync-primitives.md`,
+//! `docs/design/who-is-this.md`). This is the first place the client is a
+//! server, not just a dialer. The fetching side (`Client::backfill`) lives
+//! in `client`.
 
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use zink_protocol::{
-    MAX_SYNC_REQUEST_BYTES, PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest, SyncResponse,
-    SyncResult,
+    ContactRecord, DeviceKey, MAX_SYNC_REQUEST_BYTES, PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp,
+    SyncRequest, SyncResponse, SyncResult,
 };
 
 use crate::state::ClientState;
@@ -20,12 +22,23 @@ use crate::state::ClientState;
 /// the discretion: a caller whose key is not in the contact store (and isn't
 /// us) gets answers indistinguishable from "don't hold it" — declining and
 /// not-having look the same on the wire. Client policy, not protocol.
-#[derive(Debug, Clone)]
 struct SyncHandler {
     state: ClientState,
-    /// Our own device key — always served (self-dial is trivially "us", and
-    /// D2's own-device sync rides the same allowance).
-    me: PublicKey,
+    /// This device's key: identifies "us" for the gate's self-allowance
+    /// (self-dial is trivially "us"; D2 own-device sync rides the same
+    /// allowance) and signs the fresh self-record served for a `WhoIs`
+    /// about our own key (D1a).
+    device: DeviceKey,
+}
+
+/// Hand-written because `DeviceKey` is secret material — deliberately
+/// neither `Clone` nor `Debug`; it must never reach log output.
+impl std::fmt::Debug for SyncHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncHandler")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SyncHandler {
@@ -33,13 +46,31 @@ impl SyncHandler {
     /// the authenticated connection key). A peer added as a contact
     /// mid-connection is served on its next connection.
     fn serves(&self, caller: PublicKey) -> bool {
-        caller == self.me
+        caller == self.device.public()
             || self
                 .state
                 .contacts()
                 .unwrap_or_default()
                 .iter()
                 .any(|(_, record)| record.keys.contains(&caller))
+    }
+
+    /// The record served for `WhoIs { subject }` (who-is-this.md §4): the
+    /// fresh self-record for our own key (`None` — indistinguishable from
+    /// not-holding — while the profile is incomplete), else a *user-added*
+    /// contact's stored record, as stored. Learned records (D1b) are never
+    /// re-served — hop limit 1 is structural — and a contact-store read
+    /// error fails closed, like the gate.
+    fn who_is(&self, subject: PublicKey) -> Option<ContactRecord> {
+        if subject == self.device.public() {
+            return crate::client::build_own_record(&self.device, &self.state);
+        }
+        self.state
+            .contacts()
+            .ok()?
+            .into_iter()
+            .find(|(_, record)| record.keys.contains(&subject))
+            .map(|(_, record)| record)
     }
 }
 
@@ -73,6 +104,12 @@ impl ProtocolHandler for SyncHandler {
                         Vec::new()
                     },
                 },
+                Some(SyncOp::WhoIs { key }) => match serves.then(|| self.who_is(key)).flatten() {
+                    Some(record) => SyncResult::Known {
+                        record: Box::new(record),
+                    },
+                    None => SyncResult::NotHeld,
+                },
                 None => SyncResult::Error {
                     code: SyncErrorCode::Malformed,
                 },
@@ -88,8 +125,12 @@ impl ProtocolHandler for SyncHandler {
 
 /// Start serving `SYNC_ALPN` on `endpoint`. The returned `Router` keeps the
 /// serve loop alive for as long as the client holds it.
-pub(crate) fn spawn_sync_router(endpoint: Endpoint, state: ClientState, me: PublicKey) -> Router {
+pub(crate) fn spawn_sync_router(
+    endpoint: Endpoint,
+    state: ClientState,
+    device: DeviceKey,
+) -> Router {
     Router::builder(endpoint)
-        .accept(SYNC_ALPN, SyncHandler { state, me })
+        .accept(SYNC_ALPN, SyncHandler { state, device })
         .spawn()
 }

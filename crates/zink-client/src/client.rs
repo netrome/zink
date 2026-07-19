@@ -86,9 +86,15 @@ impl Client {
         let endpoint = net::bind_endpoint(&device, &home_relays).await?;
         // Serve peer history sync on our own endpoint (D0). The endpoint is a
         // cheap handle to clone; the router keeps the serve loop alive.
-        // Contacts-only serving gate (D0c) — our key is the always-allowed one.
-        let sync_router =
-            crate::sync::spawn_sync_router(endpoint.clone(), state.clone(), device.public());
+        // Contacts-only serving gate (D0c); serves fresh self-records for
+        // `who-is-this` (D1a), so it needs signing — its own key instance,
+        // rebuilt from the seed, since `DeviceKey` is deliberately not
+        // `Clone`.
+        let sync_router = crate::sync::spawn_sync_router(
+            endpoint.clone(),
+            state.clone(),
+            DeviceKey::from_seed(device.seed()),
+        );
         Ok(Self {
             device,
             endpoint,
@@ -760,26 +766,11 @@ impl Client {
     /// This device's ContactRecord: key, self-attested name, home relays.
     /// The QR/paste payload is `record.to_qr_string()`.
     pub fn my_record(&self) -> Result<ContactRecord, Error> {
-        let name = self
-            .state
-            .profile_name()
-            .ok_or(Error::ProfileIncomplete("set a profile name first"))?;
-        let relays = self.state.home_relay_entries();
-        if relays.is_empty() {
-            return Err(Error::ProfileIncomplete("set a home relay first"));
+        if self.state.profile_name().is_none() {
+            return Err(Error::ProfileIncomplete("set a profile name first"));
         }
-        let me = self.device.public();
-        let attestation = SignedAttestation::new(
-            Attestation {
-                version: FORMAT_VERSION,
-                attester: me,
-                subject: me,
-                claim: Claim::Name(name),
-                revision: 0,
-            },
-            &self.device,
-        );
-        Ok(ContactRecord::new(vec![me], vec![attestation], relays))
+        build_own_record(&self.device, &self.state)
+            .ok_or(Error::ProfileIncomplete("set a home relay first"))
     }
 
     /// Ensure a mailbox exists on every home relay. Called when publishing
@@ -1092,6 +1083,31 @@ impl Client {
             .collect();
         self.state.record_conversation(&participants, conversation)
     }
+}
+
+/// The self-record — key, self-attested name, home relays — or `None`
+/// until the profile is complete (both parts). Shared by `my_record` (the
+/// QR/paste publishing path) and the sync handler (serving `WhoIs` about
+/// our own key, D1a), so the two can't drift. Attestation `revision` is
+/// hardcoded 0 until D1b persists a counter (the supersession fix).
+pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Option<ContactRecord> {
+    let name = state.profile_name()?;
+    let relays = state.home_relay_entries();
+    if relays.is_empty() {
+        return None;
+    }
+    let me = device.public();
+    let attestation = SignedAttestation::new(
+        Attestation {
+            version: FORMAT_VERSION,
+            attester: me,
+            subject: me,
+            claim: Claim::Name(name),
+            revision: 0,
+        },
+        device,
+    );
+    Some(ContactRecord::new(vec![me], vec![attestation], relays))
 }
 
 /// A resolved recipient: the person's device keys and the relays hosting
@@ -1573,6 +1589,138 @@ mod tests {
         assert!(b.state.load_dag(conversation).is_ok());
 
         let _ = std::fs::remove_dir_all(temp_root("autosync"));
+    }
+
+    #[tokio::test]
+    async fn who_is__should_serve_a_stored_record_to_contacts_only() {
+        // Given: A holds C's record as a user-added contact — the server
+        // side of the one-way-add flow (who-is-this.md §1). B asks about
+        // C's key, first as a stranger.
+        let a = Client::open_or_create(&temp_key("whois", "server"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("whois", "client"))
+            .await
+            .expect("open B");
+        let carol = DeviceKey::from_seed([7; 32]).public();
+        let carol_record = ContactRecord::new(
+            vec![carol],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "cc@203.0.113.9:9".to_string(),
+                relay_url: Some("http://203.0.113.9:10".to_string()),
+            }],
+        );
+        a.state.save_contact("carol", &carol_record).expect("save");
+
+        // When: a stranger asks about a key A demonstrably holds
+        let connection = net::connect_addr(
+            &b.endpoint,
+            a.endpoint.addr(),
+            SYNC_ALPN,
+            b.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let stranger = net::sync_request(&connection, SyncOp::WhoIs { key: carol })
+            .await
+            .expect("round-trip");
+
+        // Then: nothing — declining and not-knowing look the same
+        assert_eq!(stranger, SyncResult::NotHeld);
+
+        // When: the same requester asks as a contact (fresh connection —
+        // the gate is resolved per connection)
+        befriend(&a, &b);
+        let connection = net::connect_addr(
+            &b.endpoint,
+            a.endpoint.addr(),
+            SYNC_ALPN,
+            b.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let known = net::sync_request(&connection, SyncOp::WhoIs { key: carol })
+            .await
+            .expect("round-trip");
+        let unknown = net::sync_request(
+            &connection,
+            SyncOp::WhoIs {
+                key: DeviceKey::from_seed([8; 32]).public(),
+            },
+        )
+        .await
+        .expect("round-trip");
+
+        // Then: the stored record verbatim; an unknown subject stays
+        // NotHeld even for a contact (nothing learned-only or second-hand
+        // is ever served)
+        assert_eq!(
+            known,
+            SyncResult::Known {
+                record: Box::new(carol_record)
+            }
+        );
+        assert_eq!(unknown, SyncResult::NotHeld);
+
+        let _ = std::fs::remove_dir_all(temp_root("whois"));
+    }
+
+    #[tokio::test]
+    async fn who_is__should_serve_the_fresh_self_record_for_the_own_key() {
+        // Given: B is A's contact; A's profile is not yet complete
+        let a = Client::open_or_create(&temp_key("whoisself", "server"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("whoisself", "client"))
+            .await
+            .expect("open B");
+        befriend(&a, &b);
+        let connection = net::connect_addr(
+            &b.endpoint,
+            a.endpoint.addr(),
+            SYNC_ALPN,
+            b.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+
+        // When: asked about A's own key too early
+        let early = net::sync_request(
+            &connection,
+            SyncOp::WhoIs {
+                key: a.public_key(),
+            },
+        )
+        .await
+        .expect("round-trip");
+
+        // Then: NotHeld — there is no record to serve yet
+        assert_eq!(early, SyncResult::NotHeld);
+
+        // When: A completes its profile (served fresh per request — no
+        // restart needed, unlike endpoint homing)
+        let relay = RelayEntry::from_spec("aa@203.0.113.1:1#http://203.0.113.1:2");
+        a.state
+            .save_profile("alice", std::slice::from_ref(&relay))
+            .expect("save profile");
+        let SyncResult::Known { record } = net::sync_request(
+            &connection,
+            SyncOp::WhoIs {
+                key: a.public_key(),
+            },
+        )
+        .await
+        .expect("round-trip") else {
+            panic!("expected the self-record");
+        };
+
+        // Then: a verifiable self-record — key, self-claimed name, relays
+        assert_eq!(record.keys, vec![a.public_key()]);
+        assert_eq!(record.self_claimed_name(), Some("alice"));
+        assert_eq!(record.relays, vec![relay]);
+
+        let _ = std::fs::remove_dir_all(temp_root("whoisself"));
     }
 
     #[tokio::test]
