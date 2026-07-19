@@ -64,6 +64,23 @@ parents' renders a membership line ("+ Charlie", "− Dana") — *derived* from
 the signed cores, not a message type. Bodies stay opaque; there is nothing
 to parse.
 
+**Non-contact members: address, don't trust** (resolved 2026-07-19).
+Continuing a conversation never requires promoting its members to contacts.
+Nothing about sending needs trust: the key to seal to comes from the
+**signed cores** (the announcement — D1b's "sealing keys never come from
+learned records" is unbent, since a learned record only ever supplies the
+mailbox route), and the relay route comes from a contact record *or a
+learned record* — exactly what the scoped auto-query (§4) produces.
+Declining to add someone costs them only your naming and your serving gate:
+they render as hex or a learned name with provenance, your D0c gate never
+serves them, but they keep receiving your replies. The rejected
+alternative — dropping non-contacts from the reply set — makes membership
+viewer-dependent and interacts badly with the heads rule: one skeptical
+participant's reply, as the momentary sole head, would shrink the group for
+*everyone*. Removal stays a deliberate act (stop-including), never a side
+effect of not trusting. A member with no route at all (auto-query failed —
+the gate limit, §4) stays in `unknown`, surfaced, best-effort.
+
 ## 3. The participant-set index fix
 
 Found at review (2026-07-19): `send`-by-contacts keys conversations on the
@@ -94,7 +111,9 @@ lands.
 
 - **Trigger:** after a drain stores messages (the same seam as D0d's
   `auto_sync`, before the edge renders), any conversation member that
-  resolves to neither a contact nor a fresh learned record.
+  resolves to neither a contact nor a fresh learned record — **in
+  legitimate conversations only** (§6): a fabricated group must not make
+  your client dial your contacts asking about a spammer's strangers.
 - **Responders:** *only* that conversation's participants that are dialable
   (contact or learned records) — **introducing sender first** (the sender
   of the message that brought the key in), then the rest. Never the whole
@@ -130,7 +149,33 @@ The D1c banner/panel, generalized and made proactive:
 - At D3 the same popup gains the clustering upgrade ("Alice added a
   device") — nothing here needs redesign for it.
 
-## 6. Compose & group UX
+## 6. Conversation acceptance: the contributing-contact rule
+
+When is an incoming conversation *legitimate*? (Resolved 2026-07-19.)
+
+> **A conversation is legitimate iff at least one of your contacts has
+> _contributed_ — authored a message you hold in it.**
+
+The distinction that makes this spam-resistant: *presence in `recipients`
+is attacker-controlled* — a spammer can list your friends for free —
+*authorship is not* (signatures verify against keys you already trust).
+
+- **Applied at presentation, never at storage or delivery.** Messages
+  arrive in any order: the contact's first contribution may land *after*
+  the stranger's message that introduced the group, so rejecting at
+  delivery would destroy data a later arrival retroactively legitimizes.
+  Triaged at render time, a conversation upgrades to the main list the
+  moment a contact's message arrives.
+- **This rule is the triage criterion for the parked unknown-sender
+  quarantine** ("message requests", see the plan's parked section): a 1:1
+  from a stranger is just its degenerate case — a two-party group with no
+  contributing contact. One rule covers both; the bounded-quarantine *view*
+  itself stays parked (pre-external-deployment), but D2 computes the
+  predicate since the auto-query gates on it (§4).
+- Pure client policy, revisable per client without coordination — like
+  everything in this doc.
+
+## 7. Compose & group UX
 
 - New chat: contact **multi-select** (the compose `<select>` becomes
   checkboxes/chips); send creates the genesis with all selected.
@@ -143,29 +188,33 @@ The D1c banner/panel, generalized and made proactive:
 - Reply-all is already the only reply there is (`reply_contacts`), now
   heads-based; unknown/unreachable participants stay surfaced, best-effort.
 
-## 7. Slices
+## 8. Slices
 
 - **D2a · Membership core + index fix.** Heads-based membership (one
   helper: conversation → participant set, DAG-first with union fallback)
   feeding `reply_contacts` + `ConversationSummary`; membership-delta info
-  on `HistoryMessage`; the `send_in` index fix (§3). CLI already creates
-  groups (`send --to X --to Y`). *Done when:* headless e2e — a 3-party
-  conversation where a member is added mid-conversation: everyone
-  (including the adder, by name — the regression) threads one
-  conversation; a stop-including reply shrinks the reply set; delta lines
-  derived correctly.
+  on `HistoryMessage`; the `send_in` index fix (§3); `reply_contacts`
+  routes non-contact members via learned records (§2 — `unknown` only when
+  no route exists at all). CLI already creates groups (`send --to X --to
+  Y`). *Done when:* headless e2e — a 3-party conversation where a member
+  is added mid-conversation: everyone (including the adder, by name — the
+  regression) threads one conversation; a stop-including reply shrinks the
+  reply set; a reply reaches a non-contact member through a learned route;
+  delta lines derived correctly.
 - **D2b · Scoped auto-query.** The `who_is` responder-scoped variant; the
-  post-drain trigger with the rate limit (§4); who-is-this.md §5 revised.
-  *Done when:* the plan's acceptance headless — B adds C to a conversation
-  with A; A's client auto-learns C's record with zero manual action
-  (`resolve_name` returns the candidate), A adds C and replies to all.
+  post-drain trigger with the rate limit, gated on the contributing-contact
+  rule (§4, §6); who-is-this.md §5 revised. *Done when:* the plan's
+  acceptance headless — B adds C to a conversation with A; A's client
+  auto-learns C's record with zero manual action (`resolve_name` returns
+  the candidate), A adds C and replies to all; a conversation with no
+  contributing contact triggers no query.
 - **D2c · Group UI.** Multi-select compose; add-to-conversation action;
   membership deltas + heads-based labels; the wild-Charlie popup with
   persisted dismissal (§5). *Done when:* a three-device (or
   two-devices-plus-CLI) group chat runs live: create, add, popup → add
   Charlie, reply-all reaches everyone.
 
-## 8. Doc touchpoints when this lands
+## 9. Doc touchpoints when this lands
 
 - who-is-this.md §5: replace the pending-revision blockquote with the
   resolved carve-out (D2b).

@@ -641,7 +641,12 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   construction: membership = the **heads'** participant set, a lens on the
   DAG, never an object; the `send_in` participant-index artifact-fork fix;
   the scoped auto-query with introducing-sender-first responders + a
-  per-(subject, conversation) rate limit; the responder-side-gate limit
+  per-(subject, conversation) rate limit; **non-contact members stay
+  addressable** — trust is naming + the serving gate, never delivery, else
+  one skeptical participant's head shrinks the group for everyone;
+  **conversation legitimacy = a contact has *contributed*** (authored, not
+  merely listed — authorship is unforgeable), triaged at presentation and
+  gating the auto-query, never storage; the responder-side-gate limit
   documented; SPEC untouched end to end).
   - [ ] **D2a · Membership core + index fix.** Heads-based membership feeding
     `reply_contacts` + summaries (union-fallback when the DAG can't build);
@@ -706,11 +711,15 @@ Not scheduled into a stage; must land before any build leaves our hands.
 - [ ] **Unknown-sender quarantine.** Anyone holding a record can deposit
   (mutuality is not required — that's what makes one-way adds work), so an
   unknown key can fill a mailbox and the conversation list with noise. Client
-  policy, no protocol change: conversations whose participants resolve to no
-  contact land in a bounded "message requests" view instead of the main list
-  (oldest evicted at the cap); D1c's who-is hook is the promote-out path.
+  policy, no protocol change: conversations failing the **contributing-contact
+  rule** (groups.md §6 — no contact has *authored* a held message; presence in
+  `recipients` is attacker-controlled, authorship isn't) land in a bounded
+  "message requests" view instead of the main list (oldest evicted at the
+  cap); D1c's who-is hook is the promote-out path. D2b computes the predicate
+  (it gates the scoped auto-query); this parked item is just the view.
   Complements the relay-side caps (C0) until send-capabilities (SPEC §8,
-  deferred) provide the real gate. *(Noted 2026-07-19 while wiring D1c.)*
+  deferred) provide the real gate. *(Noted 2026-07-19 while wiring D1c;
+  criterion sharpened at the D2 design.)*
 - [ ] **Per-type format versions.** One global `FORMAT_VERSION` is stamped into every
   versioned object and `decode_versioned` accepts only the exact current value — so any
   single object's version bump forks the whole protocol at once (v1 clients silently
