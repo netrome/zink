@@ -25,7 +25,7 @@ use crate::state::ClientState;
 struct SyncHandler {
     state: ClientState,
     /// This device's key: identifies "us" for the gate's self-allowance
-    /// (self-dial is trivially "us"; D2 own-device sync rides the same
+    /// (self-dial is trivially "us"; D3 own-device sync rides the same
     /// allowance) and signs the fresh self-record served for a `WhoIs`
     /// about our own key (D1a).
     device: DeviceKey,

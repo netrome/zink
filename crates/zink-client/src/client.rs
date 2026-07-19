@@ -874,7 +874,7 @@ impl Client {
     /// **user-added record** (authenticated by the scan / explicit add) >
     /// **contact-served** hearsay (only ever decisive in the one-way-add
     /// bootstrap, where it's the whole point). Keys never come from
-    /// learned records — sealing stays on the user-added record until D2.
+    /// learned records — sealing stays on the user-added record until D3.
     fn effective_relays(&self, key: PublicKey, stored: &ContactRecord) -> Vec<RelayEntry> {
         let learned = self.state.learned(&key);
         let best = |from_subject: bool| {

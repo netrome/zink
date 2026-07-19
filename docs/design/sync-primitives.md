@@ -5,7 +5,7 @@ peer-served ALPN (SPEC §5.2). The immediate driver is a concrete correctness
 hole — a device added to an existing conversation receives a non-genesis
 message, has no genesis on disk, so `ClientState::load_dag` fails and it
 **cannot thread a reply** (noted in B5; `state.rs:133` "a missing genesis is
-unrecoverable"). More broadly this is the substrate for D2 backfill, D4 backlog
+unrecoverable"). More broadly this is the substrate for D3 backfill, D4 backlog
 serving, and D5 direct delivery.
 
 Downstream of [dag-store.md](./dag-store.md) and
@@ -30,7 +30,7 @@ reply. This cleanly splits D0:
 - **Serve the skeleton (this slice).** Hand over `MessageCore`s (or the full
   envelopes — ciphertext, safe to pass) so the requester can reconstruct the DAG
   and participate going forward. No new crypto.
-- **Re-wrap to *read* history (deferred, D2).** Letting a new device/member
+- **Re-wrap to *read* history (deferred, D3).** Letting a new device/member
   *decrypt* old bodies needs a holder of each message's content-key to re-wrap
   it to the requester's key (SPEC §5.2 — "no cryptographic difference between
   your new device and a new member"). Out of scope here; noted so we don't
@@ -62,7 +62,7 @@ peer required knowing its explicit `ip:port`; D0b's dial-by-key widened
 reachability to anyone holding the key + relay URL, so the default flipped:
 `SyncHandler` answers `NotHeld` / empty successors to callers not in the
 contact store (indistinguishable from not-holding — declining and not-having
-look the same), with the own key always allowed (self-dial; D2 own-device sync).
+look the same), with the own key always allowed (self-dial; D3 own-device sync).
 Resolved once per connection — the caller's key IS the authenticated connection
 key. Pure client policy, layered on without any protocol change — a policy
 knob, never baked into the wire. (D1's `who-is-this` will want a different
@@ -234,7 +234,7 @@ and now also pulls forward.
   `Client::backfill(conversation, from)`; a CLI hook and a headless e2e test:
   A builds a conversation of N messages, B is handed only the latest, B
   backfills from A to the genesis, B `load_dag` succeeds and B can thread a
-  reply. Non-goals: re-wrap-to-read (D2), auto-backfill-on-orphan wiring,
+  reply. Non-goals: re-wrap-to-read (D3), auto-backfill-on-orphan wiring,
   dial-by-key (D0b), forward auto-sync.
 - **D0b · Relay-coordinated peer connectivity (§4.1) — done (2026-07-18;
   cross-NAT verified live, phone on cellular).** iroh relay server in the

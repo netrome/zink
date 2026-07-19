@@ -437,7 +437,7 @@ async fn backfill(args: &[String]) -> Result<(), String> {
 
 /// A peer named on the command line: a contact petname, or a device-key hex.
 /// (Contact identity is keyed on the record's first key — the C2 convention,
-/// revisited at D2.)
+/// revisited at D3.)
 fn resolve_peer_key(client: &Client, peer: &str) -> Result<zink_protocol::PublicKey, String> {
     for (petname, record) in client.contacts()? {
         if petname == *peer {

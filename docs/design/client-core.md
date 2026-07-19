@@ -139,7 +139,7 @@ not a contract.
   holds `who-is` answers with provenance — multiple records per key, latest per
   responder. Network input never mutates the contact store; freshness is read-time
   relay resolution (subject-served > user-added > contact-served, latest within a
-  class), sealing keys come only from the user-added record until D2, and the
+  class), sealing keys come only from the user-added record until D3, and the
   profile name-attestation revision persists in `profile.revision` (bumped per
   rename — SPEC §3.2 supersession).
 - **Errors are one crate-wide enum (`zink_client::Error`, De1).** Precise variants

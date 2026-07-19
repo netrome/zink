@@ -19,7 +19,7 @@ invalidate stored records) heals by re-asking.
 **Non-goals (all deferred, with homes):** query forwarding / hops > 1 (D4);
 issuing third-party `name` claims — "vouching" — and negative claims (D4;
 recovery flows use them); aggregation UX beyond an agreement count (D4);
-`same-person-as` handling (D2); automatic querying (see §5 — a privacy
+`same-person-as` handling (D3); automatic querying (see §5 — a privacy
 decision, not a missing feature).
 
 ## 2. Decisions (resolved 2026-07-19)
@@ -77,6 +77,15 @@ is what the gate closes.
 command). Auto-querying on unknown-sender receipt would broadcast "I just got
 a message from X" to every contact asked; that's a live privacy leak for a
 marginal UX gain, so it's a deliberate non-goal, not a follow-up.
+
+> **Scoped revision pending (agreed 2026-07-19; lands with D2 · Groups).**
+> The blanket rule above is about *unsolicited senders*. Inside a
+> conversation, a key's presence in the signed `recipients` is already
+> mutual knowledge among participants — auto-querying *those participants*
+> about it reveals nothing they don't know. D2 revises this section with
+> that carve-out (query scoped to co-participants, or just the introducing
+> sender); manual control over the contact store stays absolute
+> (add-or-ignore), and the responder-side gate is unchanged.
 
 The flow, best-effort like every peer op:
 
@@ -146,10 +155,10 @@ class, latest-received within a class:
    the whole point.
 
 **Sealing keys never come from learned records** — only from the user-added
-contact-store record, until D2's mutual `same-person-as` links can evaluate
+contact-store record, until D3's mutual `same-person-as` links can evaluate
 key-set changes (the review note about contact identity keyed on
 `keys.first()` lands there too). A learned record with a different key set
-just sits as evidence; until D2, adopting new keys means an explicit re-add.
+just sits as evidence; until D3, adopting new keys means an explicit re-add.
 
 **Revision.** `my_record` currently hardcodes `revision: 0`, so a renamed
 profile issues a *second* rev-0 claim and supersession has no winner — ranking

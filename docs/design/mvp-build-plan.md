@@ -157,7 +157,7 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   history renders from the stored DAG with everything ciphertext-at-rest. Wraps
   live outside the hashed core: ids unchanged, no version bump, recipients
   unaffected. A client convention, not protocol — a client that skips it only
-  loses its own history; full send-to-self (deposit to own mailbox) is the D2
+  loses its own history; full send-to-self (deposit to own mailbox) is the D3
   multi-device extension of the same idea. Record in SPEC §6 when it lands.)*
 - [x] **C3a · Client-core groundwork (no UI).** Self-wrap in `seal`; conversation
   enumeration + history API on `Client` (linearized, opened bodies); encrypted
@@ -305,7 +305,7 @@ content-addressing pinned, no panics on hostile input. Fixed in this pass:
 Deferred with homes above: MEDIUM-3 → C4, MEDIUM-4 + render-from-DAG → C3. Also noted:
 `zink-client` has no unit tests of its own (only e2e coverage); `String` errors will
 want structured variants once the UI branches on failure kind (✅ resolved — De1,
-2026-07-19); contact identity keyed on `keys.first()` needs revisiting at D2.
+2026-07-19); contact identity keyed on `keys.first()` needs revisiting at D3.
 
 ## Stage D — Identity & social layer (SPEC phases 1–3, post-Stage-C)
 
@@ -313,7 +313,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   §5.2) over a peer ALPN, served at each peer's discretion, plus the relay-coordinated
   connectivity that lets a client actually *reach* a peer. Fixes the known late-joiner
   hole (a client without a conversation's genesis cannot reply — noted in B5);
-  prerequisite for D2 backfill and D4's backlog serving. *(The peer ALPN + connectivity
+  prerequisite for D3 backfill and D4's backlog serving. *(The peer ALPN + connectivity
   it stands up are the substrate for D1's `who-is-this` and D5 direct delivery too.)*
   Design: [sync-primitives.md](./sync-primitives.md).
   - [x] **D0a · Serve + backward-fill.** `SYNC_ALPN` + sync wire types in
@@ -322,7 +322,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     from)` walks `parents` back to the genesis. *Done when:* headless e2e — A builds an
     N-message conversation, B holds only the latest, B backfills from A to the genesis,
     B's `load_dag` succeeds and B threads a reply. Non-goals: re-wrap-to-*read* old
-    bodies (D2), auto-backfill-on-orphan, forward auto-sync.
+    bodies (D3), auto-backfill-on-orphan, forward auto-sync.
     ✅ *(2026-07-12: serve full envelopes — not bare cores — so the requester
     verifies authorship for free and reuses `remember`; permissive serve-what-you-hold;
     peer addressed by dial string now (dial-by-key deferred to D0b's
@@ -384,7 +384,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     contact's succeeds.
     ✅ *(2026-07-18: gate resolved once per connection (the caller's key IS the
     authenticated connection key); non-contacts get `NotHeld` / empty successors;
-    own key always served (self-dial, and D2 own-device sync rides the same
+    own key always served (self-dial, and D3 own-device sync rides the same
     allowance). e2e: a stranger backfills 0 and sees no successors of a held
     genesis, the same requester succeeds after their record is stored. Note for
     D1: `who-is-this` will want a *different* policy for its own op — identity
@@ -506,7 +506,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     widen); **nothing is ever overwritten** — the contact store is never touched
     by network input; freshness is read-time relay resolution by provenance
     class (subject-served > scanned > contact-served, latest within class), and
-    sealing keys come only from the user-added record until D2; name precedence
+    sealing keys come only from the user-added record until D3; name precedence
     petname > learned self-claim (with provenance + agreement count, `revision`
     breaks conflicts) > hex; fix `my_record`'s hardcoded `revision: 0` (persist +
     bump per profile change — supersession needs a winner); CLI `who-is`.
@@ -604,17 +604,57 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   avatar misses on who-is completion / view events. *Done when:* a who-is with
   one offline contact answers in ~one connect-timeout, and the panel says
   "asked N, M unreachable" honestly.
-- [ ] **D2 · Groups** *(was D3 — reorg 2026-07-19: groups before multi-device;
-  delivery is already fan-out, so this is mostly membership *presentation* —
-  client UX — and it makes D1's who-is hook earn its keep on every unknown
-  group participant).* Multi-recipient conversations in the UI.
-- [ ] **D3 · Multi-device** *(was D2).* QR pairing (mutual `same-person-as`);
-  device set in resolution; history backfill via content-key re-wrap. *(Review
-  note: contact identity is currently keyed on `record.keys.first()` — revisit
-  so a re-scanned record with reordered/added device keys isn't treated as a
-  different contact.)*
-- [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?" answers
-  from contacts; concurrency-aware message views.
+- [ ] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
+  reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
+  on the contacts' side IS the membership-presentation pipeline, so it ships
+  first and multi-device becomes a thin layer on top. SPEC §12 phases
+  multi-device before groups, but that phasing assumed the multi-recipient DAG
+  was unbuilt — it shipped in B2, so the inversion is consistent with the
+  spec's intent.)* Multi-recipient conversation creation in the UI (delivery
+  is fan-out since B2 — this is mostly membership *presentation*), plus the
+  unknown-key pipeline: a key appearing in a conversation's **signed
+  `recipients` IS the announcement** — the fan-out itself carries the fact,
+  no new mechanism; unknown key → **auto `who-is-this` scoped to that
+  conversation's participants** (a deliberate, recorded revision of D1's
+  no-auto-query: the blanket rule was about unsolicited senders — within a
+  conversation the key's presence is already mutual knowledge, so the scoped
+  query reveals nothing; revise who-is-this.md §5 when this lands) →
+  provenance-ranked candidates → the "a wild Charlie appeared" surface →
+  add-as-contact or ignore, the user always in control of their own store.
+  Design doc first; its job is **defensive**: no new mechanisms (recipients
+  announce, who-is looks up), and document the responder-side-gate limit —
+  the scoped query is answered only by participants who hold *you* as a
+  contact; it degrades to hex + manual add, and the per-op gate can later
+  learn "answer about participants of shared conversations" without wire
+  changes if that ever bites. *Done when:* headless e2e — B adds C to a
+  conversation with A; A's client auto-queries, surfaces C with provenance,
+  A adds C and replies to all.
+- [ ] **D3 · Multi-device.** 🎯 *(Was D2 — now genuinely thin: D2's pipeline
+  does the propagation, since "your new device" and "a new member" are the
+  same event under the hood (SPEC §5.2).)* QR pairing producing the mutual
+  `same-person-as`; the clustering rule that upgrades the popup from "wild
+  Charlie" to "Alice added a device" — cluster iff a mutual link involving an
+  already-trusted key verifies; otherwise it stays an unknown key added by
+  Alice (the one real anti-spoofing rule, and the only place `same-person-as`
+  evaluation enters); the re-wrap op + the D0c gate extension (keys mutually
+  attested as mine count as self); send-to-self deposits (the SPEC §6
+  extension of self-wrap); the parked `keys.first()` contact-identity fix
+  (a re-scanned record with reordered/added keys must not read as a new
+  contact). Design doc should state the completeness hierarchy: own sibling
+  devices are the *primary* history/freshness channel (send-to-self +
+  own-device sync); contacts' fan-out is robustness, never load-bearing —
+  and park the honest repudiation-lag note (quiet conversations keep
+  addressing a dead key until someone speaks; lazy by design). *Done when:*
+  pair a second device, it sends one message per active conversation,
+  contacts' clients cluster it under the person, and it reads old history
+  via re-wrap.
+- [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?"
+  answers from contacts; concurrency-aware message views. *(Position confirmed
+  at the 2026-07-19 reorg: D2's pipeline runs entirely on D1's
+  self-claims-with-provenance; D4's vouching — "your friends call them…" —
+  hop>1 forwarding, and weighted aggregation layer onto the existing popup
+  ranking additively. Concurrency-aware views likewise: groups make forks
+  more common, but the Lamport linearization already renders them honestly.)*
 - [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
   device is online and reachable (via D0b connectivity — holepunched direct, or
   relay-routed as fallback), deliver the envelope peer-to-peer over the D0a peer ALPN

@@ -65,7 +65,7 @@ impl RelayEntry {
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ContactRecord {
     pub version: u16,
-    /// The person's current device keys (one per device; multi-device D2).
+    /// The person's current device keys (one per device; multi-device D3).
     pub keys: Vec<PublicKey>,
     /// Self-attestations — name now; avatar / same-person-as links later.
     pub attestations: Vec<SignedAttestation>,
