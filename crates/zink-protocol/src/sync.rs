@@ -10,7 +10,7 @@ use crate::FORMAT_VERSION;
 use crate::codec::{self, DecodeError};
 use crate::contact_record::ContactRecord;
 use crate::keys::PublicKey;
-use crate::message::{MessageEnvelope, MessageId};
+use crate::message::{KeyWrap, MessageEnvelope, MessageId};
 
 /// ALPN for the peer sync protocol. The generation lives here, so
 /// incompatible speakers never exchange frames.
@@ -21,6 +21,11 @@ pub const SYNC_ALPN: &[u8] = b"zink-sync/1";
 /// per-envelope headroom rather than a full-mailbox page.
 pub const MAX_SYNC_REQUEST_BYTES: usize = 1 << 10;
 pub const MAX_SYNC_RESPONSE_BYTES: usize = 16 << 20;
+
+/// The `GetKeys` batch bound (D3d): both sides enforce it — the requester
+/// chunks, the server answers at most this many ids per request. Sized so
+/// a full batch fits `MAX_SYNC_REQUEST_BYTES` with headroom.
+pub const MAX_GET_KEYS_IDS: usize = 24;
 
 /// One sync operation, addressed by content id. Served at the peer's
 /// discretion (SPEC §5.2): a peer answers what it holds and chooses to share.
@@ -59,6 +64,11 @@ pub enum SyncOp {
     /// the responder's stored record for it — or `NotHeld`, at discretion.
     /// (Appended so existing BORSH variant tags stay stable.)
     WhoIs { key: PublicKey },
+    /// Re-wrap (SPEC §5.2, D3d): "re-seal these messages' content-keys to
+    /// me." Bounded batch (`MAX_GET_KEYS_IDS`); served to recognized own
+    /// devices only at D3 — anyone else gets `NotHeld` (multi-device.md
+    /// §6). (Appended — tags stable.)
+    GetKeys { ids: Vec<MessageId> },
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -105,6 +115,12 @@ pub enum SyncResult {
     /// scanned QR. (Appended so existing BORSH variant tags stay stable.)
     Known {
         record: Box<ContactRecord>,
+    },
+    /// `GetKeys` — a fresh wrap per re-sealable id. Misses are simply
+    /// absent; the requester verifies each wrap (its own key, the body
+    /// opens) before appending it. (Appended — tags stable.)
+    Wraps {
+        wraps: Vec<(MessageId, KeyWrap)>,
     },
 }
 
@@ -180,6 +196,9 @@ mod tests {
             SyncOp::WhoIs {
                 key: DeviceKey::from_seed([3; 32]).public(),
             },
+            SyncOp::GetKeys {
+                ids: vec![sample_envelope().id(), MessageId([7; 32])],
+            },
         ];
 
         for op in ops {
@@ -208,6 +227,18 @@ mod tests {
             },
             SyncResult::Known {
                 record: Box::new(sample_record()),
+            },
+            SyncResult::Wraps {
+                wraps: vec![(
+                    sample_envelope().id(),
+                    crate::message::KeyWrap {
+                        recipient: DeviceKey::from_seed([5; 32]).public(),
+                        sealed: vec![crate::message::SealedKey {
+                            object: crate::message::SealedRef::Body,
+                            sealed_key: vec![9; 48],
+                        }],
+                    },
+                )],
             },
         ];
 

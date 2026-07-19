@@ -8,9 +8,9 @@ use iroh::Endpoint;
 use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, EncryptedBlob,
-    FORMAT_VERSION, MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError,
-    PublicKey, RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
-    open_avatar, seal_avatar,
+    FORMAT_VERSION, MAX_GET_KEYS_IDS, MailboxOp, MailboxResult, MessageDraft, MessageEnvelope,
+    MessageId, OpenError, PublicKey, RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult,
+    distinct_relays, open_avatar, seal_avatar,
 };
 
 use crate::error::Error;
@@ -477,6 +477,7 @@ impl Client {
         // orphaned (one missing-ancestors scan per touched conversation).
         self.auto_sync(&received).await;
         self.auto_who_is(&received).await;
+        self.auto_rewrap(&received).await;
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
@@ -549,6 +550,7 @@ impl Client {
             // the whole conversation, not an unthreadable orphan.
             self.auto_sync(&received).await;
             self.auto_who_is(&received).await;
+            self.auto_rewrap(&received).await;
             on_new(received);
         }
         let _ = self.flush_outbox().await;
@@ -575,6 +577,7 @@ impl Client {
                 // the sender only on an actual orphan.
                 self.auto_sync(&received).await;
                 self.auto_who_is(&received).await;
+                self.auto_rewrap(&received).await;
                 on_new(received);
             }
         }
@@ -1677,13 +1680,12 @@ impl Client {
         conversation: MessageId,
         peer: PublicKey,
     ) -> Result<usize, Error> {
-        let records = self.state.contacts()?;
-        let record = records
-            .iter()
-            .find(|(_, record)| record.keys.contains(&peer))
-            .map(|(_, record)| record)
-            .ok_or_else(|| Error::NotAContact("no stored contact record for that key".into()))?;
-        self.backfill_addr(conversation, self.peer_addr_for(peer, Some(record))?)
+        // A contact's record, or a recognized own device's (D3c/D3d) — a
+        // fresh paired device backfills its sibling by key.
+        let record = self
+            .trusted_record_for(&peer)
+            .ok_or_else(|| Error::NotAContact("no stored record for that key".into()))?;
+        self.backfill_addr(conversation, self.peer_addr_for(peer, Some(&record))?)
             .await
     }
 
@@ -1867,6 +1869,114 @@ impl Client {
             }
         }
         healed
+    }
+
+    /// Heal unopenable history from paired devices (D3d, multi-device.md
+    /// §6): after a skeleton sync leaves envelopes stored but unopenable,
+    /// batch their ids to each recognized device and append the verified
+    /// wraps to the stored envelopes. Ids never move — wraps live outside
+    /// the hashed core; storage just rewrites the file. Best-effort like
+    /// every peer op; returns how many messages became readable.
+    pub async fn rewrap_backlog(&self) -> usize {
+        let mut healed = 0;
+        for conversation in self.state.conversations() {
+            healed += self.rewrap_conversation(conversation).await;
+        }
+        healed
+    }
+
+    async fn rewrap_conversation(&self, conversation: MessageId) -> usize {
+        let me = self.device.public();
+        let Ok(envelopes) = self.state.load_envelopes(conversation) else {
+            return 0;
+        };
+        let mut unopenable: BTreeMap<MessageId, MessageEnvelope> = envelopes
+            .into_iter()
+            .filter(|envelope| !envelope.key_wraps.iter().any(|wrap| wrap.recipient == me))
+            .map(|envelope| (envelope.id(), envelope))
+            .collect();
+        if unopenable.is_empty() {
+            return 0;
+        }
+        let mut healed = 0;
+        for (device_key, record) in self.state.recognized_devices() {
+            if unopenable.is_empty() {
+                break;
+            }
+            let Ok(addr) = self.peer_addr_for(device_key, Some(&record)) else {
+                continue;
+            };
+            let Ok(connection) =
+                net::connect_addr(&self.endpoint, addr, SYNC_ALPN, self.config.connect_timeout)
+                    .await
+            else {
+                continue;
+            };
+            let missing: Vec<MessageId> = unopenable.keys().copied().collect();
+            for chunk in missing.chunks(MAX_GET_KEYS_IDS) {
+                let Ok(SyncResult::Wraps { wraps }) = net::sync_request(
+                    &connection,
+                    SyncOp::GetKeys {
+                        ids: chunk.to_vec(),
+                    },
+                )
+                .await
+                else {
+                    break; // declined or failed — try the next device
+                };
+                for (id, wrap) in wraps {
+                    let Some(envelope) = unopenable.get(&id) else {
+                        continue;
+                    };
+                    // Verify before trusting: the wrap is ours and the
+                    // body opens under it (the commitment check inside
+                    // `open` rejects a wrong key). A bad wrap is dropped
+                    // with a warning, never stored.
+                    if wrap.recipient != me {
+                        tracing::warn!("re-wrap for a different key; dropped");
+                        continue;
+                    }
+                    let mut updated = envelope.clone();
+                    updated.key_wraps.push(wrap);
+                    if updated.open(&self.device).is_err() {
+                        tracing::warn!("re-wrap does not open the body; dropped");
+                        continue;
+                    }
+                    if self.state.store_envelope(conversation, &updated).is_err() {
+                        continue;
+                    }
+                    unopenable.remove(&id);
+                    healed += 1;
+                }
+            }
+        }
+        healed
+    }
+
+    /// The opportunistic re-wrap (D3d): after a drain — whose auto-sync
+    /// may just have pulled pre-pairing history — heal the touched
+    /// conversations. Free for single-device clients: no recognized
+    /// devices, no scan.
+    async fn auto_rewrap(&self, received: &[Received]) {
+        if self.state.recognized_devices().is_empty() {
+            return;
+        }
+        let conversations: BTreeSet<MessageId> = received
+            .iter()
+            .map(|message| {
+                message
+                    .envelope
+                    .core
+                    .conversation
+                    .unwrap_or_else(|| message.envelope.id())
+            })
+            .collect();
+        for conversation in conversations {
+            let healed = self.rewrap_conversation(conversation).await;
+            if healed > 0 {
+                tracing::info!(healed, "re-wrapped history from a paired device");
+            }
+        }
     }
 
     /// Persist a verified envelope and its participant→conversation mapping,
@@ -2172,6 +2282,39 @@ mod tests {
                 blob_refs: vec![],
             };
             envelopes.push(MessageEnvelope::new(core, author));
+        }
+        envelopes
+    }
+
+    /// A conversation of *genuinely sealed* envelopes (real wraps, real
+    /// crypto) — what the re-wrap tests need; `chain` above is
+    /// skeleton-only.
+    fn sealed_chain(
+        author: &DeviceKey,
+        recipient: PublicKey,
+        texts: &[&[u8]],
+    ) -> Vec<MessageEnvelope> {
+        let mut envelopes: Vec<MessageEnvelope> = Vec::new();
+        for (seq, text) in texts.iter().enumerate() {
+            let (conversation, parents) = match envelopes.first() {
+                None => (None, vec![]),
+                Some(genesis) => (Some(genesis.id()), vec![envelopes.last().unwrap().id()]),
+            };
+            let draft = MessageDraft {
+                conversation,
+                parents,
+                recipients: vec![recipient],
+                seq: seq as u64,
+                logical: seq as u64,
+                timestamp_ms: 0,
+                plaintext: text.to_vec(),
+                blobs: vec![],
+            };
+            envelopes.push(
+                MessageEnvelope::seal(draft, author, &mut OsRng)
+                    .expect("seal")
+                    .envelope,
+            );
         }
         envelopes
     }
@@ -3460,6 +3603,149 @@ mod tests {
         assert!(a.own_keys().contains(&a.public_key()));
 
         let _ = std::fs::remove_dir_all(temp_root("labels-device"));
+    }
+
+    #[tokio::test]
+    async fn rewrap__should_make_pre_pairing_history_readable_on_the_paired_device() {
+        // Given: the phone holds a fully-sealed conversation from before
+        // the laptop's key existed; both home to a relay for dial-by-key
+        let (_relay, url) = spawn_test_relay().await;
+        let phone = open_homed("rewrap", "phone", &url).await;
+        let laptop = open_homed("rewrap", "laptop", &url).await;
+        let author = DeviceKey::from_seed([60; 32]);
+        let msgs = sealed_chain(&author, phone.public_key(), &[b"one", b"two", b"three"]);
+        let conversation = msgs[0].id();
+        let ids: BTreeSet<MessageId> = msgs.iter().map(|m| m.id()).collect();
+        for envelope in &msgs {
+            phone.state.store_envelope(conversation, envelope).unwrap();
+        }
+        // The pair: the phone recognizes the laptop (what authorizes
+        // GetKeys), the laptop recognizes the phone with its homed record
+        // (the dial route for backfill + pull)
+        phone
+            .recognize_device(&ContactRecord::new(
+                vec![laptop.public_key()],
+                vec![],
+                mailbox_only("ll@203.0.113.5:5"),
+            ))
+            .expect("recognize");
+        laptop
+            .recognize_device(&ContactRecord::new(
+                vec![phone.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(url.clone()),
+                }],
+            ))
+            .expect("recognize back");
+        phone.endpoint.online().await;
+
+        // When: the D2a-style full flow — the laptop holds only the tip,
+        // backfills the skeleton by key, then pulls re-wraps
+        laptop
+            .state
+            .store_envelope(conversation, msgs.last().unwrap())
+            .unwrap();
+        let fetched = laptop
+            .backfill_by_key(conversation, phone.public_key())
+            .await
+            .expect("backfill via the devices store");
+        assert_eq!(fetched, 2, "genesis + middle");
+        let unreadable = laptop
+            .history(conversation)
+            .expect("history")
+            .iter()
+            .filter(|message| message.body.is_err())
+            .count();
+        assert_eq!(unreadable, 3, "skeleton synced; nothing readable yet");
+        let healed = laptop.rewrap_backlog().await;
+
+        // Then: every body opens, and no id moved
+        assert_eq!(healed, 3);
+        let history = laptop.history(conversation).expect("history");
+        let bodies: Vec<Vec<u8>> = history
+            .iter()
+            .map(|message| message.body.as_ref().expect("opens").clone())
+            .collect();
+        assert_eq!(
+            bodies,
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
+        assert_eq!(
+            history.iter().map(|m| m.id).collect::<BTreeSet<_>>(),
+            ids,
+            "wraps appended outside the hashed core — ids unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("rewrap"));
+    }
+
+    #[tokio::test]
+    async fn get_keys__should_decline_anyone_but_a_recognized_device() {
+        // Given: the phone holds a sealed message; alice is a full
+        // contact — served history by the gate — but not a device
+        let phone = Client::open_or_create(&temp_key("getkeys", "phone"))
+            .await
+            .expect("open phone");
+        let alice = Client::open_or_create(&temp_key("getkeys", "alice"))
+            .await
+            .expect("open alice");
+        let laptop = Client::open_or_create(&temp_key("getkeys", "laptop"))
+            .await
+            .expect("open laptop");
+        let author = DeviceKey::from_seed([61; 32]);
+        let msgs = sealed_chain(&author, phone.public_key(), &[b"secret"]);
+        let id = msgs[0].id();
+        phone.state.store_envelope(id, &msgs[0]).unwrap();
+        befriend(&phone, &alice);
+
+        // When: the contact asks for re-wraps
+        let connection = net::connect_addr(
+            &alice.endpoint,
+            phone.endpoint.addr(),
+            SYNC_ALPN,
+            alice.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let declined = net::sync_request(&connection, SyncOp::GetKeys { ids: vec![id] })
+            .await
+            .expect("round-trip");
+
+        // Then: declined like a miss — re-wrap serving is narrower than
+        // the history gate (own devices only at D3)
+        assert_eq!(declined, SyncResult::NotHeld);
+
+        // When: a recognized device asks
+        phone
+            .recognize_device(&ContactRecord::new(
+                vec![laptop.public_key()],
+                vec![],
+                mailbox_only("ll@203.0.113.5:5"),
+            ))
+            .expect("recognize");
+        let connection = net::connect_addr(
+            &laptop.endpoint,
+            phone.endpoint.addr(),
+            SYNC_ALPN,
+            laptop.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let served = net::sync_request(&connection, SyncOp::GetKeys { ids: vec![id] })
+            .await
+            .expect("round-trip");
+
+        // Then: one fresh wrap, sealed to the caller
+        let SyncResult::Wraps { wraps } = served else {
+            panic!("expected wraps, got {served:?}");
+        };
+        assert_eq!(wraps.len(), 1);
+        assert_eq!(wraps[0].0, id);
+        assert_eq!(wraps[0].1.recipient, laptop.public_key());
+
+        let _ = std::fs::remove_dir_all(temp_root("getkeys"));
     }
 
     #[tokio::test]

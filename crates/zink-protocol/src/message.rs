@@ -212,6 +212,50 @@ impl MessageEnvelope {
         content_key.decrypt(encrypted).map_err(OpenError::Crypto)
     }
 
+    /// Re-seal this envelope's content-keys to another key — the re-wrap
+    /// primitive (SPEC §5.2, D3d): what lets a device added after the fact
+    /// read history from before its key existed. Every object key is
+    /// unsealed from `opener`'s existing wrap — checked against its
+    /// commitment in the signed core, so a tampered wrap can't be
+    /// laundered into a fresh one — and sealed to `recipient` as a new
+    /// wrap. Cheap by construction: no body re-encryption, and the id
+    /// never moves (wraps live outside the hashed core).
+    pub fn rewrap(
+        &self,
+        opener: &DeviceKey,
+        recipient: PublicKey,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<KeyWrap, OpenError> {
+        self.verify().map_err(OpenError::Signature)?;
+        let wrap = self
+            .key_wraps
+            .iter()
+            .find(|wrap| wrap.recipient == opener.public())
+            .ok_or(OpenError::NotARecipient)?;
+        let mut sealed = Vec::new();
+        for entry in &wrap.sealed {
+            let commitment = match &entry.object {
+                SealedRef::Body => &self.core.key_commit,
+                SealedRef::Blob(hash) => {
+                    &self
+                        .core
+                        .blob_refs
+                        .iter()
+                        .find(|blob_ref| blob_ref.hash == *hash)
+                        .ok_or(OpenError::UnknownBlob)?
+                        .key_commit
+                }
+            };
+            let key = ContentKey::open(&entry.sealed_key, opener, commitment)
+                .map_err(OpenError::Crypto)?;
+            sealed.push(SealedKey {
+                object: entry.object.clone(),
+                sealed_key: key.seal_for(&recipient, rng).map_err(OpenError::Crypto)?,
+            });
+        }
+        Ok(KeyWrap { recipient, sealed })
+    }
+
     /// Sign `core` and wrap it for transport. `seal` is the high-level
     /// entry; this is the building block beneath it.
     pub fn new(core: MessageCore, sender_key: &DeviceKey) -> Self {
@@ -420,6 +464,77 @@ mod tests {
                 key_commit: KeyCommitment([7; 32]),
             }],
         }
+    }
+
+    #[test]
+    fn rewrap__should_let_the_new_key_read_body_and_blobs_with_the_id_unmoved() {
+        // Given: a message with blobs, sealed to the phone only
+        let sender = device_key(1);
+        let phone = device_key(2);
+        let laptop = device_key(3);
+        let sealed = MessageEnvelope::seal(draft_with_blobs(phone.public()), &sender, &mut rng())
+            .expect("seal");
+        let mut envelope = sealed.envelope;
+        let id = envelope.id();
+        assert!(envelope.open(&laptop).is_err(), "laptop starts unopenable");
+
+        // When: the phone re-seals its keys to the laptop; the wrap is
+        // appended outside the hashed core
+        let wrap = envelope
+            .rewrap(&phone, laptop.public(), &mut rng())
+            .expect("rewrap");
+        envelope.key_wraps.push(wrap);
+
+        // Then: the laptop reads the body and every blob; the id never moved
+        assert_eq!(envelope.open(&laptop).expect("body"), b"see attached");
+        for blob in &sealed.blobs {
+            assert!(
+                envelope.open_blob(&laptop, &blob.hash, &blob.bytes).is_ok(),
+                "blob key rides the rewrap"
+            );
+        }
+        assert_eq!(envelope.id(), id);
+    }
+
+    #[test]
+    fn rewrap__should_fail_for_an_opener_without_a_wrap() {
+        // Given: sealed to the phone; a stranger holds no wrap
+        let sender = device_key(1);
+        let phone = device_key(2);
+        let stranger = device_key(4);
+        let envelope =
+            MessageEnvelope::seal(draft_to(vec![phone.public()], b"x"), &sender, &mut rng())
+                .expect("seal")
+                .envelope;
+
+        // When / Then
+        assert_eq!(
+            envelope
+                .rewrap(&stranger, device_key(5).public(), &mut rng())
+                .unwrap_err(),
+            OpenError::NotARecipient
+        );
+    }
+
+    #[test]
+    fn rewrap__should_reject_a_tampered_wrap_instead_of_laundering_it() {
+        // Given: the phone's own sealed body key is corrupted in storage
+        let sender = device_key(1);
+        let phone = device_key(2);
+        let mut envelope =
+            MessageEnvelope::seal(draft_to(vec![phone.public()], b"x"), &sender, &mut rng())
+                .expect("seal")
+                .envelope;
+        envelope.key_wraps[0].sealed[0].sealed_key[0] ^= 0xFF;
+
+        // When / Then: unsealing fails — a bad wrap never becomes a fresh
+        // one for someone else
+        assert!(matches!(
+            envelope
+                .rewrap(&phone, device_key(5).public(), &mut rng())
+                .unwrap_err(),
+            OpenError::Crypto(_)
+        ));
     }
 
     #[test]

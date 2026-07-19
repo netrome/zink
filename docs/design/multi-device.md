@@ -322,10 +322,19 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   introduce-now needs no API — it is an empty-body `send_in`, the button
   lands with D3e. The acceptance e2e proves directness with the sibling
   offline from before the contact's reply onward.)*
-- **D3d · Re-wrap.** `GetKeys` op + serve/request sides + wrap-append
-  storage; opportunistic run after pairing/sync. *Done when:* headless e2e
-  — the paired device reads bodies from before it existed (the D2a-style
-  full flow), and a non-own-device caller gets `NotHeld`.
+- **D3d · Re-wrap — done (2026-07-19).** `GetKeys` op + serve/request
+  sides + wrap-append storage; opportunistic run after pairing/sync. *Done
+  when:* headless e2e — the paired device reads bodies from before it
+  existed (the D2a-style full flow), and a non-own-device caller gets
+  `NotHeld`.
+  *(As built: `MessageEnvelope::rewrap` checks every unsealed key against
+  its commitment in the signed core before re-sealing — a tampered stored
+  wrap can't be laundered onward; batch cap `MAX_GET_KEYS_IDS = 24`
+  enforced on both sides; the serve predicate is the recognized-devices
+  set alone, so a contact's `GetKeys` declines as a miss while their
+  history access is untouched; `auto_rewrap` rides the drain seams after
+  `auto_sync`, and `backfill_by_key` resolves siblings through the devices
+  store so the whole skeleton-then-keys flow works by key alone.)*
 - **D3e · App UI + acceptance.** Pair mode screens (show/scan + confirm),
   device list in the me-view, introduction button, popup upgrade wired.
   *Done when:* the plan's acceptance live — pair a second device, introduce,

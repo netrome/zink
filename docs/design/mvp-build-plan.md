@@ -908,10 +908,31 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     evidence tiers incl. the spoof direction; device labels + own_keys.
     SPEC §6 send-to-self recorded (the C3 pending line);
     who-is-this.md §5 responders + client-core.md updated. 174 tests.)*
-  - [ ] **D3d · Re-wrap.** `SyncOp::GetKeys { ids }` → wraps re-sealed to
+  - [x] **D3d · Re-wrap.** `SyncOp::GetKeys { ids }` → wraps re-sealed to
     the caller (own devices only); wrap-append storage; opportunistic run
     after pairing/sync. *Done when:* headless e2e — the paired device reads
     bodies from before it existed; a non-own-device caller gets `NotHeld`.
+    ✅ *(2026-07-19: protocol — `GetKeys`/`Wraps` appended (tags stable),
+    `MAX_GET_KEYS_IDS = 24` enforced both sides;
+    `MessageEnvelope::rewrap(opener, recipient)` unseals every object key
+    from the opener's wrap **checked against its commitment in the signed
+    core** (a tampered wrap can't be laundered into a fresh one — tested)
+    and re-seals to the target; body + blob keys ride together; no body
+    re-encryption, ids never move (pinned by test). Serve side: recognized
+    own devices ONLY — narrower than the history gate; a full *contact*'s
+    GetKeys returns `NotHeld` (tested). Requester:
+    `Client::rewrap_backlog` scans stored envelopes lacking an own-key
+    wrap, batches to each recognized device (route via the devices store —
+    `backfill_by_key` gained the same `trusted_record_for` fallback, so a
+    fresh device backfills its sibling by key too), verifies each wrap
+    (ours + the body opens) and appends via the overwriting
+    `store_envelope`; `auto_rewrap` runs per touched conversation at the
+    three drain seams after `auto_sync` (zero cost with no recognized
+    devices); CLI `rewrap`. e2e: the D2a-style full flow — laptop holds
+    the tip, backfills the skeleton from the phone by key, `rewrap_backlog`
+    heals 3/3, bodies read with the id set unchanged. SPEC §11 row pinned
+    (GetKeys shape + own-device-only serving); client-core.md updated.
+    179 tests.)*
   - [ ] **D3e · App UI + acceptance.** Pair mode (show/scan + fingerprint
     confirm), device list, introduction button, popup upgrade. *Done when:*
     the acceptance flow runs live across devices.

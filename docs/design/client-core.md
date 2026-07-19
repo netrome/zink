@@ -67,6 +67,12 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 // device_evidence(key) -> Vec<DeviceEvidence>: verified link tiers per
 // contact ("P says this is their device" / mutually confirmed) — the
 // popup's offer data; accept stays add_contact.
+// re-wrap (D3d, multi-device.md §6): rewrap_backlog() pulls GetKeys from
+// recognized devices for unopenable stored envelopes, verifies each wrap
+// (ours + body opens) and appends it — ids never move; auto-triggered per
+// touched conversation after every drain (free when no devices are
+// recognized). Serve side answers recognized devices ONLY — narrower than
+// the history gate; contacts get NotHeld.
 // stored history (C3a):
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's

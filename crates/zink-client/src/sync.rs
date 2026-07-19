@@ -9,9 +9,10 @@
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use rand_core::OsRng;
 use zink_protocol::{
-    ContactRecord, DeviceKey, MAX_SYNC_REQUEST_BYTES, PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp,
-    SyncRequest, SyncResponse, SyncResult,
+    ContactRecord, DeviceKey, MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES, MessageId, PublicKey,
+    SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest, SyncResponse, SyncResult,
 };
 
 use crate::state::ClientState;
@@ -91,6 +92,34 @@ impl SyncHandler {
             .find(|(_, record)| record.keys.contains(&subject))
             .map(|(_, record)| record)
     }
+
+    /// Serve a `GetKeys` re-wrap batch (D3d, multi-device.md §6).
+    /// **Narrower than the gate**: recognized own devices only at D3 — a
+    /// contact's request declines as `NotHeld`, indistinguishable from not
+    /// holding anything (SPEC §5.2 keeps "willingness to re-wrap" at its
+    /// narrowest until the recovery flows need more). Per id, capped: held
+    /// envelope + a wrap this device can open → a fresh wrap sealed to the
+    /// caller's connection key; misses are simply absent.
+    fn get_keys(&self, caller: PublicKey, ids: &[MessageId]) -> SyncResult {
+        let own_device = self
+            .state
+            .recognized_devices()
+            .iter()
+            .any(|(key, _)| *key == caller);
+        if !own_device {
+            return SyncResult::NotHeld;
+        }
+        let wraps = ids
+            .iter()
+            .take(MAX_GET_KEYS_IDS)
+            .filter_map(|&id| {
+                let envelope = self.state.find_envelope(id)?;
+                let wrap = envelope.rewrap(&self.device, caller, &mut OsRng).ok()?;
+                Some((id, wrap))
+            })
+            .collect();
+        SyncResult::Wraps { wraps }
+    }
 }
 
 impl ProtocolHandler for SyncHandler {
@@ -129,6 +158,7 @@ impl ProtocolHandler for SyncHandler {
                     },
                     None => SyncResult::NotHeld,
                 },
+                Some(SyncOp::GetKeys { ids }) => self.get_keys(caller, &ids),
                 None => SyncResult::Error {
                     code: SyncErrorCode::Malformed,
                 },

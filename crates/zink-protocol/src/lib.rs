@@ -33,8 +33,8 @@ pub use message::{
     open_avatar, seal_avatar,
 };
 pub use sync::{
-    MAX_SYNC_REQUEST_BYTES, MAX_SYNC_RESPONSE_BYTES, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest,
-    SyncResponse, SyncResult,
+    MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES, MAX_SYNC_RESPONSE_BYTES, SYNC_ALPN, SyncErrorCode,
+    SyncOp, SyncRequest, SyncResponse, SyncResult,
 };
 
 /// Format tag every hashed/wire object starts with (SPEC §10).

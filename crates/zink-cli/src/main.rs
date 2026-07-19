@@ -46,6 +46,7 @@ async fn main() -> ExitCode {
         Some("contacts") => contacts(&args[1..]).await,
         Some("recognize") => recognize(&args[1..]).await,
         Some("devices") => devices(&args[1..]).await,
+        Some("rewrap") => rewrap(&args[1..]).await,
         Some("send") => send(&args[1..]).await,
         Some("recv") => recv(&args[1..]).await,
         Some("conversations") => conversations(&args[1..]).await,
@@ -75,6 +76,7 @@ const USAGE: &str = "usage:
   zink-cli contacts --key <file>
   zink-cli recognize --key <file> <ZINK:...>
   zink-cli devices --key <file>
+  zink-cli rewrap --key <file>
   zink-cli send --key <file> --to <petname | pubkey@relay[,relay...]> [--to ...]
                 [--image <file> [--thumb <file>]] <text>
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
@@ -179,6 +181,17 @@ async fn recognize(args: &[String]) -> Result<(), String> {
         record.self_claimed_name().unwrap_or("<unnamed>"),
         &hex::encode(&key.0)[..8],
     );
+    client.close().await;
+    Ok(())
+}
+
+/// Pull re-wraps for unopenable history from paired devices (D3d) — the
+/// dev-tool trigger for the opportunistic run the drain path does itself.
+async fn rewrap(args: &[String]) -> Result<(), String> {
+    let (flags, _) = parse_flags(args)?;
+    let client = open_client(&flags).await?;
+    let healed = client.rewrap_backlog().await;
+    println!("{healed} message(s) became readable");
     client.close().await;
     Ok(())
 }
