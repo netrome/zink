@@ -258,6 +258,18 @@ fn ChatsView(
     }
 }
 
+/// The best-believed avatar for a key as a data URL — `None` when nothing
+/// is claimed or fetchable (render nothing; display data is best-effort).
+async fn avatar_data_url(subject: &str) -> Result<Option<String>, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        subject: &'a str,
+    }
+    let args = Args { subject };
+    let b64 = invoke::invoke::<Option<String>>("avatar", &args).await?;
+    Ok(b64.map(|b64| image::data_url(&b64)))
+}
+
 /// Fetch one blob of a stored message as a display-ready data URL.
 async fn blob_data_url(conversation: &str, message: &str, hash: &str) -> Result<String, String> {
     #[derive(Serialize)]
@@ -345,6 +357,31 @@ fn ChatView(
             }
         });
     };
+
+    // Sender avatars (D1d), lazily fetched per key; present-but-empty
+    // marks in-flight or none (both render nothing).
+    let avatars = RwSignal::new(HashMap::<String, String>::new());
+    Effect::new(move |_| {
+        for message in messages.get() {
+            if message.mine {
+                continue;
+            }
+            let key = message.sender_key.clone();
+            if avatars.with_untracked(|avatars| avatars.contains_key(&key)) {
+                continue;
+            }
+            avatars.update(|avatars| {
+                avatars.insert(key.clone(), String::new());
+            });
+            spawn_local(async move {
+                if let Ok(Some(url)) = avatar_data_url(&key).await {
+                    avatars.update(|avatars| {
+                        avatars.insert(key, url);
+                    });
+                }
+            });
+        }
+    });
 
     // "who is this?" (D1c): `Some((subject, None))` = asking, `Some((_,
     // Some(report)))` = showing candidates. Manual trigger only — asking
@@ -575,8 +612,21 @@ fn ChatView(
                                 .pending
                                 .then_some(" · ⏳ not delivered yet")
                                 .unwrap_or_default();
+                            let avatar_key = (!message.mine).then(|| message.sender_key.clone());
                             view! {
                                 <div class=class>
+                                    {avatar_key
+                                        .map(|key| {
+                                            view! {
+                                                {move || {
+                                                    avatars
+                                                        .with(|avatars| {
+                                                            avatars.get(&key).filter(|url| !url.is_empty()).cloned()
+                                                        })
+                                                        .map(|url| view! { <img class="avatar" src=url /> })
+                                                }}
+                                            }
+                                        })}
                                     <span class="dim">
                                         {message.sender} " · " {time_of(message.timestamp_ms)} {delivery}
                                     </span>
@@ -747,6 +797,70 @@ fn ContactsView(
         });
     };
 
+    // Own avatar (D1d): preview loaded from the store, replaced via the
+    // picker (canvas-downscaled, then encrypted + pushed on the Rust side).
+    let my_avatar = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        if let Some(loaded) = state.get() {
+            let key = loaded.my_key.clone();
+            spawn_local(async move {
+                if let Ok(url) = avatar_data_url(&key).await {
+                    my_avatar.set(url);
+                }
+            });
+        }
+    });
+    let pick_avatar = move |ev: leptos::ev::Event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&ev);
+        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        spawn_local(async move {
+            let (b64, preview) = match image::prepare_avatar(&file).await {
+                Ok(prepared) => prepared,
+                Err(e) => return err(e),
+            };
+            #[derive(Serialize)]
+            struct Args<'a> {
+                image: &'a str,
+            }
+            let args = Args { image: &b64 };
+            match invoke::invoke::<usize>("set_avatar", &args).await {
+                Ok(pushed) => {
+                    my_avatar.set(Some(preview));
+                    ok(&format!(
+                        "avatar set — pushed to {pushed} relay(s); contacts pick it up \
+                         from a re-scanned QR or a who-is"
+                    ));
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Contact avatars, lazily fetched per row (same pattern as the chat).
+    let contact_avatars = RwSignal::new(HashMap::<String, String>::new());
+    Effect::new(move |_| {
+        for contact in state.get().map(|state| state.contacts).unwrap_or_default() {
+            let key = contact.key;
+            if key.is_empty()
+                || contact_avatars.with_untracked(|avatars| avatars.contains_key(&key))
+            {
+                continue;
+            }
+            contact_avatars.update(|avatars| {
+                avatars.insert(key.clone(), String::new());
+            });
+            spawn_local(async move {
+                if let Ok(Some(url)) = avatar_data_url(&key).await {
+                    contact_avatars.update(|avatars| {
+                        avatars.insert(key, url);
+                    });
+                }
+            });
+        }
+    });
+
     // Freshness pull (D1c, who-is-this.md §7): re-ask the network about a
     // contact. Fresh answers land in the learned store and sharpen relay
     // resolution on their own — nothing to apply, nothing overwritten.
@@ -781,6 +895,15 @@ fn ContactsView(
     view! {
         <main>
             <h3>"me"</h3>
+            <div class="pending">
+                {move || {
+                    my_avatar.get().map(|url| view! { <img class="avatar avatar-lg" src=url /> })
+                }}
+                <label>
+                    "avatar: "
+                    <input type="file" accept="image/*" on:change=pick_avatar />
+                </label>
+            </div>
             <input
                 placeholder="how contacts see you"
                 prop:value=move || name.get()
@@ -823,8 +946,19 @@ fn ContactsView(
                     .into_iter()
                     .map(|contact| {
                         let subject = contact.key.clone();
+                        let avatar_key = contact.key.clone();
                         view! {
                             <div class="row">
+                                {move || {
+                                    contact_avatars
+                                        .with(|avatars| {
+                                            avatars
+                                                .get(&avatar_key)
+                                                .filter(|url| !url.is_empty())
+                                                .cloned()
+                                        })
+                                        .map(|url| view! { <img class="avatar" src=url /> })
+                                }}
                                 <b>{contact.petname}</b>
                                 <button
                                     class="secondary"

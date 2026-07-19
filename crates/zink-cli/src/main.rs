@@ -52,6 +52,8 @@ async fn main() -> ExitCode {
         Some("listen") => listen(&args[1..]).await,
         Some("backfill") => backfill(&args[1..]).await,
         Some("who-is") => who_is(&args[1..]).await,
+        Some("set-avatar") => set_avatar(&args[1..]).await,
+        Some("avatar") => avatar(&args[1..]).await,
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -79,6 +81,8 @@ const USAGE: &str = "usage:
   zink-cli backfill --key <file> <conversation-id | prefix>
                     <peer-addr | petname | pubkey-hex>
   zink-cli who-is --key <file> <petname | pubkey-hex>
+  zink-cli set-avatar --key <file> <image-file>
+  zink-cli avatar --key <file> [--out <file>] <petname | pubkey-hex>
 (<relay> = <endpoint-id>@<ip:port>[#<relay-url>] as printed by zink-relay;
  <peer-addr> = <endpoint-id>@<ip:port> as printed by `listen`. A petname or
  key backfills by key via the relay url in the stored contact record. recv
@@ -497,6 +501,54 @@ async fn who_is(args: &[String]) -> Result<(), String> {
             }
         }
         ResolvedName::Unknown => println!("resolved: unknown key"),
+    }
+    client.close().await;
+    Ok(())
+}
+
+/// Set this device's avatar (D1d): encrypt-once, cache, claim, push to the
+/// home relays. Re-run `my-record` afterwards — the printed record now
+/// carries the avatar claim, and contacts need a record with the claim to
+/// fetch (existing contacts pick it up via `who-is` freshness).
+async fn set_avatar(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [path] = positionals.as_slice() else {
+        return Err(format!("exactly one image file expected\n{USAGE}"));
+    };
+    let image = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let client = open_client(&flags).await?;
+    let receipt = client.set_avatar(image).await?;
+    println!(
+        "avatar set: hash {} revision {} — pushed to {} relay(s)",
+        hex::encode(&receipt.hash.0),
+        receipt.revision,
+        receipt.pushed_relays
+    );
+    client.close().await;
+    Ok(())
+}
+
+/// Fetch + decrypt the best-believed avatar for a contact or key (D1d).
+async fn avatar(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [subject] = positionals.as_slice() else {
+        return Err(format!(
+            "exactly one subject (petname or key hex) expected\n{USAGE}"
+        ));
+    };
+    let client = open_client(&flags).await?;
+    let key = resolve_peer_key(&client, subject)?;
+    match client.avatar(key).await? {
+        Some(bytes) => {
+            match optional(&flags, "--out")? {
+                Some(out) => {
+                    std::fs::write(&out, &bytes).map_err(|e| format!("write {out}: {e}"))?;
+                    println!("avatar: {} bytes -> {out}", bytes.len());
+                }
+                None => println!("avatar: {} bytes", bytes.len()),
+            };
+        }
+        None => println!("no avatar"),
     }
     client.close().await;
     Ok(())

@@ -345,6 +345,32 @@ impl ClientState {
             .map_err(|e| Error::Storage(format!("write profile revision: {e}")))
     }
 
+    /// This device's avatar claim materials (D1d): ciphertext hash +
+    /// content key + supersession revision, as `profile.avatar`
+    /// (`hash-hex\nkey-hex\nrevision`). The ciphertext itself lives in the
+    /// blob cache under its hash — like every blob, encrypted at rest.
+    pub fn save_avatar_meta(
+        &self,
+        hash: &BlobHash,
+        key: &[u8; 32],
+        revision: u64,
+    ) -> Result<(), Error> {
+        let path = self.root.join("profile.avatar");
+        create_parent(&path)?;
+        let content = format!("{}\n{}\n{revision}\n", hex(&hash.0), hex(key));
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write avatar meta: {e}")))
+    }
+
+    pub fn avatar_meta(&self) -> Option<(BlobHash, [u8; 32], u64)> {
+        let content = std::fs::read_to_string(self.root.join("profile.avatar")).ok()?;
+        let mut lines = content.lines();
+        let hash = BlobHash(crate::hex::parse32(lines.next()?.trim()).ok()?);
+        let key = crate::hex::parse32(lines.next()?.trim()).ok()?;
+        let revision = lines.next()?.trim().parse().ok()?;
+        Some((hash, key, revision))
+    }
+
     /// Store a contact under a petname. The record is kept in wire form;
     /// the petname is a sibling file (local convention, never protocol).
     pub fn save_contact(&self, petname: &str, record: &ContactRecord) -> Result<(), Error> {

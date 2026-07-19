@@ -52,6 +52,8 @@ pub struct Message {
     pub conversation: String,
     /// Sender label ("me", a petname, or short hex).
     pub sender: String,
+    /// Sender key, hex — the `avatar` lookup handle (D1d).
+    pub sender_key: String,
     pub mine: bool,
     /// Lossy-decoded body; `None` when this device cannot open it.
     pub text: Option<String>,

@@ -191,10 +191,15 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
                                                   // records re-exchanged (D0b norm)
 ```
 
-- **Crypto:** encrypt-once with a fresh random content key, reusing the A3/B3
-  `EncryptedBlob` construction unchanged — including `key-commit`, verified
-  before trusting, exactly like message blobs. `hash` addresses the
-  ciphertext, as everywhere.
+- **Crypto:** encrypt-once with a fresh random content key, reusing the A3
+  AEAD + content-addressing (`hash` addresses the ciphertext, as
+  everywhere). **No `key-commit`** (corrected 2026-07-19 at implementation —
+  the draft said "commit kept"): a commitment guards a key that arrives on a
+  *different* channel than its binding (envelope key-wraps vs the hashed
+  core); here hash and key ride in one signed attestation, so the signature
+  already binds them and a commitment would be derived from and checked
+  against the same claim — verifying nothing. Integrity = signature over
+  (hash, key) + content address + the AEAD tag.
 - **Why the key may live in the claim:** attestations travel only inside
   records and `WhoIs` answers — QR (out-of-band) and the E2E-encrypted peer
   ALPN. No relay ever sees a claim, so the invariant holds: relays store
@@ -237,6 +242,13 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
   delivered.
 - **D1d · Avatars.** §8. *Done when:* two devices see each other's avatars in
   contacts + conversation views, and the blobs on the relay are ciphertext.
+  *(2026-07-19: code complete — `Claim::Avatar { hash, key }`,
+  `seal_avatar`/`open_avatar` in the protocol (no key-commit, see §8);
+  client `set_avatar`/`push_avatar`/`avatar` with read-time claim
+  resolution across stored + learned records; CLI `set-avatar`/`avatar`;
+  app picker + chat/contact-row rendering with magic-byte validation.
+  Headless e2e proves cross-client render with ciphertext at rest.
+  Awaiting the two-device run.)*
 
 ## 10. Doc touchpoints when this lands
 

@@ -250,6 +250,35 @@ impl MessageEnvelope {
     }
 }
 
+/// Encrypt an avatar image once with a fresh random key (D1d,
+/// who-is-this.md §8). The returned blob is what relays cache —
+/// ciphertext, content-addressed like every blob — while the key travels
+/// only inside the signed `Avatar` claim (QR + E2E peer channels; no relay
+/// ever sees a claim). Deliberately **no key-commitment**: a commitment
+/// guards a key that arrives on a *different* channel than its binding
+/// (envelope key-wraps vs the hashed core); here hash and key ride in one
+/// signed attestation, so the signature already binds them and the AEAD
+/// authenticates the bytes — a commitment would be derived from and
+/// checked against the same claim, verifying nothing.
+pub fn seal_avatar(plaintext: &[u8], rng: &mut impl CryptoRngCore) -> (EncryptedBlob, [u8; 32]) {
+    let key = ContentKey::generate(rng);
+    let bytes = key.encrypt(plaintext, rng);
+    let hash = BlobHash(*blake3::hash(&bytes).as_bytes());
+    (EncryptedBlob { hash, bytes }, key.to_bytes())
+}
+
+/// Open a fetched avatar blob against its claim: the bytes must hash to
+/// the claimed address, then the AEAD must open under the claimed key.
+/// Malformed, tampered, or wrong-key input errors — never panics.
+pub fn open_avatar(bytes: &[u8], hash: &BlobHash, key: &[u8; 32]) -> Result<Vec<u8>, OpenError> {
+    if blake3::hash(bytes).as_bytes() != &hash.0 {
+        return Err(OpenError::WrongBlobHash);
+    }
+    ContentKey::from_bytes(*key)
+        .decrypt(bytes)
+        .map_err(OpenError::Crypto)
+}
+
 /// Why an envelope could not be opened. Never a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenError {
@@ -577,6 +606,48 @@ mod tests {
             assert_eq!(plaintext, expected);
         }
         assert_eq!(sealed.envelope.open(&recipient).unwrap(), b"see attached");
+    }
+
+    #[test]
+    fn seal_avatar__should_roundtrip_and_content_address_the_ciphertext() {
+        // Given
+        let image = b"not really a jpeg, but bytes are bytes".to_vec();
+
+        // When
+        let (blob, key) = seal_avatar(&image, &mut rng());
+
+        // Then: the address is the ciphertext hash, and the claim materials
+        // (hash + key) round-trip the plaintext
+        assert_eq!(blob.hash.0, *blake3::hash(&blob.bytes).as_bytes());
+        assert_ne!(blob.bytes, image, "ciphertext at rest");
+        assert_eq!(open_avatar(&blob.bytes, &blob.hash, &key).unwrap(), image);
+    }
+
+    #[test]
+    fn open_avatar__should_reject_wrong_hash_key_or_tampering_without_panicking() {
+        // Given
+        let image = b"avatar bytes".to_vec();
+        let mut rng = rng();
+        let (blob, key) = seal_avatar(&image, &mut rng);
+
+        // Then: bytes not matching the claimed address
+        assert_eq!(
+            open_avatar(&blob.bytes, &BlobHash([9; 32]), &key),
+            Err(OpenError::WrongBlobHash)
+        );
+        // …a claim naming the wrong key
+        assert!(matches!(
+            open_avatar(&blob.bytes, &blob.hash, &[7; 32]),
+            Err(OpenError::WrongBlobHash) | Err(OpenError::Crypto(_))
+        ));
+        // …tampered ciphertext (fails the address before the AEAD)
+        let mut tampered = blob.bytes.clone();
+        tampered[0] ^= 1;
+        assert!(open_avatar(&tampered, &blob.hash, &key).is_err());
+        // …and hostile truncation never panics
+        for len in [0, 1, blob.bytes.len() / 2] {
+            assert!(open_avatar(&blob.bytes[..len], &blob.hash, &key).is_err());
+        }
     }
 
     #[test]

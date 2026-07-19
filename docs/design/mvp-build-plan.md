@@ -559,12 +559,33 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   - [ ] **D1d · Avatars.** `Claim::Avatar` gains the content key next to the blob
     hash (in-place at v1, dev-stage records re-exchanged — D0b norm): the key
     travels only in records / `WhoIs` answers (QR + E2E peer channels), never
-    through a relay; the blob is the A3/B3 encrypt-once construction with
-    `key-commit` kept, pushed to the publisher's *own* home-relay caches on
-    publish and re-pushed on open (30-day TTL); fetchers verify + cache client-
-    side (C3a); pick/downscale reuses the C3c canvas path. *Done when:* two
-    devices see each other's avatars in contacts + conversation views, and the
-    relay-cached bytes are ciphertext.
+    through a relay; encrypt-once (A3 AEAD + content address), pushed to the
+    publisher's *own* home-relay caches on publish and re-pushed on open
+    (30-day TTL); fetchers verify + cache client-side (C3a); pick/downscale
+    reuses the C3c canvas path. *Done when:* two devices see each other's
+    avatars in contacts + conversation views, and the relay-cached bytes are
+    ciphertext.
+    *(2026-07-19: code complete. **Design correction at implementation** —
+    the planned `key-commit` was dropped as tautological: hash and key ride
+    in ONE signed attestation, so the signature already binds them and a
+    commitment would be checked against the very claim that supplied the
+    key; integrity = signature + content address + AEAD tag (who-is-this.md
+    §8 updated). Protocol: `seal_avatar`/`open_avatar` (hostile-input
+    tested), `self_avatar_claim` with supersession + forgery tests. Client:
+    `set_avatar` (512 KiB backstop cap, bumps its own revision — per
+    claim-kind scope, independent of the name counter), `push_avatar`
+    (publish + app-startup re-push; relays dedup by hash), `avatar(key)`
+    resolving the highest-revision claim across stored + learned records,
+    fetching from the claim-carrying record's relays, verify-then-cache
+    (ciphertext at rest, like every blob). CLI `set-avatar`/`avatar
+    [--out]`; e2e `avatar.rs`: cross-client render through a relay with
+    plaintext nowhere at rest. App: picker (canvas ≤256 px JPEG) + own
+    preview, contact-row + chat-sender avatars (lazy, best-effort),
+    decrypted bytes magic-sniffed before the webview renders them. Note:
+    contacts learn a *new* avatar only with a fresh record — re-scan QR or
+    a `who-is` freshness pull; nothing announces it (by design, no
+    broadcast channel). Awaiting the two-device acceptance run — that run
+    also closes D1. 🎉)*
 - [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
   resolution; history backfill via content-key re-wrap. *(Review note: contact
   identity is currently keyed on `record.keys.first()` — revisit so a re-scanned

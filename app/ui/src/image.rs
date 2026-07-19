@@ -12,6 +12,8 @@ use zink_app_dto::OutgoingImage;
 const THUMB_MAX_PX: f64 = 320.0;
 const FULL_MAX_PX: f64 = 1600.0;
 const JPEG_QUALITY: f64 = 0.85;
+/// Avatars render small everywhere — a tight bound keeps the blob tiny.
+const AVATAR_MAX_PX: f64 = 256.0;
 
 /// Downscale a picked image file into the thumbnail + full-res pair to
 /// send, plus a preview data URL for the composer.
@@ -26,6 +28,13 @@ pub async fn prepare(file: &Blob) -> Result<(OutgoingImage, String), String> {
         },
         preview,
     ))
+}
+
+/// Downscale a picked image into an avatar-sized JPEG (D1d):
+/// (base64 without prefix, preview data URL).
+pub async fn prepare_avatar(file: &Blob) -> Result<(String, String), String> {
+    let bitmap = decode(file).await?;
+    encode_scaled(&bitmap, AVATAR_MAX_PX)
 }
 
 /// A data URL for received blob bytes (base64). The mime is sniffed from

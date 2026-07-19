@@ -7,9 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iroh::Endpoint;
 use rand_core::{OsRng, RngCore};
 use zink_protocol::{
-    Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, FORMAT_VERSION,
-    MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError, PublicKey,
-    RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
+    Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, EncryptedBlob,
+    FORMAT_VERSION, MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId, OpenError,
+    PublicKey, RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, distinct_relays,
+    open_avatar, seal_avatar,
 };
 
 use crate::error::Error;
@@ -965,6 +966,140 @@ impl Client {
         Ok(answers)
     }
 
+    /// Set this device's avatar (D1d, who-is-this.md §8): encrypt once
+    /// with a fresh key, cache the ciphertext locally (rendering our own
+    /// avatar must survive relay TTLs), persist the claim materials at the
+    /// next supersession revision, and push the ciphertext to the home
+    /// relays. The image should arrive edge-downscaled; the size cap here
+    /// is a backstop, not the policy. Republish the record (QR /
+    /// `who-is`) for contacts to pick the new claim up.
+    pub async fn set_avatar(&self, image: Vec<u8>) -> Result<AvatarReceipt, Error> {
+        const MAX_AVATAR_BYTES: usize = 512 * 1024;
+        if image.is_empty() {
+            return Err(Error::InvalidInput("empty avatar image".into()));
+        }
+        if image.len() > MAX_AVATAR_BYTES {
+            return Err(Error::InvalidInput(format!(
+                "avatar too large ({} bytes; max {MAX_AVATAR_BYTES})",
+                image.len()
+            )));
+        }
+        let (blob, key) = seal_avatar(&image, &mut OsRng);
+        self.state.save_blob(&blob.hash, &blob.bytes)?;
+        let revision = self
+            .state
+            .avatar_meta()
+            .map(|(_, _, revision)| revision + 1)
+            .unwrap_or(0);
+        self.state.save_avatar_meta(&blob.hash, &key, revision)?;
+        Ok(AvatarReceipt {
+            hash: blob.hash,
+            revision,
+            pushed_relays: self.push_avatar().await,
+        })
+    }
+
+    /// Push the current avatar ciphertext to every home relay (relays
+    /// dedup by hash) — run at publish, and re-run by long-lived edges on
+    /// startup: relay caches expire (30-day TTL), and the publisher's push
+    /// is the only source contacts can fetch from. Best-effort per relay;
+    /// returns how many took it.
+    pub async fn push_avatar(&self) -> usize {
+        let Some((hash, _, _)) = self.state.avatar_meta() else {
+            return 0;
+        };
+        let Some(bytes) = self.state.load_blob(&hash) else {
+            return 0;
+        };
+        let blob = EncryptedBlob { hash, bytes };
+        let Ok(staging) = blobs::stage(std::slice::from_ref(&blob)).await else {
+            return 0;
+        };
+        let mut pushed = 0;
+        for relay in self.state.home_relays() {
+            match blobs::push_blobs(
+                &self.endpoint,
+                &relay,
+                &staging,
+                std::slice::from_ref(&blob),
+                self.config.connect_timeout,
+            )
+            .await
+            {
+                Ok(()) => pushed += 1,
+                Err(error) => tracing::warn!(relay, %error, "avatar push failed"),
+            }
+        }
+        pushed
+    }
+
+    /// The best-believed avatar for a key (D1d): the highest-revision
+    /// verified self-issued `Avatar` claim across the stored record and
+    /// every learned record; ciphertext from the local cache, else fetched
+    /// from the relays of the record that carried the winning claim
+    /// (that's where its owner pushes), verified against the claim (hash +
+    /// AEAD) and cached. `Ok(None)` for no claim *and* for a claim whose
+    /// blob is currently unfetchable — display data is best-effort.
+    pub async fn avatar(&self, subject: PublicKey) -> Result<Option<Vec<u8>>, Error> {
+        if subject == self.device.public() {
+            let Some((hash, key, _)) = self.state.avatar_meta() else {
+                return Ok(None);
+            };
+            let Some(bytes) = self.state.load_blob(&hash) else {
+                return Ok(None);
+            };
+            return Ok(Some(open_avatar(&bytes, &hash, &key).map_err(Error::Open)?));
+        }
+        let mut best: Option<(BlobHash, [u8; 32], u64, Vec<RelayEntry>)> = None;
+        let mut consider = |record: &ContactRecord| {
+            if let Some((hash, key, revision)) = record.self_avatar_claim()
+                && best.as_ref().is_none_or(|(_, _, held, _)| revision > *held)
+            {
+                best = Some((hash, key, revision, record.relays.clone()));
+            }
+        };
+        for (_, record) in self.state.contacts()? {
+            if record.keys.contains(&subject) {
+                consider(&record);
+            }
+        }
+        for learned in self.state.learned(&subject) {
+            consider(&learned.record);
+        }
+        let Some((hash, key, _, relays)) = best else {
+            return Ok(None);
+        };
+        if let Some(bytes) = self.state.load_blob(&hash)
+            && let Ok(plaintext) = open_avatar(&bytes, &hash, &key)
+        {
+            return Ok(Some(plaintext));
+        }
+        for relay in relays {
+            match blobs::fetch_encrypted(
+                &self.endpoint,
+                &relay.mailbox,
+                &hash,
+                self.config.connect_timeout,
+            )
+            .await
+            {
+                Ok(bytes) => match open_avatar(&bytes, &hash, &key) {
+                    Ok(plaintext) => {
+                        self.state.save_blob(&hash, &bytes)?;
+                        return Ok(Some(plaintext));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "served avatar failed verification; skipping")
+                    }
+                },
+                Err(error) => {
+                    tracing::debug!(relay = relay.mailbox, %error, "avatar fetch failed")
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolve a key to the best-believed name (who-is-this.md §6):
     /// petname (manual, always wins) > learned self-claims (grouped by
     /// name, highest revision first — a genuine tie surfaces both, never
@@ -1269,17 +1404,25 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
         return None;
     }
     let me = device.public();
-    let attestation = SignedAttestation::new(
-        Attestation {
-            version: FORMAT_VERSION,
-            attester: me,
-            subject: me,
-            claim: Claim::Name(name),
-            revision: state.profile_revision(),
-        },
-        device,
-    );
-    Some(ContactRecord::new(vec![me], vec![attestation], relays))
+    let self_claim = |claim: Claim, revision: u64| {
+        SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: me,
+                subject: me,
+                claim,
+                revision,
+            },
+            device,
+        )
+    };
+    let mut attestations = vec![self_claim(Claim::Name(name), state.profile_revision())];
+    // The avatar claim (D1d): hash + key together, under the signature —
+    // whoever holds the record can fetch and decrypt; relays cannot.
+    if let Some((hash, key, revision)) = state.avatar_meta() {
+        attestations.push(self_claim(Claim::Avatar { hash, key }, revision));
+    }
+    Some(ContactRecord::new(vec![me], attestations, relays))
 }
 
 /// A resolved recipient: the person's device keys and the relays hosting
@@ -1335,6 +1478,17 @@ pub struct Received {
     /// The relay it arrived through — where its blobs can be fetched.
     pub relay: String,
     pub body: Result<Vec<u8>, OpenError>,
+}
+
+/// What `set_avatar` accomplished (D1d).
+pub struct AvatarReceipt {
+    /// The ciphertext's content address — what relays cache and serve.
+    pub hash: BlobHash,
+    /// The claim's supersession counter (bumped per avatar change).
+    pub revision: u64,
+    /// Home relays that took the push just now. 0 = fetchable by no one
+    /// until a later `push_avatar` succeeds — set, but not yet published.
+    pub pushed_relays: usize,
 }
 
 /// One validated `who-is` answer (already persisted to the learned store).
@@ -2017,6 +2171,77 @@ mod tests {
         assert_eq!(revision(&a), 1);
 
         let _ = std::fs::remove_dir_all(temp_root("rev"));
+    }
+
+    #[tokio::test]
+    async fn set_avatar__should_supersede_and_render_our_own() {
+        // Given (avatars first: no profile relays yet, so the push loop has
+        // nothing to dial and the test stays offline)
+        let a = Client::open_or_create(&temp_key("avatar", "me"))
+            .await
+            .expect("open");
+
+        // When: an avatar is set, then replaced
+        let first = a
+            .set_avatar(b"first image bytes".to_vec())
+            .await
+            .expect("set");
+        let second = a
+            .set_avatar(b"second image bytes".to_vec())
+            .await
+            .expect("replace");
+
+        // Then: supersession counts up; the published record carries the
+        // current claim; our own avatar renders from the local cache
+        assert_eq!((first.revision, second.revision), (0, 1));
+        let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
+        a.set_profile("alice", std::slice::from_ref(&relay))
+            .expect("profile");
+        let record = a.my_record().expect("record");
+        assert_eq!(
+            record
+                .self_avatar_claim()
+                .map(|(hash, _, revision)| (hash, revision)),
+            Some((second.hash, 1))
+        );
+        let rendered = a.avatar(a.public_key()).await.expect("avatar");
+        assert_eq!(rendered.as_deref(), Some(b"second image bytes".as_slice()));
+
+        let _ = std::fs::remove_dir_all(temp_root("avatar"));
+    }
+
+    #[tokio::test]
+    async fn avatar__should_render_a_contacts_avatar_from_the_verified_cache() {
+        // Given: A set an avatar and published a record carrying the claim;
+        // B stores that record as a contact and holds the ciphertext in its
+        // blob cache — exactly what a successful fetch leaves behind
+        let a = Client::open_or_create(&temp_key("avatarb", "a"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("avatarb", "b"))
+            .await
+            .expect("open B");
+        let receipt = a.set_avatar(b"portrait".to_vec()).await.expect("set");
+        let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
+        a.set_profile("alice", std::slice::from_ref(&relay))
+            .expect("profile");
+        let ciphertext = a.state.load_blob(&receipt.hash).expect("cached at set");
+        b.state.save_blob(&receipt.hash, &ciphertext).expect("seed");
+        b.add_contact(&a.my_record().expect("record"), None)
+            .expect("add");
+
+        // When
+        let rendered = b.avatar(a.public_key()).await.expect("avatar");
+
+        // Then: decrypted via the claim's key; at rest it stays ciphertext
+        assert_eq!(rendered.as_deref(), Some(b"portrait".as_slice()));
+        assert_ne!(
+            b.state.load_blob(&receipt.hash).expect("still cached"),
+            b"portrait".to_vec(),
+            "cache holds ciphertext, like a relay would"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("avatarb"));
     }
 
     #[tokio::test]

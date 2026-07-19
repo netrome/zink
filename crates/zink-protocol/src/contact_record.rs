@@ -9,6 +9,7 @@ use crate::FORMAT_VERSION;
 use crate::attestation::{Claim, SignedAttestation};
 use crate::codec::{self, DecodeError};
 use crate::keys::PublicKey;
+use crate::message::BlobHash;
 
 /// QR payloads are `ZINK:<base32(borsh)>` — all uppercase-alphanumeric, so
 /// QR encoders can use the compact alphanumeric mode.
@@ -116,6 +117,29 @@ impl ContactRecord {
                     .then_some((name.as_str(), attestation.revision))
             })
             .max_by_key(|(_, revision)| *revision)
+    }
+
+    /// The verified self-issued `Avatar` claim at the highest revision
+    /// (SPEC §3.2 supersession) — `(ciphertext hash, content key,
+    /// revision)`. Validation mirrors `self_name_claim`: forged signatures,
+    /// third-party claims, and keys outside the record are ignored.
+    pub fn self_avatar_claim(&self) -> Option<(BlobHash, [u8; 32], u64)> {
+        self.attestations
+            .iter()
+            .filter_map(|signed| {
+                let attestation = &signed.attestation;
+                let Claim::Avatar { hash, key } = &attestation.claim else {
+                    return None;
+                };
+                let self_issued = attestation.attester == attestation.subject
+                    && self.keys.contains(&attestation.attester);
+                (self_issued && signed.verify().is_ok()).then_some((
+                    *hash,
+                    *key,
+                    attestation.revision,
+                ))
+            })
+            .max_by_key(|(_, _, revision)| *revision)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -263,6 +287,44 @@ mod tests {
     fn self_claimed_name__should_return_a_valid_self_attested_name() {
         let record = record_for(&device_key(1), "Alice");
         assert_eq!(record.self_claimed_name(), Some("Alice"));
+    }
+
+    #[test]
+    fn self_avatar_claim__should_pick_the_highest_valid_revision_and_ignore_forgeries() {
+        // Given: a valid avatar, its valid supersession, and a forged claim
+        // at a yet-higher revision
+        let me = device_key(1);
+        let forger = device_key(9);
+        let avatar = |attester: &DeviceKey, seed: u8, revision: u64, signer: &DeviceKey| {
+            SignedAttestation::new(
+                Attestation {
+                    version: FORMAT_VERSION,
+                    attester: attester.public(),
+                    subject: me.public(),
+                    claim: Claim::Avatar {
+                        hash: BlobHash([seed; 32]),
+                        key: [seed; 32],
+                    },
+                    revision,
+                },
+                signer,
+            )
+        };
+        let record = ContactRecord::new(
+            vec![me.public()],
+            vec![
+                avatar(&me, 1, 0, &me),
+                avatar(&me, 3, 9, &forger), // signature won't verify
+                avatar(&me, 2, 1, &me),
+            ],
+            vec![],
+        );
+
+        // Then
+        assert_eq!(
+            record.self_avatar_claim(),
+            Some((BlobHash([2; 32]), [2; 32], 1))
+        );
     }
 
     #[test]

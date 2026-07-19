@@ -64,7 +64,15 @@ impl SignedAttestation {
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub enum Claim {
     Name(String),
-    Avatar(BlobHash),
+    /// A profile picture: `hash` addresses the encrypted blob on relay
+    /// caches; `key` decrypts it. The key may live here because claims
+    /// travel only over voluntary E2E channels (QR, peer sync) — a relay
+    /// holds ciphertext it cannot open, while the audience stays
+    /// open-ended (who-is-this.md §8; field added in-place at v1, D1d).
+    Avatar {
+        hash: BlobHash,
+        key: [u8; 32],
+    },
     SamePersonAs(PublicKey),
     /// Active disavowal: "I do not / no longer recognise this key."
     Negative,
@@ -112,7 +120,10 @@ mod tests {
         let base = sample_attestation(&attester);
         let claims = [
             Claim::Name("Alice".to_string()),
-            Claim::Avatar(BlobHash([0; 32])),
+            Claim::Avatar {
+                hash: BlobHash([0; 32]),
+                key: [0; 32],
+            },
             Claim::SamePersonAs(device_key(9).public()),
             Claim::Negative,
         ];

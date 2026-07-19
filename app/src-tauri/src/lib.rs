@@ -42,10 +42,18 @@ async fn client(
             let key_path = data_dir.join("device.key");
             // Rendered via the De1 edge shim, keeping the closure's error
             // type `String` like the rest of this layer.
-            Client::open_or_create(&key_path.to_string_lossy())
+            let client = Client::open_or_create(&key_path.to_string_lossy())
                 .await
                 .map(Arc::new)
-                .map_err(String::from)
+                .map_err(String::from)?;
+            // Re-push the avatar ciphertext once per app run (D1d): relay
+            // caches expire (30-day TTL) and the publisher is the only
+            // source. Best-effort, off the first command's path.
+            let push = client.clone();
+            tauri::async_runtime::spawn(async move {
+                push.push_avatar().await;
+            });
+            Ok::<_, String>(client)
         })
         .await?
         .clone();
@@ -245,6 +253,7 @@ async fn messages(
                     .iter()
                     .any(|(_, record)| record.keys.contains(&message.sender)))
             .then(|| hex::encode(&message.sender.0)),
+            sender_key: hex::encode(&message.sender.0),
             mine: message.sender == me,
             text: message
                 .body
@@ -355,6 +364,52 @@ fn blob_drafts(image: &OutgoingImage) -> Result<Vec<BlobDraft>, String> {
             plaintext: decode(&image.full_b64, "full image")?,
         },
     ])
+}
+
+/// Set this device's avatar from a webview-downscaled image (D1d):
+/// encrypt-once, cache, claim at the next revision, push to the home
+/// relays. Returns how many relays took the push.
+#[tauri::command]
+async fn set_avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    image: String,
+) -> Result<usize, String> {
+    let image = BASE64
+        .decode(image.as_bytes())
+        .map_err(|e| format!("decode avatar: {e}"))?;
+    if !looks_like_image(&image) {
+        return Err("that file does not look like an image".into());
+    }
+    let client = client(&app, &managed).await?;
+    let receipt = client.set_avatar(image).await?;
+    Ok(receipt.pushed_relays)
+}
+
+/// The best-believed avatar for a key, base64 (D1d) — `None` when no
+/// avatar is claimed or its blob is currently unfetchable. Decrypted bytes
+/// are sniffed before they reach the webview: a claim can name any bytes,
+/// but only an image gets rendered.
+#[tauri::command]
+async fn avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+) -> Result<Option<String>, String> {
+    let client = client(&app, &managed).await?;
+    let key = PublicKey(hex::parse32(&subject)?);
+    Ok(client
+        .avatar(key)
+        .await?
+        .filter(|bytes| looks_like_image(bytes))
+        .map(|bytes| BASE64.encode(&bytes)))
+}
+
+/// JPEG / PNG / WebP magic bytes — the formats the webview canvas emits.
+fn looks_like_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+        || (bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
 }
 
 /// Ask contacts "who is this key?" (D1c, who-is-this.md §5) and return a
@@ -488,7 +543,9 @@ pub fn run() {
             send_message,
             fetch_blob,
             refresh,
-            who_is
+            who_is,
+            set_avatar,
+            avatar
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")

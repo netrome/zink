@@ -30,6 +30,7 @@ pub use mailbox::{
 pub use message::{
     BlobDraft, BlobHash, BlobKind, BlobRef, EncryptedBlob, KeyCommitment, KeyWrap, MessageCore,
     MessageDraft, MessageEnvelope, MessageId, OpenError, SealedKey, SealedMessage, SealedRef,
+    open_avatar, seal_avatar,
 };
 pub use sync::{
     MAX_SYNC_REQUEST_BYTES, MAX_SYNC_RESPONSE_BYTES, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest,

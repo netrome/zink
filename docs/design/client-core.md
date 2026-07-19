@@ -101,6 +101,16 @@ client.who_is(PublicKey) -> Vec<WhoIsAnswer>  // dial every dialable contact, as
 client.resolve_name(PublicKey) -> ResolvedName // petname > learned self-claims
                                               // (revision-ranked, provenance +
                                               // agreement surfaced) > Unknown
+// avatars (D1d, who-is-this.md §8): encrypt-once; the key rides inside the
+// signed Avatar claim (E2E channels only) — relays cache ciphertext.
+client.set_avatar(Vec<u8>) -> AvatarReceipt   // cache + claim at next revision +
+                                              // push to home relays
+client.push_avatar() -> usize                 // re-push (startup / publish) — the
+                                              // publisher outlives the cache TTL
+client.avatar(PublicKey) -> Option<Vec<u8>>   // highest-revision claim across
+                                              // stored + learned records; fetch
+                                              // from the claim-carrier's relays,
+                                              // verify (hash + AEAD), cache
 ```
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened

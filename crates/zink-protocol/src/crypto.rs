@@ -28,6 +28,19 @@ impl ContentKey {
         Self(key)
     }
 
+    /// Rebuild a key from raw bytes — the avatar path (D1d), where the key
+    /// travels inside a signed `Avatar` claim instead of a sealed key-wrap.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw key bytes — only for placing into an `Avatar` claim, which
+    /// travels exclusively over voluntary E2E channels (QR, peer sync);
+    /// never write these anywhere a relay can read.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
     /// The commitment carried inside the hashed core. Binding the key into
     /// the id is what makes "same id ⇒ same content" hold: an AEAD alone is
     /// not key-committing, so without this a malicious sender could seal
