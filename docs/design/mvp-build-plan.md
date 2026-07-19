@@ -463,11 +463,52 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   (`online` < 2 s vs the 3 s probe timeout). Deploy: unit unchanged, but
   **4401/udp must be open** next to 4400/udp + 4401/tcp — DEV-SETUP §5
   updated; QAD failing is soft (falls back to the pre-De2 stall).)*
-- [ ] **D1 · Attestations & name resolution.** Self-profile (name/avatar); client-side
-  petnames; `who-is-this` pull *(a peer request/response — depends on D0b connectivity)*;
-  client-side trust ranking. *(Profile + petnames are largely already built from Stage C:
-  `set_profile`/`my_record`, `add_contact` petnames with collision checks, the app
-  ContactsView + QR add. The unbuilt part is the networked `who-is-this` + ranking.)*
+- [ ] **D1 · Attestations & name resolution.** 🎯 Self-profile (name/avatar);
+  client-side petnames; `who-is-this` pull *(a peer request/response — rides D0b
+  connectivity)*; client-side trust ranking. *(Profile + petnames are largely already
+  built from Stage C: `set_profile`/`my_record`, `add_contact` petnames with collision
+  checks, the app ContactsView + QR add. Unbuilt: the networked `who-is-this`,
+  ranking, avatars.)* **Overall acceptance — the one-way-add reply hole:** C scanned
+  A's QR and messaged A; A resolves C's key through a shared contact, adds C, and
+  replies. Design: [who-is-this.md](./who-is-this.md) — query format, hop limit,
+  serving policy, learned-record storage, avatar crypto; decisions resolved
+  2026-07-19. Notably: serving stays **contacts-only uniformly** (the D0c note
+  anticipated a looser per-op policy for this op; resolved the other way — the
+  per-op gate structure stays, the policies coincide), and **no auto-query** (asking
+  contacts about a key reveals you just heard from it — manual trigger only, a
+  privacy decision).
+  - [ ] **D1a · Protocol op + serve side.** `SyncOp::WhoIs { key }` →
+    `SyncResult::Known { record }` / `NotHeld` on the existing sync ALPN (in-place
+    at v1); `SyncHandler` serves a contact caller the fresh self-record (own key)
+    or a *user-added* contact's stored record — learned records are never
+    re-served (hop limit 1 is structural), strangers always get `NotHeld`.
+    *Done when:* headless e2e — a contact's `WhoIs` returns the stored record; a
+    stranger's returns `NotHeld`; a learned-only subject is `NotHeld` even to a
+    contact.
+  - [ ] **D1b · Pull, learned store, resolution, refresh.** `Client::who_is(key)`
+    dialing the subject (if held) + all dialable contacts; answers validated like
+    scanned QRs and stored in a **learned store** with provenance, outside the
+    contact store (the D0c gate must not widen); resolution precedence petname >
+    learned self-claim (with provenance + agreement count, `revision` breaks
+    conflicts) > hex; subject-served answers refresh a stored contact in place iff
+    the key set is unchanged (key-set changes wait for D2's mutual links); fix
+    `my_record`'s hardcoded `revision: 0` (persist + bump per profile change —
+    supersession needs a winner); CLI `who-is`. *Done when:* headless e2e — the
+    one-way-add flow (A learns C via contact B, adds C, replies), a refresh
+    updates relays, and a key-set change doesn't.
+  - [ ] **D1c · Messaging-UI hook.** Unknown participant → "who is this?" action;
+    candidate names with provenance ("records held by B, D"); add-as-contact with
+    the petname prefilled; refresh from the contact view. *Done when:* the
+    acceptance flow runs live on two devices.
+  - [ ] **D1d · Avatars.** `Claim::Avatar` gains the content key next to the blob
+    hash (in-place at v1, dev-stage records re-exchanged — D0b norm): the key
+    travels only in records / `WhoIs` answers (QR + E2E peer channels), never
+    through a relay; the blob is the A3/B3 encrypt-once construction with
+    `key-commit` kept, pushed to the publisher's *own* home-relay caches on
+    publish and re-pushed on open (30-day TTL); fetchers verify + cache client-
+    side (C3a); pick/downscale reuses the C3c canvas path. *Done when:* two
+    devices see each other's avatars in contacts + conversation views, and the
+    relay-cached bytes are ciphertext.
 - [ ] **D2 · Multi-device.** QR pairing (mutual `same-person-as`); device set in
   resolution; history backfill via content-key re-wrap. *(Review note: contact
   identity is currently keyed on `record.keys.first()` — revisit so a re-scanned
@@ -517,7 +558,8 @@ Not scheduled into a stage; must land before any build leaves our hands.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages ✅, B1 DAG store ✅,
   C1 client-core split ✅, C4 live delivery / foreground service ✅
   ([live-delivery.md](./live-delivery.md)), D0 sync primitives 📝
-  ([sync-primitives.md](./sync-primitives.md)), D5 direct delivery 📝
+  ([sync-primitives.md](./sync-primitives.md)), D1 identity discovery 📝
+  ([who-is-this.md](./who-is-this.md)), D5 direct delivery 📝
   ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0). The app
   shell (C3) needed no design doc — it assembled resolved decisions; its
   as-built map lives in `app/README.md`.
