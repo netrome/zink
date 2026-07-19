@@ -73,9 +73,14 @@ Uses, all the same primitive:
 
 - **Add my own device** — sign `same-person-as` linking a new key to an existing key
   of mine ("this key is also me"). A link is **strongest when mutual** (both keys sign
-  each other); the pairing handshake (§3.6) produces exactly that, and clients should
-  weight mutual links above unilateral ones — a lone key asserting "your key is also
-  me" is structurally just a claim, trusted only as much as its attester.
+  each other); the usual pairing — the one-way recognize act run once in each
+  direction (§3.6) — produces exactly that, and clients should weight mutual links
+  above unilateral ones. Direction matters: a vouch *from* a key you already trust is
+  the load-bearing evidence, while a lone key asserting "your trusted key is also me"
+  is structurally just a claim, trusted only as much as its attester — never the
+  basis for clustering on its own. *(Revised 2026-07-19 with the multi-device design:
+  pairing is a composite of two independent one-way acts, not a handshake —
+  [multi-device.md](./design/multi-device.md) §3.)*
 - **Vouch for a contact** — sign that some key is the person I call Alice.
 - **Repudiate** — a `negative` claim: an *active* disavowal ("I do not / no longer
   recognise this key") that propagates so others can act on it (§3.4 relies on this).
@@ -152,10 +157,15 @@ to its relays' iroh relay URLs, so a peer holding your record reaches you **by k
 while you're online (relay-coordinated — signaling via your relay, holepunched to a
 direct path, relayed as encrypted fallback; no discovery service involved), and
 `mailbox` is how a sender finds your inbox when you're not. An entry without a
-`relay_url` is mailbox-only knowledge: deposits work, dial-by-key doesn't. Pairing is
-the same exchange between two of your own devices and yields a **mutual**
-`same-person-as` link. It's also the natural place to later hand over an initial
-capability grant (§8) so a new contact can message you from the start.
+`relay_url` is mailbox-only knowledge: deposits work, dial-by-key doesn't. Pairing
+your own next device uses this same artifact, **one direction at a time**: the device
+to be recognized shows its ordinary record; the recognizing device scans, confirms
+the fingerprint, and signs a `same-person-as` link ("recognize this device as me" —
+the shown side is passive). Run once in each direction — the usual case — this
+yields the **mutual** link clients weight highest (§3.2); a deliberately one-way
+recognition is legitimate and receive-only (multi-device.md §3). It's also the
+natural place to later hand over an initial capability grant (§8) so a new contact
+can message you from the start.
 
 **Freshness.** `relays` is the rendezvous anchor for offline delivery, so it must stay
 reasonably current. It propagates lazily — via the QR at add-time, `who-is-this`, and a

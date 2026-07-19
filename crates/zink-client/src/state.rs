@@ -13,6 +13,10 @@
 //!   home relays (what goes into its ContactRecord).
 //! - `contacts/<key-hex>.record` (wire bytes) + `.name` (the local petname
 //!   — client policy, defaulting to the contact's self-claimed name).
+//! - `devices/<key-hex>.record` + `.vouch` — the own-devices store (D3b,
+//!   multi-device.md §3): recognized siblings' records and the signed
+//!   `same-person-as` vouches this device issued. Written only by the
+//!   recognize act; the serving gate and `my_record` read it.
 //! - `blobs/<hash-hex>` — cached *encrypted* blobs (ciphertext at rest, like
 //!   the envelopes), so images outlive the relay cache's TTL and the
 //!   sender's own images need no relay at all (C3a).
@@ -28,6 +32,7 @@ use std::path::PathBuf;
 use crate::error::Error;
 use zink_protocol::{
     BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey, RelayEntry,
+    SignedAttestation,
 };
 
 #[derive(Clone, Debug)]
@@ -385,6 +390,79 @@ impl ClientState {
             .map_err(|e| Error::Storage(format!("write contact: {e}")))?;
         write_atomic(&stem.with_extension("name"), petname.as_bytes())
             .map_err(|e| Error::Storage(format!("write petname: {e}")))
+    }
+
+    /// Store a recognized own device (multi-device.md §3): its record plus
+    /// the link vouch this device signed over it. Written only by the
+    /// recognize act — serving decisions read this store, never the wire.
+    pub fn save_recognized_device(
+        &self,
+        record: &ContactRecord,
+        vouch: &SignedAttestation,
+    ) -> Result<(), Error> {
+        let key = record
+            .keys
+            .first()
+            .ok_or_else(|| Error::InvalidRecord("record has no keys".into()))?;
+        let stem = self.root.join("devices").join(hex(&key.0));
+        create_parent(&stem.with_extension("record"))?;
+        write_atomic(&stem.with_extension("record"), &record.to_bytes())
+            .map_err(|e| Error::Storage(format!("write device record: {e}")))?;
+        write_atomic(&stem.with_extension("vouch"), &vouch.to_bytes())
+            .map_err(|e| Error::Storage(format!("write device vouch: {e}")))
+    }
+
+    /// Recognized own devices as `(device key, record)`. The key is the one
+    /// the recognize act confirmed and vouched — the only key serving
+    /// trusts; extra keys a record lists stay advisory (multi-device.md §4).
+    /// Damaged entries are skipped with a warning, like `contacts`.
+    pub fn recognized_devices(&self) -> Vec<(PublicKey, ContactRecord)> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("devices")) else {
+            return Vec::new();
+        };
+        let mut devices = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "record") {
+                continue;
+            }
+            let record = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| ContactRecord::try_from_bytes(&bytes).map_err(|e| e.to_string()));
+            match record {
+                Ok(record) => match record.keys.first() {
+                    Some(&key) => devices.push((key, record)),
+                    None => tracing::warn!(?path, "skipping keyless device record"),
+                },
+                Err(err) => tracing::warn!(?path, %err, "skipping damaged device record"),
+            }
+        }
+        devices
+    }
+
+    /// The link vouches this device has signed — what `my_record` carries
+    /// (SPEC §3.6: links live in the record's attestations).
+    pub fn device_vouches(&self) -> Vec<SignedAttestation> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("devices")) else {
+            return Vec::new();
+        };
+        let mut vouches = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "vouch") {
+                continue;
+            }
+            let vouch = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    SignedAttestation::try_from_bytes(&bytes).map_err(|e| e.to_string())
+                });
+            match vouch {
+                Ok(vouch) => vouches.push(vouch),
+                Err(err) => tracing::warn!(?path, %err, "skipping damaged device vouch"),
+            }
+        }
+        vouches
     }
 
     /// Replace a stored contact's record — the explicit key-overlap update

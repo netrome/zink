@@ -958,6 +958,51 @@ impl Client {
         self.state.contacts()
     }
 
+    /// The one-way "recognize this device as me" act (multi-device.md §3),
+    /// called by the edge *after* its fingerprint confirm: store the
+    /// scanned record in the own-devices store and sign the link vouch
+    /// that `my_record` carries from now on. One direction only — the
+    /// shown side does nothing, and serving/inclusion move only from this
+    /// device toward the recognized key. Returns that key.
+    pub fn recognize_device(&self, record: &ContactRecord) -> Result<PublicKey, Error> {
+        let device_key = *record
+            .keys
+            .first()
+            .ok_or_else(|| Error::InvalidRecord("record has no keys".into()))?;
+        if device_key == self.device.public() {
+            return Err(Error::InvalidInput(
+                "that is this device's own record".into(),
+            ));
+        }
+        if record.relays.is_empty() {
+            return Err(Error::InvalidRecord(
+                "record has no relays — send-to-self deposits need a mailbox".into(),
+            ));
+        }
+        // Revision 0 is right: supersession scopes per linked key
+        // (SPEC §3.2), so the first link per device never contends and a
+        // re-recognize re-signs the identical attestation. Withdrawal is
+        // the deferred `Negative` flow (D4).
+        let vouch = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: self.device.public(),
+                subject: self.device.public(),
+                claim: Claim::SamePersonAs(device_key),
+                revision: 0,
+            },
+            &self.device,
+        );
+        self.state.save_recognized_device(record, &vouch)?;
+        Ok(device_key)
+    }
+
+    /// Recognized own devices as `(device key, record)` — this device's
+    /// recognition set, its own social-graph decision like everything else.
+    pub fn recognized_devices(&self) -> Vec<(PublicKey, ContactRecord)> {
+        self.state.recognized_devices()
+    }
+
     /// Petname → the Contact to send to. Keys come from the user-added
     /// record alone; relays resolve at read time (D1b, who-is-this.md §7).
     pub fn resolve_contact(&self, petname: &str) -> Result<Contact, Error> {
@@ -1730,6 +1775,11 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
     if let Some((hash, key, revision)) = state.avatar_meta() {
         attestations.push(self_claim(Claim::Avatar { hash, key }, revision));
     }
+    // The outgoing device vouches (D3b, multi-device.md §4): the record
+    // gains exactly this — links live in the record's attestations
+    // (SPEC §3.6). `keys` stays this device's own key; observers gather
+    // link evidence across the records they hold.
+    attestations.extend(state.device_vouches());
     Some(ContactRecord::new(vec![me], attestations, relays))
 }
 
@@ -2869,6 +2919,233 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("labels-dedup"));
+    }
+
+    #[tokio::test]
+    async fn recognize__should_serve_the_recognized_device_like_self_one_way() {
+        // Given: A holds a full conversation, B only its tip — and the
+        // mirror image for the reverse direction. Neither is the other's
+        // contact; recognition is the only thing that will open the gate.
+        let a = Client::open_or_create(&temp_key("recognize-gate", "a"))
+            .await
+            .expect("open A");
+        let b = Client::open_or_create(&temp_key("recognize-gate", "b"))
+            .await
+            .expect("open B");
+        let held_by_a = chain(&DeviceKey::from_seed([42; 32]), a.public_key(), 3);
+        let conv_a = held_by_a[0].id();
+        for envelope in &held_by_a {
+            a.state.store_envelope(conv_a, envelope).unwrap();
+        }
+        b.state
+            .store_envelope(conv_a, held_by_a.last().unwrap())
+            .unwrap();
+        let held_by_b = chain(&DeviceKey::from_seed([43; 32]), b.public_key(), 3);
+        let conv_b = held_by_b[0].id();
+        for envelope in &held_by_b {
+            b.state.store_envelope(conv_b, envelope).unwrap();
+        }
+        a.state
+            .store_envelope(conv_b, held_by_b.last().unwrap())
+            .unwrap();
+
+        // When: B pulls as a stranger
+        let refused = b
+            .backfill_addr(conv_a, a.endpoint.addr())
+            .await
+            .expect("declined, not an error");
+
+        // Then
+        assert_eq!(refused, 0, "unrecognized and no contact — nothing served");
+
+        // When: A recognizes B — one signed act, the shown side passive
+        a.recognize_device(&ContactRecord::new(
+            vec![b.public_key()],
+            vec![],
+            mailbox_only("bb@203.0.113.5:5"),
+        ))
+        .expect("recognize");
+        let served = b
+            .backfill_addr(conv_a, a.endpoint.addr())
+            .await
+            .expect("served");
+
+        // Then: B is served like self…
+        assert_eq!(served, 2, "genesis + the middle message");
+        assert!(b.state.load_dag(conv_a).is_ok());
+
+        // …while the reverse direction stays closed
+        let reverse = a
+            .backfill_addr(conv_b, b.endpoint.addr())
+            .await
+            .expect("declined");
+        assert_eq!(reverse, 0, "recognition moved nothing the other way");
+
+        // When: B recognizes A back (the usual two-way pairing)
+        b.recognize_device(&ContactRecord::new(
+            vec![a.public_key()],
+            vec![],
+            mailbox_only("aa@203.0.113.6:6"),
+        ))
+        .expect("recognize back");
+        let reverse = a
+            .backfill_addr(conv_b, b.endpoint.addr())
+            .await
+            .expect("served");
+
+        // Then
+        assert_eq!(reverse, 2);
+
+        let _ = std::fs::remove_dir_all(temp_root("recognize-gate"));
+    }
+
+    #[tokio::test]
+    async fn who_is__should_serve_a_recognized_devices_record_to_a_contact() {
+        // Given: A recognized its (offline) laptop. The laptop's record is
+        // servable by nobody else — its own contact store is empty and A
+        // holds it in the own-devices store, not the contact store — so
+        // the §6 mirror rule is the only path an observer has to it.
+        let a = Client::open_or_create(&temp_key("recognize-whois", "a"))
+            .await
+            .expect("open A");
+        let c = Client::open_or_create(&temp_key("recognize-whois", "c"))
+            .await
+            .expect("open C");
+        let laptop = DeviceKey::from_seed([44; 32]);
+        let laptop_record = signed_record(
+            &laptop,
+            "mårten laptop",
+            0,
+            mailbox_only("ll@203.0.113.5:5"),
+        );
+        a.recognize_device(&laptop_record).expect("recognize");
+
+        // When: a stranger asks about the laptop's key
+        let connection = net::connect_addr(
+            &c.endpoint,
+            a.endpoint.addr(),
+            SYNC_ALPN,
+            c.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let stranger = net::sync_request(
+            &connection,
+            SyncOp::WhoIs {
+                key: laptop.public(),
+            },
+        )
+        .await
+        .expect("round-trip");
+
+        // Then: nothing — the gate is unchanged for strangers
+        assert_eq!(stranger, SyncResult::NotHeld);
+
+        // When: the same requester asks as a contact (fresh connection —
+        // the gate resolves per connection)
+        befriend(&a, &c);
+        let connection = net::connect_addr(
+            &c.endpoint,
+            a.endpoint.addr(),
+            SYNC_ALPN,
+            c.config.connect_timeout,
+        )
+        .await
+        .expect("connect");
+        let known = net::sync_request(
+            &connection,
+            SyncOp::WhoIs {
+                key: laptop.public(),
+            },
+        )
+        .await
+        .expect("round-trip");
+
+        // Then: the recognized device's stored record, verbatim
+        assert_eq!(
+            known,
+            SyncResult::Known {
+                record: Box::new(laptop_record)
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("recognize-whois"));
+    }
+
+    #[tokio::test]
+    async fn recognize__should_put_the_vouch_in_my_record_and_nowhere_else() {
+        // Given: a profiled phone and its laptop's record
+        let a = Client::open_or_create(&temp_key("recognize-vouch", "a"))
+            .await
+            .expect("open");
+        let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
+        a.set_profile("mårten phone", std::slice::from_ref(&relay))
+            .await
+            .expect("profile");
+        let laptop = DeviceKey::from_seed([45; 32]);
+        let laptop_record = signed_record(
+            &laptop,
+            "mårten laptop",
+            0,
+            mailbox_only("ll@203.0.113.5:5"),
+        );
+
+        // When
+        a.recognize_device(&laptop_record).expect("recognize");
+
+        // Then: my_record vouches the laptop — an observer trusting A's
+        // key tiers the laptop as offerable (the D3a evaluation)…
+        let my = a.my_record().expect("record");
+        assert_eq!(
+            zink_protocol::link_tier(&[a.public_key()], laptop.public(), &my.attestations),
+            zink_protocol::LinkTier::VouchedFromTrust
+        );
+        // …while the laptop's record carries only its own (zero) vouches
+        assert_eq!(
+            zink_protocol::link_tier(
+                &[laptop.public()],
+                a.public_key(),
+                &laptop_record.attestations
+            ),
+            zink_protocol::LinkTier::None
+        );
+
+        // And: once the laptop runs its own act back, an observer holding
+        // both records sees the upgrade — aggregation across records is
+        // exactly the observer's job (multi-device.md §4)
+        let laptop_vouch = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: laptop.public(),
+                subject: laptop.public(),
+                claim: Claim::SamePersonAs(a.public_key()),
+                revision: 0,
+            },
+            &laptop,
+        );
+        let mut held = my.attestations.clone();
+        held.push(laptop_vouch);
+        assert_eq!(
+            zink_protocol::link_tier(&[a.public_key()], laptop.public(), &held),
+            zink_protocol::LinkTier::MutuallyConfirmed
+        );
+
+        // And: the recognition persists across a reopen
+        a.close().await;
+        let a = Client::open(&temp_key("recognize-vouch", "a"))
+            .await
+            .expect("reopen");
+        assert_eq!(a.recognized_devices().len(), 1);
+        assert_eq!(
+            zink_protocol::link_tier(
+                &[a.public_key()],
+                laptop.public(),
+                &a.my_record().expect("record").attestations
+            ),
+            zink_protocol::LinkTier::VouchedFromTrust
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("recognize-vouch"));
     }
 
     #[tokio::test]

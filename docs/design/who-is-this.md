@@ -58,9 +58,15 @@ no more than a relay.
 Resolved per connection like D0c (the caller's key IS the authenticated
 connection key), answered per op:
 
-- Caller **not a contact** → `NotHeld`, for every subject.
-- Caller is a contact, subject **∈ my keys** → my fresh `my_record()`.
-- Caller is a contact, subject in my **contact store** (user-added) → that
+- Caller **not a contact** (nor a recognized own device — the D3b gate
+  extension, multi-device.md §6) → `NotHeld`, for every subject.
+- Caller is served, subject **∈ my keys** → my fresh `my_record()`.
+- Caller is served, subject ∈ my **recognized own devices** → that device's
+  stored record (the D3b **mirror rule**, multi-device.md §6): recognizing
+  a device is a willingness to advertise it — and nobody else *can* serve a
+  new device's record (its own contact store is empty; siblings hold it
+  only in the own-devices store).
+- Caller is served, subject in my **contact store** (user-added) → that
   stored record.
 - Subject known only via my own *learned* store → `NotHeld`. Serving
   second-hand records would create implicit gossip chains — hop limit 1 is

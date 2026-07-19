@@ -50,6 +50,13 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 // updates the one overlapping entry, only under its own petname (the
 // explicit confirm) — ContactOverlap / AmbiguousOverlap otherwise;
 // participant_labels(&[PublicKey]) dedups display labels per contact entry
+// multi-device (D3b, multi-device.md §3/§6): recognize_device(record) —
+// the one-way act (store key + record in devices/, sign the same-person-as
+// vouch that my_record carries from now on); recognized_devices(). The
+// sync gate serves recognized keys like self (only the vouched key — extra
+// listed keys never widen it), and WhoIs serves recognized-device subjects
+// (the mirror rule). One-way is receive-only: pulling needs the sibling's
+// record, which recognizing back provides.
 // stored history (C3a):
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's

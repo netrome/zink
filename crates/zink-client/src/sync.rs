@@ -44,9 +44,17 @@ impl std::fmt::Debug for SyncHandler {
 impl SyncHandler {
     /// Contacts-only gate, resolved once per connection (the caller's key IS
     /// the authenticated connection key). A peer added as a contact
-    /// mid-connection is served on its next connection.
+    /// mid-connection is served on its next connection. The self-allowance
+    /// extends to recognized own devices (D3b, multi-device.md §6) — and
+    /// only to the *vouched* key of each: extra keys a device record lists
+    /// never widen the gate. Local state only; nothing wire-borne.
     fn serves(&self, caller: PublicKey) -> bool {
         caller == self.device.public()
+            || self
+                .state
+                .recognized_devices()
+                .iter()
+                .any(|(key, _)| *key == caller)
             || self
                 .state
                 .contacts()
@@ -57,13 +65,24 @@ impl SyncHandler {
 
     /// The record served for `WhoIs { subject }` (who-is-this.md §4): the
     /// fresh self-record for our own key (`None` — indistinguishable from
-    /// not-holding — while the profile is incomplete), else a *user-added*
-    /// contact's stored record, as stored. Learned records (D1b) are never
-    /// re-served — hop limit 1 is structural — and a contact-store read
-    /// error fails closed, like the gate.
+    /// not-holding — while the profile is incomplete), a **recognized own
+    /// device's** stored record (the D3b mirror rule, multi-device.md §6:
+    /// recognizing a device is a willingness to advertise it — and nobody
+    /// else can serve a new device's record), else a *user-added* contact's
+    /// stored record, as stored. Learned records (D1b) are never re-served
+    /// — hop limit 1 is structural — and a contact-store read error fails
+    /// closed, like the gate.
     fn who_is(&self, subject: PublicKey) -> Option<ContactRecord> {
         if subject == self.device.public() {
             return crate::client::build_own_record(&self.device, &self.state);
+        }
+        if let Some((_, record)) = self
+            .state
+            .recognized_devices()
+            .into_iter()
+            .find(|(key, _)| *key == subject)
+        {
+            return Some(record);
         }
         self.state
             .contacts()

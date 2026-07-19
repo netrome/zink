@@ -839,7 +839,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     contact entry, so records stay single-key-led and only the *identity*
     uses were broken. 167 tests incl. the adversarial overlap cases; app
     cross-checked for aarch64.)*
-  - [ ] **D3b · Recognize + gate.** Own-devices store; the one-way
+  - [x] **D3b · Recognize + gate.** Own-devices store; the one-way
     recognize act (store key + record, sign the vouch, `my_record` carries
     it); D0c gate: recognized keys served like self, and `WhoIs` serves
     recognized-device subjects; CLI `recognize`.
@@ -847,6 +847,27 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     the reverse stays closed until B recognizes A back; a contact's
     `WhoIs` for B's key at A returns B's stored record; each record
     carries only its own vouches.
+    ✅ *(2026-07-19: `Client::recognize_device` — refuses the own key,
+    requires relays (send-to-self needs a mailbox), signs the vouch at
+    revision 0 (supersession scopes per linked key, so re-recognize is
+    idempotent; withdrawal is D4's `Negative`); own-devices store at
+    `devices/<key>.record` + `.vouch`, written only by the act.
+    `build_own_record` appends the stored vouches, so `my_record` and the
+    `WhoIs` serve side publish them immediately. Gate: `serves` unions
+    self + recognized + contacts — **only the vouched key counts**, extra
+    keys a device record lists never widen the gate (the D3a smuggling
+    lesson applied); `who_is` serves recognized-device subjects (the
+    mirror rule) ahead of contact lookups. CLI `recognize` (the pasted
+    payload IS the confirm — dev shape) + `devices`. e2e: gate asymmetry
+    in both directions with the recognize-back upgrade; the mirror rule
+    served to a contact, `NotHeld` to a stranger; vouch-in-my-record
+    evaluated with D3a's `link_tier` as an observer would (one-way =
+    vouched-from-trust, the laptop's record carries nothing, mutual after
+    the reverse act), persisting across reopen. Doc touchpoints landed:
+    SPEC §3.2/§3.6 revised to the one-way recognize (called out),
+    who-is-this.md §4 gained the mirror rule, client-core.md the pairing
+    APIs. Live CLI run: laptop's record → phone `recognize` → `devices`
+    lists it; the laptop's own list stays empty.)*
   - [ ] **D3c · Send-to-self + clustering offers.** Recipients gain own
     devices (the core mechanism); the fresh-device bootstrap (own-device
     authorship legitimizes, own devices as auto-query responders); the

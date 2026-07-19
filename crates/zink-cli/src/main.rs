@@ -44,6 +44,8 @@ async fn main() -> ExitCode {
         Some("my-record") => my_record(&args[1..]).await,
         Some("contact-add") => contact_add(&args[1..]).await,
         Some("contacts") => contacts(&args[1..]).await,
+        Some("recognize") => recognize(&args[1..]).await,
+        Some("devices") => devices(&args[1..]).await,
         Some("send") => send(&args[1..]).await,
         Some("recv") => recv(&args[1..]).await,
         Some("conversations") => conversations(&args[1..]).await,
@@ -71,6 +73,8 @@ const USAGE: &str = "usage:
   zink-cli my-record --key <file> [--name <name>] [--relay <relay> ...] [--qr]
   zink-cli contact-add --key <file> [--name <petname>] <ZINK:...>
   zink-cli contacts --key <file>
+  zink-cli recognize --key <file> <ZINK:...>
+  zink-cli devices --key <file>
   zink-cli send --key <file> --to <petname | pubkey@relay[,relay...]> [--to ...]
                 [--image <file> [--thumb <file>]] <text>
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
@@ -155,6 +159,45 @@ async fn contact_add(args: &[String]) -> Result<(), String> {
     let client = open_client(&flags).await?;
     let petname = client.add_contact(&record, optional(&flags, "--name")?)?;
     println!("added contact {petname:?}");
+    client.close().await;
+    Ok(())
+}
+
+/// The one-way "recognize this device as me" act (D3b, multi-device.md
+/// §3). The dev-tool stand-in for the app's scan + fingerprint confirm:
+/// the payload the user pastes IS what they confirm.
+async fn recognize(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [payload] = positionals.as_slice() else {
+        return Err(format!("exactly one ZINK:... payload expected\n{USAGE}"));
+    };
+    let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
+    let client = open_client(&flags).await?;
+    let key = client.recognize_device(&record)?;
+    println!(
+        "recognized {} ({}) as this person's device",
+        record.self_claimed_name().unwrap_or("<unnamed>"),
+        &hex::encode(&key.0)[..8],
+    );
+    client.close().await;
+    Ok(())
+}
+
+/// List the own-devices store — this device's recognition set.
+async fn devices(args: &[String]) -> Result<(), String> {
+    let (flags, _) = parse_flags(args)?;
+    let client = open_client(&flags).await?;
+    let devices = client.recognized_devices();
+    if devices.is_empty() {
+        println!("no recognized devices");
+    }
+    for (key, record) in devices {
+        println!(
+            "{}  ({})",
+            record.self_claimed_name().unwrap_or("<unnamed>"),
+            &hex::encode(&key.0)[..8],
+        );
+    }
     client.close().await;
     Ok(())
 }

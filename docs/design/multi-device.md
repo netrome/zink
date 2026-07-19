@@ -290,14 +290,21 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   the mutual upgrade; `add_contact`'s same-petname add is the confirm,
   `ContactOverlap`/`AmbiguousOverlap` are the refusals;
   `Client::participant_labels` is the dedup seam both edges render from.)*
-- **D3b · Recognize + gate.** Own-devices store; the one-way recognize act
-  in `Client` (store key + record, sign link, `my_record` gains the
-  vouch); the D0c gate extension (recognized keys served like self) + the
-  `WhoIs` mirror rule (recognized-device subjects served, §6); CLI
-  `recognize` (dev shape TBD at implementation). *Done when:* headless e2e
-  — A recognizes B: A serves B like self while the reverse direction stays
-  closed until B recognizes A back; a contact's `WhoIs` for B's key at A
-  returns B's stored record; each record carries only its own vouches.
+- **D3b · Recognize + gate — done (2026-07-19).** Own-devices store; the
+  one-way recognize act in `Client` (store key + record, sign link,
+  `my_record` gains the vouch); the D0c gate extension (recognized keys
+  served like self) + the `WhoIs` mirror rule (recognized-device subjects
+  served, §6); CLI `recognize` (dev shape TBD at implementation). *Done
+  when:* headless e2e — A recognizes B: A serves B like self while the
+  reverse direction stays closed until B recognizes A back; a contact's
+  `WhoIs` for B's key at A returns B's stored record; each record carries
+  only its own vouches.
+  *(As built: `recognize_device` signs at revision 0 — supersession scopes
+  per linked key, so re-recognize is idempotent; the gate trusts only the
+  *vouched* key of each stored device, never the rest of a record's `keys`
+  list (§4's lesson); the mirror rule answers ahead of contact lookups;
+  CLI `recognize` + `devices`, where pasting the payload is the confirm.
+  SPEC §3.2/§3.6 + who-is-this.md §4 + client-core.md updated per §10.)*
 - **D3c · Send-to-self + clustering offers.** Recipients gain own devices
   (the core mechanism); the fresh-device bootstrap (own-device authorship
   legitimizes, own devices as auto-query responders — §5); §7 popup
