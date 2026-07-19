@@ -220,19 +220,17 @@ is attacker-controlled* — a spammer can list your friends for free —
   client-crate: learned-from-participant with provenance, the per-run rate
   limit, and the no-contributing-contact gate short-circuiting before the
   rate limit.
-- **D2c · Group UI.** Multi-select compose; add-to-conversation action;
-  membership deltas + heads-based labels; the wild-Charlie popup with
-  persisted dismissal (§5). *Done when:* a three-device (or
-  two-devices-plus-CLI) group chat runs live: create, add, popup → add
-  Charlie, reply-all reaches everyone.
-  *(2026-07-19: code complete — popup data comes from an `unknown_members`
+- **D2c · Group UI — done (2026-07-19, verified live: three participants
+  on one laptop — create, add, popup → add, reply-all delivered; the
+  fresh participant's who-is stall is tracked as De5 in the plan).**
+  *(Code notes: popup data comes from an `unknown_members`
   command over heads-based membership, so added-but-silent members surface
   (sender-based detection would miss them); candidates pair each name
   group with the freshest learned record (`Client::learned_candidates` —
   the promotable payload, so add-as-contact works offline); dismissal
   persists in client state and collapses the popup to the compact who-is
   row. An add with empty text is permitted: the membership change IS the
-  message. Awaiting the live run.)*
+  message.)* **D2 complete.**
 
 ## 9. Doc touchpoints when this lands
 

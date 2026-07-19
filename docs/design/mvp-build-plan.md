@@ -618,6 +618,20 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   contacts-view pull refreshes that row's avatar. The ~5 s `who_is.rs` e2e
   is inherent subprocess cost (~15 CLI invocations, each a full client
   open), left as is.)*
+- [ ] **De5 · who-is from a freshly-set-up client.** Field observation at the
+  D2c run (2026-07-19, three instances on one laptop): the *new* participant's
+  who-is never completed — not even after adding a contact — while the
+  long-running clients' queries worked. Prime suspect: **homing applies at
+  bind** (the D0b field lesson) — a client whose profile was set *this run*
+  has an endpoint with no relay transport, so it can register mailboxes and
+  send (direct dials) but cannot dial *anyone by key* until the next open;
+  who-is is pure dial-by-key. Two fixes to make: (a) the "restart to apply"
+  hint from D0b graduates from polish to necessary — better, rebind or prompt
+  on profile save; (b) verify the panel's behavior under a zero-relay-transport
+  endpoint — dials should fail *bounded* and report "N unreachable", never
+  hang; if it truly never completes, the connect path has a second bug.
+  Not critical (one-time-per-install window); revisit before D3's pairing
+  flow, which will hit the same fresh-client moment by construction.
 - [ ] **De4 · e2e suite latency.** The full-stack CLI tests are slow (groups
   ~13 s, who-is ~5 s) for reasons that are harness-shaped, not protocol-shaped:
   each drives the CLI *binary*, so every step is a subprocess doing a full
@@ -630,7 +644,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   in-process in zink-relay's own tests) — so whole flows run as library calls;
   the CLI keeps one or two thin smoke tests for arg-parsing/output. *(Noted
   2026-07-19 at D2b review.)*
-- [ ] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
+- [x] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
   on the contacts' side IS the membership-presentation pipeline, so it ships
   first and multi-device becomes a thin layer on top. SPEC §12 phases
@@ -710,10 +724,15 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     auto-learned route; client-crate tests pin provenance, the rate limit
     (wiped learned store not re-asked), and the gate short-circuiting
     before the rate limit for a stranger-authored conversation.)*
-  - [ ] **D2c · Group UI.** Multi-select compose; add-to-conversation;
+  - [x] **D2c · Group UI.** Multi-select compose; add-to-conversation;
     heads-based labels + delta lines; the wild-Charlie popup with persisted
     dismissal. *Done when:* a live group chat across devices — create, add,
     popup → add, reply-all reaches everyone.
+    ✅ **Verified live 2026-07-19** — three participants on one laptop:
+    create, add, popup → add, reply-all delivered. One field observation
+    tracked as De5: who-is from the freshly-set-up participant never
+    completed (prime suspect: unhomed endpoint — profile set this run,
+    homing applies at bind). **D2 complete.** 🎉
     *(2026-07-19: code complete — compose is a contact multi-select
     (`send_message` takes `to: Vec<String>` + `add: Vec<String>`; an add
     with empty text is allowed — the membership change IS the message);
@@ -734,7 +753,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     desktop instances works: create a group from the multi-select, add the
     third member from the picker, their device pops "a wild key appeared"
     with the auto-learned candidate, add → label flips, reply-all reaches
-    everyone. That run closes D2.)*
+    everyone.)*
 - [ ] **D3 · Multi-device.** 🎯 *(Was D2 — now genuinely thin: D2's pipeline
   does the propagation, since "your new device" and "a new member" are the
   same event under the hood (SPEC §5.2).)* QR pairing producing the mutual
