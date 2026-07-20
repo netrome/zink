@@ -13,6 +13,30 @@ pub struct AppState {
     pub relay: Option<String>,
     pub contacts: Vec<ContactRow>,
     pub record: Option<QrPayload>,
+    /// Recognized own devices (D3e) — the me-view's device list, and what
+    /// gates the chat view's "introduce my devices" button.
+    pub devices: Vec<DeviceRow>,
+}
+
+/// One recognized own device (multi-device.md §3).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceRow {
+    /// The device's self-claimed name ("mårten laptop"), or short hex.
+    pub name: String,
+    /// The vouched device key, hex.
+    pub key: String,
+}
+
+/// A decoded-but-not-yet-trusted record (D3e): what the pair-mode confirm
+/// shows before anything is signed — scanning a wrong QR must never
+/// silently vouch (multi-device.md §3).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RecordPreview {
+    /// The record's verified self-claimed name, if any.
+    pub name: Option<String>,
+    /// The device key (the record's first key), full hex — the fingerprint
+    /// the user confirms against the other device's me-view.
+    pub key: String,
 }
 
 /// One contact-list row. The key rides along so the contact view can run

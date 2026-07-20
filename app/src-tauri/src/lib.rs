@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AppState, BlobInfo, ContactRow, Conversation, Message, OutgoingImage, QrPayload, UnknownMember,
-    WhoIsCandidate, WhoIsReport,
+    AppState, BlobInfo, ContactRow, Conversation, DeviceRow, Message, OutgoingImage, QrPayload,
+    RecordPreview, UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -161,7 +161,90 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
             })
             .collect(),
         record,
+        devices: client
+            .recognized_devices()
+            .into_iter()
+            .map(|(key, record)| DeviceRow {
+                name: record
+                    .self_claimed_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| hex::encode(&key.0)[..8].to_string()),
+                key: hex::encode(&key.0),
+            })
+            .collect(),
     })
+}
+
+/// Decode a `ZINK:` payload for the pair-mode confirm (D3e) — nothing is
+/// stored or signed here; this is what the fingerprint check renders.
+#[tauri::command]
+async fn inspect_record(payload: String) -> Result<RecordPreview, String> {
+    let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
+    let key = record
+        .keys
+        .first()
+        .ok_or("record has no keys".to_string())?;
+    Ok(RecordPreview {
+        name: record.self_claimed_name().map(str::to_string),
+        key: hex::encode(&key.0),
+    })
+}
+
+/// The one-way "recognize this device as me" act (D3e, multi-device.md §3)
+/// — called only after the UI's explicit fingerprint confirm. Fires an
+/// opportunistic re-wrap pull afterward (D3d): if the sibling has already
+/// recognized this device back, pre-pairing history becomes readable now;
+/// if not, it declines harmlessly.
+#[tauri::command]
+async fn recognize_device(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    payload: String,
+) -> Result<String, String> {
+    let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
+    let client = client(&app, &managed).await?;
+    client.recognize_device(&record)?;
+    let name = record
+        .self_claimed_name()
+        .unwrap_or("your device")
+        .to_string();
+    let rewrapper = client.clone();
+    tauri::async_runtime::spawn(async move {
+        let healed = rewrapper.rewrap_backlog().await;
+        if healed > 0 {
+            let _ = app.emit("new-messages", healed);
+        }
+    });
+    Ok(name)
+}
+
+/// Introduce this device's siblings to a conversation now (D3c sugar): an
+/// empty-body message — send-to-self appends the devices, and the signed
+/// recipients list is the announcement. Purely optional; the next organic
+/// message would do the same.
+#[tauri::command]
+async fn introduce_devices(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    conversation: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    if client.recognized_devices().is_empty() {
+        return Err("no recognized devices — pair one first".into());
+    }
+    let conversation = parse_id(&conversation)?;
+    let resolved = client.reply_contacts(conversation)?;
+    if resolved
+        .contacts
+        .iter()
+        .all(|contact| contact.relays.is_empty())
+    {
+        return Err("no routable participants".into());
+    }
+    client
+        .send_in(conversation, &resolved.contacts, Vec::new(), vec![])
+        .await?;
+    Ok(())
 }
 
 /// Save name + home relay, register the mailbox there, return the QR.
@@ -663,6 +746,9 @@ pub fn run() {
             set_avatar,
             avatar,
             unknown_members,
+            inspect_record,
+            recognize_device,
+            introduce_devices,
             dismiss
         ])
         .run(tauri::generate_context!())

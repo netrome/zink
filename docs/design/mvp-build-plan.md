@@ -936,6 +936,26 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   - [ ] **D3e · App UI + acceptance.** Pair mode (show/scan + fingerprint
     confirm), device list, introduction button, popup upgrade. *Done when:*
     the acceptance flow runs live across devices.
+    *(2026-07-20: code complete — **awaiting the live acceptance run**:
+    pair a second device, introduce, a contact clusters it via the popup
+    evidence, and it reads old history via re-wrap; that run ticks this
+    box, D3, and closes multi-device. 🎉 As built: me-view shows this
+    device's full key (the fingerprint the *other* device confirms
+    against), a "my devices" list, and the pair flow — "pair: scan a
+    device's QR" / "pair from pasted text" → `inspect_record` preview
+    (name + full-key fingerprint, nothing signed) → explicit "recognize
+    as my device" → `recognize_device`, which then fires a background
+    `rewrap_backlog` (heals immediately when the sibling already
+    recognized this device; declines harmlessly otherwise) and hints to
+    scan back for the mutual pair. Chat view gains "introduce my
+    devices" (visible only with recognized devices): an empty-body
+    `send_in` via `introduce_devices` — the D2c gesture, membership
+    unchanged, recipients announce the siblings. The popup upgrade
+    itself shipped with D3c (evidence lines render already). New
+    commands: `inspect_record`, `recognize_device`, `introduce_devices`;
+    `AppState` gains `devices` (+ `DeviceRow`/`RecordPreview` DTOs).
+    UI wasm bundle + aarch64 debug APK both build; 179 workspace tests
+    unchanged (app crates carry no logic, per the README rule).)*
 - [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?"
   answers from contacts; concurrency-aware message views. *(Position confirmed
   at the 2026-07-19 reorg: D2's pipeline runs entirely on D1's

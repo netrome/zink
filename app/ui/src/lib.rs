@@ -12,7 +12,8 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use wasm_bindgen::prelude::wasm_bindgen;
 use zink_app_dto::{
-    AppState, Conversation, Message, OutgoingImage, QrPayload, UnknownMember, WhoIsReport,
+    AppState, Conversation, Message, OutgoingImage, QrPayload, RecordPreview, UnknownMember,
+    WhoIsReport,
 };
 
 #[wasm_bindgen(start)]
@@ -538,6 +539,27 @@ fn ChatView(
         });
     };
 
+    // Introduce-now (D3c sugar, D3e button): an empty-body message whose
+    // signed recipients announce this device's siblings to everyone here.
+    // Optional — the next organic message would do the same.
+    let introduce = move |_| {
+        let id = conversation.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                conversation: &'a str,
+            }
+            let args = Args { conversation: &id };
+            match invoke::invoke::<serde::de::IgnoredAny>("introduce_devices", &args).await {
+                Ok(_) => {
+                    ok("your devices were introduced to this conversation");
+                    reload_messages(id);
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     let send = move |_| {
         let body = draft.get_untracked();
         let image = attachment.get_untracked().map(|(image, _)| image);
@@ -857,6 +879,19 @@ fn ChatView(
                     <button class="secondary" on:click=add_member>
                         "add"
                     </button>
+                    {move || {
+                        state
+                            .get()
+                            .map(|state| !state.devices.is_empty())
+                            .unwrap_or(false)
+                            .then(|| {
+                                view! {
+                                    <button class="secondary" on:click=introduce>
+                                        "introduce my devices"
+                                    </button>
+                                }
+                            })
+                    }}
                 </div>
                 <input type="file" accept="image/*" on:change=attach />
                 <textarea
@@ -955,6 +990,47 @@ fn ContactsView(
         });
     };
 
+    // Pair mode (D3e, multi-device.md §3): a scanned/pasted record is
+    // previewed — name + full-key fingerprint — and NOTHING is signed
+    // until the explicit confirm. `pair_scan` routes the next scan result
+    // into the preview instead of add_contact.
+    let pair_scan = RwSignal::new(false);
+    let pair_preview = RwSignal::new(None::<(String, RecordPreview)>);
+    let preview = move |payload: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+            }
+            let args = Args { payload: &payload };
+            match invoke::invoke::<RecordPreview>("inspect_record", &args).await {
+                Ok(decoded) => pair_preview.set(Some((payload, decoded))),
+                Err(e) => err(e),
+            }
+        });
+    };
+    let recognize = move |payload: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+            }
+            let args = Args { payload: &payload };
+            match invoke::invoke::<String>("recognize_device", &args).await {
+                Ok(name) => {
+                    pair_preview.set(None);
+                    paste.set(String::new());
+                    reload();
+                    ok(&format!(
+                        "recognized {name} as your device — scan back from it \
+                         to pair both ways"
+                    ));
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     // Scanning state drives the cancel overlay AND page transparency: with
     // `windowed: true` the camera renders *behind* the webview, so html/body
     // must go transparent (the `scanning` class) for it to show through —
@@ -994,6 +1070,9 @@ fn ContactsView(
             let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
             scanning.set(false);
             match result {
+                // Pair mode previews (confirm before signing); the normal
+                // path adds a contact.
+                Ok(scanned) if pair_scan.get_untracked() => preview(scanned.content),
                 Ok(scanned) => add(scanned.content),
                 // A cancelled scan also lands here — worth no red banner.
                 Err(e) => err(e),
@@ -1139,8 +1218,88 @@ fn ContactsView(
                         }
                     })
             }}
+            // The fingerprint another device confirms against when it
+            // recognizes this one (D3e, multi-device.md §3).
+            {move || {
+                state
+                    .get()
+                    .map(|state| {
+                        view! {
+                            <div class="dim" id="record-text">
+                                {format!("this device's key: {}", state.my_key)}
+                            </div>
+                        }
+                    })
+            }}
+            <h3>"my devices"</h3>
+            {move || {
+                let devices = state.get().map(|state| state.devices).unwrap_or_default();
+                if devices.is_empty() {
+                    view! {
+                        <div class="dim">
+                            "none recognized — pair by scanning the other device's QR"
+                        </div>
+                    }
+                        .into_any()
+                } else {
+                    devices
+                        .into_iter()
+                        .map(|device| {
+                            let short = device.key.chars().take(8).collect::<String>();
+                            view! {
+                                <div class="row">
+                                    <b>{device.name}</b>
+                                    <span class="dim">{format!("{short}…")}</span>
+                                </div>
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .into_any()
+                }
+            }}
+            <button on:click=move |ev| {
+                pair_scan.set(true);
+                scan(ev);
+            }>"pair: scan a device's QR"</button>
+            {move || {
+                pair_preview
+                    .get()
+                    .map(|(payload, decoded)| {
+                        let confirm_payload = payload;
+                        view! {
+                            <div class="wild">
+                                <div class="row">
+                                    <b>"recognize this device as me?"</b>
+                                </div>
+                                <div class="row">
+                                    <b>{decoded.name.clone().unwrap_or_else(|| "(unnamed)".to_string())}</b>
+                                </div>
+                                // The one real risk (multi-device.md §3):
+                                // compare against the key shown on the
+                                // other device before signing anything.
+                                <div class="dim" id="record-text">
+                                    {format!("key: {}", decoded.key)}
+                                </div>
+                                <div class="row">
+                                    <button on:click=move |_| recognize(confirm_payload.clone())>
+                                        "recognize as my device"
+                                    </button>
+                                    <button
+                                        class="secondary"
+                                        on:click=move |_| pair_preview.set(None)
+                                    >
+                                        "cancel"
+                                    </button>
+                                </div>
+                            </div>
+                        }
+                    })
+            }}
             <h3>"add contact"</h3>
-            <button on:click=scan>"scan QR"</button>
+            <button on:click=move |ev| {
+                pair_scan.set(false);
+                scan(ev);
+            }>"scan QR"</button>
             <textarea
                 rows="2"
                 placeholder="…or paste a ZINK: payload"
@@ -1149,6 +1308,9 @@ fn ContactsView(
             />
             <button class="secondary" on:click=move |_| add(paste.get_untracked())>
                 "add from pasted text"
+            </button>
+            <button class="secondary" on:click=move |_| preview(paste.get_untracked())>
+                "pair from pasted text"
             </button>
             <h3>"contacts"</h3>
             {move || {
