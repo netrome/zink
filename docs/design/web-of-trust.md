@@ -41,7 +41,10 @@ version bump with a transitive-privacy story to design — post-MVP; the
 endorsement rule in §3 keeps hop limit 1 structural in the meantime);
 numeric per-contact trust weights and any automated weighing beyond
 provenance classes + agreement counts (client differentiation, post-MVP);
-avatar endorsements (no use case); third-party `same-person-as` evaluation
+avatar endorsements (deferred with the per-attester lens, §6 — "Bob's
+picture of her" is a real future use; the wire field already carries any
+claim kind, so adding them later is an evaluation change, not a version
+bump); third-party `same-person-as` evaluation
 (`link_tier` stays self-attested-only — a friend vouches a *name* for a
 key, never someone else's device link); automatic vouching (broadcasting a
 petname is an explicit act, SPEC §3.2 — privacy default); any enforcement
@@ -60,7 +63,7 @@ petname is an explicit act, SPEC §3.2 — privacy default); any enforcement
 | Repudiation vs membership | Dropping a repudiated key from a reply IS the deliberate stop-include (groups.md §2) — unlike routelessness (the D2a hazard), exclusion here is the *intended* meaning. The key stays in history; it stops being addressed. |
 | Mutual disavowal (theft race) | A stolen device can disavow back — two keys of one person each claiming the other is bad. Not arbitrated (SPEC §3.4): both negatives render, addressed keys shrink to what the observer still trusts, and the tie is broken out-of-band (you call your friend). The UI says exactly that. |
 | Recovery flow | Social, two acts, both existing primitives: the person's **new** key is added the normal way (QR / who-is + explicit add), and the *friend* vouches it (`Name`) + repudiates the old one (`Negative`) — each an explicit act on their own device, propagated as endorsements. No recovery object, no ceremony. |
-| Ranking (MVP) | Endorsed names join `resolve_name` as a provenance class: petname (manual) > subject's verified self-claim > **endorsed names** ("2 friends call them Carol" — agreement count + who) > hex. Within a class: revision, then count. No numeric weights. |
+| Ranking (MVP) | Endorsed names join `resolve_name` as a provenance class: petname (manual) > subject's verified self-claim > **endorsed names** ("2 friends call them Carol" — agreement count + who) > hex. Within a class: revision, then count. No numeric weights. Ranking is only the **default lens** — the label printed where the UI must pick one (chat labels, lists, notifications, prefills) with no user input; the underlying data stays per-attester, never merged (§6). |
 | Fork views | A presentation-only indicator where the linearization hides real concurrency: consecutive linearized messages that are causally incomparable render a "crossed in flight" marker; a message with multiple parents renders as the merge it is. Derived from the DAG at history build; the deterministic linear default is untouched (tenet 7). |
 
 ## 3. Endorsements on the wire
@@ -156,9 +159,22 @@ The drill, end to end — every step an existing primitive plus §3/§4:
 - **Device list**: un-recognize (local) and repudiate (local + published)
   as separate acts — losing interest in a sibling is not the same as
   declaring it compromised.
+- **Per-attester lenses (future, parked — sharpened at review,
+  2026-07-20)**: nothing in this layer ever merges views — the learned
+  store and endorsements stay keyed by responder/attester — so "view this
+  profile as Bob" (Bob's name and picture for a person, rendered with an
+  according-to-Bob marker; "see this chat as Bob") is a pure presentation
+  feature a later client builds from data it already holds. Two
+  boundaries, both deliberate: a lens shows **what Bob tells you** (his
+  broadcast vouches), never "what Bob sees" — unshared petnames stay
+  private; and lenses are display-only — addressing always resolves
+  through *your* store (the multi-device.md §7 display-vs-addressing
+  separation, the same parked latitude). Nothing in D4 may preclude this.
 - **Fork views** (D4d): the "crossed in flight" marker between causally
   incomparable neighbors and a merge marker on multi-parent messages.
-  Advanced-view data made visible, nothing reordered.
+  Advanced-view data made visible, nothing reordered. *(Orthogonal to the
+  trust layer — D4 carries it only to clear SPEC §12 phase 3's bundled
+  entry; it shares no design surface with §2–§5 and could land any time.)*
 
 ## 7. Security notes
 
