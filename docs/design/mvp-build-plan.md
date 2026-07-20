@@ -286,6 +286,10 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   fails on; debugging the current substrate first would be partly wasted.
   Revisit on the new substrate: if backgrounded delivery still fails then,
   the suspect list shifts to Doze/process-death on the Kotlin side.)*
+  *(2026-07-20 — deferral extended deliberately: backgrounded delivery
+  still stalls until app open in the field, but the diagnostic is
+  orthogonal to the identity layer (pull-based, no shared surface), so it
+  waits until after Stage D closes rather than interleaving with D4.)*
 
 **🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
 (+ Linux desktop), online and offline, with notifications.
@@ -959,13 +963,41 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     `AppState` gains `devices` (+ `DeviceRow`/`RecordPreview` DTOs).
     UI wasm bundle + aarch64 debug APK both build; 179 workspace tests
     unchanged (app crates carry no logic, per the README rule).)*
-- [ ] **D4 · Web-of-trust.** Third-party profile attestations; "who is this?"
-  answers from contacts; concurrency-aware message views. *(Position confirmed
-  at the 2026-07-19 reorg: D2's pipeline runs entirely on D1's
-  self-claims-with-provenance; D4's vouching — "your friends call them…" —
-  hop>1 forwarding, and weighted aggregation layer onto the existing popup
-  ranking additively. Concurrency-aware views likewise: groups make forks
-  more common, but the Lamport linearization already renders them honestly.)*
+- [ ] **D4 · Web-of-trust.** 🎯 Third-party profile attestations
+  (endorsements: "your friends call them…"), `Negative` claims +
+  repudiation / the social recovery flow, and concurrency-aware message
+  views. *(Position confirmed at the 2026-07-19 reorg: D4 layers
+  additively onto D1's provenance ranking and D2's popup pipeline. Scope
+  resolved 2026-07-20: **recovery is in** — it closes multi-device's
+  repudiation-lag note and D3a's deferred `Negative` handling; **hops>1
+  forwarding stays deferred** (a version bump with a transitive-privacy
+  story, post-MVP; the attester-is-responder rule keeps hop 1 structural
+  meanwhile); fork views ride as the tail slice.)* Design:
+  [web-of-trust.md](./web-of-trust.md) (drafted 2026-07-20 — one wire
+  *field* (`Known` gains `endorsements`), zero new claim kinds, zero new
+  stores; the §4 voiding rule pins cross-kind `Negative` supersession;
+  evidence accumulates, nobody arbitrates).
+  - [ ] **D4a · Endorsements + vouch.** Wire field (in-place at v1);
+    serve-side attach (own claims only — attester IS the answering key);
+    requester validation + learned store; `Client::vouch(petname)` /
+    withdraw; the endorsed-name ranking class; CLI `vouch`. *Done when:*
+    headless e2e — an endorsed name renders with provenance; a relayed
+    endorsement (attester ≠ responder) is dropped; nothing
+    auto-broadcasts.
+  - [ ] **D4b · Negative claims + repudiation.** The voiding rule in the
+    protocol (`link_tier`, name claims) + SPEC §3.2 sharpened;
+    `Client::repudiate(key)` (publish; un-recognize siblings); read-time
+    exclusion from clusters + addressed sets; CLI `repudiate`. *Done
+    when:* a higher-revision negative voids the vouch and device link
+    (re-vouch restores); after repudiating a lost sibling, a contact's
+    freshness pull stops sealing to it; manual override survives.
+  - [ ] **D4c · Recovery acceptance + UI.** Vouch toggle, disavowal
+    warnings, un-recognize vs repudiate, the friend-assisted flow. *Done
+    when:* the lost-device drill runs live — contacts converge on the new
+    key and stop addressing the old.
+  - [ ] **D4d · Fork views.** The crossed-in-flight / merge indicators
+    from the DAG at history build. *Done when:* concurrent sends render
+    the marker on both clients; the linear default unchanged.
 - [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
   device is online and reachable (via D0b connectivity — holepunched direct, or
   relay-routed as fallback), deliver the envelope peer-to-peer over the D0a peer ALPN
@@ -1021,7 +1053,8 @@ Not scheduled into a stage; must land before any build leaves our hands.
   ([live-delivery.md](./live-delivery.md)), D0 sync primitives 📝
   ([sync-primitives.md](./sync-primitives.md)), D1 identity discovery 📝
   ([who-is-this.md](./who-is-this.md)), D2 groups 📝 ([groups.md](./groups.md)),
-  D3 multi-device 📝 ([multi-device.md](./multi-device.md)), D5 direct delivery 📝
+  D3 multi-device 📝 ([multi-device.md](./multi-device.md)), D4 web-of-trust 📝
+  ([web-of-trust.md](./web-of-trust.md)), D5 direct delivery 📝
   ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0). The app
   shell (C3) needed no design doc — it assembled resolved decisions; its
   as-built map lives in `app/README.md`.
