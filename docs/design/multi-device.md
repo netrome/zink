@@ -335,8 +335,8 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   history access is untouched; `auto_rewrap` rides the drain seams after
   `auto_sync`, and `backfill_by_key` resolves siblings through the devices
   store so the whole skeleton-then-keys flow works by key alone.)*
-- **D3e · App UI + acceptance — code complete (2026-07-20), awaiting the
-  live run.** Pair mode screens (show/scan + confirm), device list in the
+- **D3e · App UI + acceptance — done (verified live 2026-07-20; D3
+  complete).** Pair mode screens (show/scan + confirm), device list in the
   me-view, introduction button, popup upgrade wired.
   *Done when:* the plan's acceptance live — pair a second device, introduce,
   contacts cluster it, it reads old history via re-wrap.

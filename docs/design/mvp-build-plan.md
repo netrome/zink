@@ -771,7 +771,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     third member from the picker, their device pops "a wild key appeared"
     with the auto-learned candidate, add → label flips, reply-all reaches
     everyone.)*
-- [ ] **D3 · Multi-device.** 🎯 *(Was D2 — now genuinely thin: D2's pipeline
+- [x] **D3 · Multi-device.** 🎯 *(Was D2 — now genuinely thin: D2's pipeline
   does the propagation, since "your new device" and "a new member" are the
   same event under the hood (SPEC §5.2).)* QR pairing producing the mutual
   `same-person-as`; the clustering rule that upgrades the popup from "wild
@@ -933,13 +933,16 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     heals 3/3, bodies read with the id set unchanged. SPEC §11 row pinned
     (GetKeys shape + own-device-only serving); client-core.md updated.
     179 tests.)*
-  - [ ] **D3e · App UI + acceptance.** Pair mode (show/scan + fingerprint
+  - [x] **D3e · App UI + acceptance.** Pair mode (show/scan + fingerprint
     confirm), device list, introduction button, popup upgrade. *Done when:*
     the acceptance flow runs live across devices.
-    *(2026-07-20: code complete — **awaiting the live acceptance run**:
-    pair a second device, introduce, a contact clusters it via the popup
-    evidence, and it reads old history via re-wrap; that run ticks this
-    box, D3, and closes multi-device. 🎉 As built: me-view shows this
+    ✅ **Verified live 2026-07-20** — paired (the paste path, on the
+    laptop — no scanner plugin needed), introduced, contact clustered via
+    the popup evidence, old history read via re-wrap. **D3 complete.** 🎉
+    *(UX note for a later polish pass: the "pair from pasted text" button
+    sits under "add contact" instead of "my devices" — findable but
+    misplaced; deliberately deferred.)*
+    *(2026-07-20: as built: me-view shows this
     device's full key (the fingerprint the *other* device confirms
     against), a "my devices" list, and the pair flow — "pair: scan a
     device's QR" / "pair from pasted text" → `inspect_record` preview
