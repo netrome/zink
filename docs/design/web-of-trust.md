@@ -249,11 +249,16 @@ The drill, end to end — every step an existing primitive plus §3/§4:
   structural — exclusion applies only to automatic reply fan-out, never
   to explicit sends — and the record path carries a repudiated sibling's
   disavowal, since its own record stops being servable.)*
-- **D4c · Recovery acceptance + UI.** The §5 drill live: vouch toggle,
-  disavowal warnings, un-recognize vs repudiate in the device list, the
-  friend-assisted flow. *Done when:* the lost-device drill runs across
-  real devices — contacts converge on the new key and stop addressing the
-  old one, each through their own explicit accepts.
+- **D4c · Recovery acceptance + UI — code complete (2026-07-21), awaiting
+  the live drill.** The §5 drill live: vouch toggle, disavowal warnings,
+  un-recognize vs repudiate in the device list, the friend-assisted flow.
+  *Done when:* the lost-device drill runs across real devices — contacts
+  converge on the new key and stop addressing the old one, each through
+  their own explicit accepts.
+  *(As built: repudiation is armed-then-confirm in the UI (it publishes);
+  warnings say WHO and whether they exclude; the friend-assisted flow
+  needed no new mechanism — it is the vouch toggle plus the contact-row
+  repudiate, exactly as §5.2 promised.)*
 - **D4d · Fork views.** The §6 concurrency indicator, derived at history
   build. *Done when:* two clients send concurrently and both render the
   crossed-in-flight marker on sync, with the linear default unchanged.

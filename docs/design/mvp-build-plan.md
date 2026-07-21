@@ -1044,6 +1044,30 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     warnings, un-recognize vs repudiate, the friend-assisted flow. *Done
     when:* the lost-device drill runs live — contacts converge on the new
     key and stop addressing the old.
+    *(2026-07-21: code complete — **awaiting the live drill**, which
+    ticks this box. As built: contact rows gain the vouch toggle (with
+    the honest broadcast framing in the flash message) and a repudiate
+    action; device rows split **un-recognize** (local only — losing
+    interest) from **repudiate** (published — declaring compromised),
+    per web-of-trust.md §6. Repudiation everywhere is armed-then-confirm
+    (two taps — it publishes). Disavowal warnings render wherever a key
+    is judged: contact rows, the wild-key popup (riding the evidence
+    lines), and the who-is panel — each line says WHO and whether it
+    excludes ("⚠ disavowed by mårten — excluded from your replies" vs
+    "third-party claim — a warning, not an exclusion"). New commands:
+    `vouch`/`unvouch`/`repudiate_key`/`unrecognize_device`; `ContactRow`
+    gains `vouched` + `disavowals`, `UnknownMember`/`WhoIsReport` gain
+    `disavowals`; `Client::unrecognize_device` added (the friend-assisted
+    flow needed nothing new — it IS vouch + repudiate on the friend's
+    device). UI wasm bundle + aarch64 APK build; 188 workspace tests
+    unchanged. **The drill:** phone+laptop paired and chatting with a
+    contact → "lose" the laptop → phone repudiates it from the device
+    list → the contact pulls who-is on the phone → laptop's row/popup
+    shows the warning and replies stop addressing it (their explicit
+    entry stays — sending by name still works); then the full recovery:
+    a fresh identity, the friend vouches it + repudiates the old key on
+    your say-so, and a third participant asking that friend learns all
+    three facts.)*
   - [ ] **D4d · Fork views.** The crossed-in-flight / merge indicators
     from the DAG at history build. *Done when:* concurrent sends render
     the marker on both clients; the linear default unchanged.

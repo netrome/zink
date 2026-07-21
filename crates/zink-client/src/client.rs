@@ -1113,6 +1113,14 @@ impl Client {
         Ok(())
     }
 
+    /// Un-recognize a device, locally only (web-of-trust.md §6): it stops
+    /// being served, included, and re-wrapped — but nothing is published.
+    /// Losing interest in a sibling is not the same as declaring it
+    /// compromised; that is `repudiate`.
+    pub fn unrecognize_device(&self, key: &PublicKey) {
+        self.state.remove_recognized_device(key);
+    }
+
     /// Repudiate a key (web-of-trust.md §4/§5): sign the `Negative` that
     /// voids our earlier claims about it, publish it (record +
     /// endorsements), and un-recognize a repudiated sibling. Advisory

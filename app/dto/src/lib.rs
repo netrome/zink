@@ -46,6 +46,11 @@ pub struct ContactRow {
     pub petname: String,
     /// The record's first key, hex — the `who_is` handle.
     pub key: String,
+    /// Whether this device currently vouches for them (D4c toggle).
+    pub vouched: bool,
+    /// Render-ready disavowal warnings, e.g. "disavowed by mårten —
+    /// excluded from your replies" (D4c). Empty for the common case.
+    pub disavowals: Vec<String>,
 }
 
 /// A displayable ContactRecord: SVG for the screen, text for copy/paste.
@@ -113,6 +118,9 @@ pub struct UnknownMember {
     /// render-ready lines like "mårten says this is their device" /
     /// "…mutually confirmed". Evidence for an offer, never automation.
     pub device_evidence: Vec<String>,
+    /// Render-ready disavowal warnings (D4c) — evidence at the moment of
+    /// decision, never a block.
+    pub disavowals: Vec<String>,
 }
 
 /// What a `who_is` query brought back, render-ready (D1c).
@@ -131,6 +139,8 @@ pub struct WhoIsReport {
     pub contact: Option<String>,
     /// Ranked name candidates for an unknown key, best first.
     pub candidates: Vec<WhoIsCandidate>,
+    /// Render-ready disavowal warnings for the key (D4c).
+    pub disavowals: Vec<String>,
 }
 
 /// One believable name for an unknown key, with provenance.

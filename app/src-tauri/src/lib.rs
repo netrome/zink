@@ -148,18 +148,22 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
         // the profile form back into set_profile — the bare dial string
         // would silently drop the relay URL on a re-save (D0b).
         relay: client.home_relay_specs().into_iter().next(),
-        contacts: client
-            .contacts()?
-            .into_iter()
-            .map(|(petname, record)| ContactRow {
-                petname,
-                key: record
-                    .keys
-                    .first()
-                    .map(|key| hex::encode(&key.0))
-                    .unwrap_or_default(),
-            })
-            .collect(),
+        contacts: {
+            let mut rows = Vec::new();
+            for (petname, record) in client.contacts()? {
+                let key = record.keys.first().copied();
+                rows.push(ContactRow {
+                    petname,
+                    key: key.map(|key| hex::encode(&key.0)).unwrap_or_default(),
+                    vouched: key.map(|key| client.vouches(&key)).unwrap_or(false),
+                    disavowals: match key {
+                        Some(key) => disavowal_lines(&client, key)?,
+                        None => vec![],
+                    },
+                });
+            }
+            rows
+        },
         record,
         devices: client
             .recognized_devices()
@@ -173,6 +177,80 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
             })
             .collect(),
     })
+}
+
+/// Render-ready disavowal warnings for a key (D4c): every valid negative
+/// says WHO; only same-person ones exclude from replies.
+fn disavowal_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String> {
+    Ok(client
+        .disavowals(key)?
+        .into_iter()
+        .map(|disavowal| {
+            if disavowal.excludes {
+                format!(
+                    "⚠ disavowed by {} — excluded from your replies",
+                    disavowal.attester_label
+                )
+            } else {
+                format!(
+                    "⚠ {} disavows this key (third-party claim — a warning, not an exclusion)",
+                    disavowal.attester_label
+                )
+            }
+        })
+        .collect())
+}
+
+/// Vouch for a contact (D4c): share your petname for them with anyone who
+/// asks you about them. Explicit — nothing vouches on add.
+#[tauri::command]
+async fn vouch(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    petname: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.vouch(&petname)?;
+    Ok(())
+}
+
+/// Withdraw a vouch: it stops being served; fresh answers replace it away.
+#[tauri::command]
+async fn unvouch(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    petname: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.unvouch(&petname)?;
+    Ok(())
+}
+
+/// Repudiate a key (D4c): published in your record and served with your
+/// answers — the friend-assisted recovery's second act, and the
+/// lost-device act on your own devices. Advisory: observers decide.
+#[tauri::command]
+async fn repudiate_key(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.repudiate(PublicKey(hex::parse32(&key)?))?;
+    Ok(())
+}
+
+/// Un-recognize a device, locally only (D4c): losing interest is not the
+/// same as declaring it compromised — that is `repudiate_key`.
+#[tauri::command]
+async fn unrecognize_device(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.unrecognize_device(&PublicKey(hex::parse32(&key)?));
+    Ok(())
 }
 
 /// Decode a `ZINK:` payload for the pair-mode confirm (D3e) — nothing is
@@ -599,6 +677,7 @@ async fn unknown_members(
             candidates,
             dismissed: dismissed.contains(&key),
             device_evidence,
+            disavowals: disavowal_lines(&client, key)?,
         });
     }
     Ok(members)
@@ -666,6 +745,7 @@ async fn who_is(
         unreachable: outcome.unreachable,
         contact,
         candidates,
+        disavowals: disavowal_lines(&client, key)?,
     })
 }
 
@@ -753,6 +833,10 @@ pub fn run() {
             inspect_record,
             recognize_device,
             introduce_devices,
+            vouch,
+            unvouch,
+            repudiate_key,
+            unrecognize_device,
             dismiss
         ])
         .run(tauri::generate_context!())

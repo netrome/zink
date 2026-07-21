@@ -628,6 +628,7 @@ fn ChatView(
                                             let evidence = member
                                                 .device_evidence
                                                 .iter()
+                                                .chain(member.disavowals.iter())
                                                 .map(|line| {
                                                     view! {
                                                         <div class="row">
@@ -723,6 +724,19 @@ fn ChatView(
                                             }),
                                             (None, false) => None,
                                         };
+                                        // Disavowal warnings (D4c): evidence
+                                        // at the moment of decision.
+                                        let warnings = report
+                                            .disavowals
+                                            .iter()
+                                            .map(|line| {
+                                                view! {
+                                                    <div class="row">
+                                                        <span class="dim">{line.clone()}</span>
+                                                    </div>
+                                                }
+                                            })
+                                            .collect::<Vec<_>>();
                                         let candidates = report
                                             .candidates
                                             .into_iter()
@@ -746,6 +760,7 @@ fn ChatView(
                                             .collect::<Vec<_>>();
                                         view! {
                                             {verdict.map(|text| view! { <span class="dim">{text}</span> })}
+                                            {warnings}
                                             {candidates}
                                         }
                                             .into_any()
@@ -1184,6 +1199,66 @@ fn ContactsView(
         });
     };
 
+    // D4c: vouching and repudiation. Repudiation is armed-then-confirmed
+    // (two taps) — it publishes.
+    let toggle_vouch = move |petname: String, vouched: bool| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                petname: &'a str,
+            }
+            let args = Args { petname: &petname };
+            let command = if vouched { "unvouch" } else { "vouch" };
+            match invoke::invoke::<serde::de::IgnoredAny>(command, &args).await {
+                Ok(_) => {
+                    reload();
+                    ok(if vouched {
+                        "no longer vouching for them"
+                    } else {
+                        "vouching — shares the name you call them with anyone \
+                         who asks you about them"
+                    });
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    let armed = RwSignal::new(None::<String>);
+    let repudiate = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("repudiate_key", &args).await {
+                Ok(_) => {
+                    armed.set(None);
+                    reload();
+                    ok("repudiated — published in your record; contacts learn \
+                        it from their next pull");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    let unrecognize = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("unrecognize_device", &args).await {
+                Ok(_) => {
+                    reload();
+                    ok("un-recognized — local only, nothing published");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     view! {
         <main>
             <h3>"me"</h3>
@@ -1246,10 +1321,41 @@ fn ContactsView(
                         .into_iter()
                         .map(|device| {
                             let short = device.key.chars().take(8).collect::<String>();
+                            let unrec_key = device.key.clone();
+                            let arm_key = device.key.clone();
+                            let label_key = device.key.clone();
                             view! {
                                 <div class="row">
                                     <b>{device.name}</b>
                                     <span class="dim">{format!("{short}…")}</span>
+                                    // Losing interest vs declaring it
+                                    // compromised (web-of-trust.md §6).
+                                    <button
+                                        class="secondary"
+                                        on:click=move |_| unrecognize(unrec_key.clone())
+                                    >
+                                        "un-recognize"
+                                    </button>
+                                    <button
+                                        class="secondary"
+                                        on:click=move |_| {
+                                            if armed.get_untracked().as_deref()
+                                                == Some(arm_key.as_str())
+                                            {
+                                                repudiate(arm_key.clone());
+                                            } else {
+                                                armed.set(Some(arm_key.clone()));
+                                            }
+                                        }
+                                    >
+                                        {move || {
+                                            if armed.get().as_deref() == Some(label_key.as_str()) {
+                                                "⚠ confirm repudiation"
+                                            } else {
+                                                "repudiate"
+                                            }
+                                        }}
+                                    </button>
                                 </div>
                             }
                         })
@@ -1322,6 +1428,21 @@ fn ContactsView(
                     .map(|contact| {
                         let subject = contact.key.clone();
                         let avatar_key = contact.key.clone();
+                        let vouch_name = contact.petname.clone();
+                        let vouched = contact.vouched;
+                        let arm_key = contact.key.clone();
+                        let label_key = contact.key.clone();
+                        let warnings = contact
+                            .disavowals
+                            .iter()
+                            .map(|line| {
+                                view! {
+                                    <div class="row">
+                                        <span class="dim">{line.clone()}</span>
+                                    </div>
+                                }
+                            })
+                            .collect::<Vec<_>>();
                         view! {
                             <div class="row">
                                 {move || {
@@ -1341,7 +1462,34 @@ fn ContactsView(
                                 >
                                     "who is?"
                                 </button>
+                                <button
+                                    class="secondary"
+                                    on:click=move |_| toggle_vouch(vouch_name.clone(), vouched)
+                                >
+                                    {if vouched { "withdraw vouch" } else { "vouch" }}
+                                </button>
+                                <button
+                                    class="secondary"
+                                    on:click=move |_| {
+                                        if armed.get_untracked().as_deref()
+                                            == Some(arm_key.as_str())
+                                        {
+                                            repudiate(arm_key.clone());
+                                        } else {
+                                            armed.set(Some(arm_key.clone()));
+                                        }
+                                    }
+                                >
+                                    {move || {
+                                        if armed.get().as_deref() == Some(label_key.as_str()) {
+                                            "⚠ confirm repudiation"
+                                        } else {
+                                            "repudiate"
+                                        }
+                                    }}
+                                </button>
                             </div>
+                            {warnings}
                         }
                     })
                     .collect::<Vec<_>>()
