@@ -85,12 +85,22 @@ SyncResult::Known {
   never fatal. Survivors land in the learned store next to the answer,
   keyed by responder — the store's `(subject, responder)` shape already
   fits, and re-answers replace per responder like records do.
-- **Nothing is pushed.** Endorsements travel only inside `WhoIs` answers —
-  the same lazy, pull-based, gated channel as records. A vouch reaches
-  whoever asks the voucher; a repudiation spreads exactly as fast as
-  freshness pulls and auto-queries do. Best-effort and honest about it
-  (tenet 6) — the repudiation-lag note from multi-device stays true, it
-  just finally has a decreasing tail.
+- **Nothing is pushed — and nothing polls.** Endorsements travel only
+  inside `WhoIs` answers — the same lazy, pull-based, gated channel as
+  records. A **freshness pull** (the term of art since D1c) is simply the
+  manual "who is?" action re-run against a known key: a *user-triggered*
+  re-ask whose answers sharpen read-time resolution by themselves. The
+  only automatic query in the system is D2b's scoped one — first
+  encounter of an unknown member, once per (subject, conversation) per
+  run — and known contacts are never re-queried on any schedule: a query
+  broadcasts your interest to whoever you ask, so queries stay scarce and
+  intentional (the D1 privacy stance). A vouch therefore reaches whoever
+  asks the voucher; a repudiation spreads exactly as fast as pulls and
+  first encounters do. Best-effort and honest about it (tenet 6) — the
+  repudiation-lag note from multi-device stays true, it just finally has
+  a decreasing tail. *(If the lag ever bites, the designed lever is SPEC
+  §3.6's piggybacked record-version hint — event-driven, riding traffic
+  you already receive, still zero polling. Not built; not needed yet.)*
 
 ## 4. The voiding rule (`Negative` evaluation)
 
