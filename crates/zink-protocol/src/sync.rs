@@ -7,6 +7,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::FORMAT_VERSION;
+use crate::attestation::SignedAttestation;
 use crate::codec::{self, DecodeError};
 use crate::contact_record::ContactRecord;
 use crate::keys::PublicKey;
@@ -112,9 +113,16 @@ pub enum SyncResult {
     },
     /// `WhoIs` hit: the responder's stored record — the subject's signed
     /// self-claims relayed verbatim, which the requester verifies like a
-    /// scanned QR. (Appended so existing BORSH variant tags stay stable.)
+    /// scanned QR — plus the responder's **own** signed claims about the
+    /// subject (D4a, web-of-trust.md §3: SPEC §3.5's "return their
+    /// attestations about that key"). An endorsement counts only when its
+    /// attester IS the answering connection key — relaying others' claims
+    /// would be second-hand gossip; hop limit 1 stays structural.
+    /// (Variant appended at D1a; `endorsements` added in-place at v1,
+    /// pre-deployment norm.)
     Known {
         record: Box<ContactRecord>,
+        endorsements: Vec<SignedAttestation>,
     },
     /// `GetKeys` — a fresh wrap per re-sealable id. Misses are simply
     /// absent; the requester verifies each wrap (its own key, the body
@@ -227,6 +235,20 @@ mod tests {
             },
             SyncResult::Known {
                 record: Box::new(sample_record()),
+                endorsements: vec![{
+                    use crate::attestation::{Attestation, Claim};
+                    let voucher = DeviceKey::from_seed([6; 32]);
+                    SignedAttestation::new(
+                        Attestation {
+                            version: FORMAT_VERSION,
+                            attester: voucher.public(),
+                            subject: DeviceKey::from_seed([4; 32]).public(),
+                            claim: Claim::Name("Carol".to_string()),
+                            revision: 2,
+                        },
+                        &voucher,
+                    )
+                }],
             },
             SyncResult::Wraps {
                 wraps: vec![(

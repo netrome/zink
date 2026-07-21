@@ -73,6 +73,14 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 // touched conversation after every drain (free when no devices are
 // recognized). Serve side answers recognized devices ONLY — narrower than
 // the history gate; contacts get NotHeld.
+// endorsements (D4a, web-of-trust.md §2/§3): vouch(petname)/unvouch —
+// explicit acts; the vouch is served with every WhoIs answer about that
+// subject (own claims only: attester IS the answering key, hop 1
+// structural). Answers validate endorsements (valid_endorsements) and
+// store them per responder in the learned store — a re-answer replaces
+// wholesale, so unvouch propagates by absence. LearnedName gains
+// endorsed_by; ranking: self-claimed names > endorsed-only, then
+// revision, then agreement.
 // stored history (C3a):
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's

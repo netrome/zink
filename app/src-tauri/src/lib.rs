@@ -537,6 +537,10 @@ fn candidate_dto(learned: zink_client::LearnedName, payload: Option<String>) -> 
     if !learned.held_by.is_empty() {
         provenance.push(format!("records held by {}", learned.held_by.join(", ")));
     }
+    // "your friends call them…" (D4a) — the voucher's own claim, named.
+    if !learned.endorsed_by.is_empty() {
+        provenance.push(format!("vouched by {}", learned.endorsed_by.join(", ")));
+    }
     WhoIsCandidate {
         name: learned.name,
         provenance: provenance.join("; "),

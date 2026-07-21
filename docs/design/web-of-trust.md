@@ -199,13 +199,19 @@ The drill, end to end — every step an existing primitive plus §3/§4:
 
 ## 8. Slices
 
-- **D4a · Endorsements + vouch.** Wire field (in-place at v1); serve-side
-  attach (own claims only); requester validation + learned-store landing;
-  `Client::vouch(petname)` / withdraw; ranking class in `resolve_name` /
-  `learned_candidates`; CLI `vouch`. *Done when:* headless e2e — B vouches
-  Carol, A's who-is shows the endorsed name with provenance; an
-  endorsement whose attester ≠ the answering key is dropped; no vouch
-  issued → no endorsement served (nothing auto-broadcasts).
+- **D4a · Endorsements + vouch — done (2026-07-21).** Wire field (in-place
+  at v1); serve-side attach (own claims only); requester validation +
+  learned-store landing; `Client::vouch(petname)` / withdraw; ranking
+  class in `resolve_name` / `learned_candidates`; CLI `vouch`. *Done
+  when:* headless e2e — B vouches Carol, A's who-is shows the endorsed
+  name with provenance; an endorsement whose attester ≠ the answering key
+  is dropped; no vouch issued → no endorsement served (nothing
+  auto-broadcasts).
+  *(As built: the learned store's per-responder entry replaces wholesale
+  — endorsements included — so `unvouch` propagates by absence on the
+  next pull; endorsement revisions never mix into self-claim ordering
+  (different supersession scopes); endorsed-only name groups pair with
+  the endorsing responder's served record as their promotable payload.)*
 - **D4b · Negative claims + repudiation.** The §4 voiding rule in the
   protocol (`link_tier`, name claims) with the cross-kind supersession
   pinned in SPEC §3.2; `Client::repudiate(key)` (sign + publish + serve;

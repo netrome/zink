@@ -465,6 +465,45 @@ impl ClientState {
         vouches
     }
 
+    /// Store an issued vouch (D4a, web-of-trust.md §2): this device's
+    /// signed claim about a contact's key, served as an endorsement with
+    /// every `WhoIs` answer about that subject. One per subject; a
+    /// re-vouch replaces it (the caller bumps the revision).
+    pub fn save_vouch(&self, subject: &PublicKey, vouch: &SignedAttestation) -> Result<(), Error> {
+        let path = self
+            .root
+            .join("vouches")
+            .join(hex(&subject.0))
+            .with_extension("attestation");
+        create_parent(&path)?;
+        write_atomic(&path, &vouch.to_bytes())
+            .map_err(|e| Error::Storage(format!("write vouch: {e}")))
+    }
+
+    /// The issued vouch about a subject, if any.
+    pub fn vouch_for(&self, subject: &PublicKey) -> Option<SignedAttestation> {
+        let path = self
+            .root
+            .join("vouches")
+            .join(hex(&subject.0))
+            .with_extension("attestation");
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| SignedAttestation::try_from_bytes(&bytes).ok())
+    }
+
+    /// Withdraw a vouch locally: it stops being served, and observers'
+    /// per-responder entries replace it away on their next pull. The
+    /// *active* disavowal (`Negative`) is D4b.
+    pub fn remove_vouch(&self, subject: &PublicKey) {
+        let path = self
+            .root
+            .join("vouches")
+            .join(hex(&subject.0))
+            .with_extension("attestation");
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Replace a stored contact's record — the explicit key-overlap update
     /// (multi-device.md §4). The stem derives from the record's first key,
     /// so a reordered/re-keyed record lands under a new stem: write the new
@@ -519,16 +558,20 @@ impl ClientState {
     }
 
     /// Store a `who-is` answer (D1b, who-is-this.md §5):
-    /// `learned/<subject>/<responder>.record` + a receipt-time sibling.
-    /// Latest answer per responder wins; nothing else is ever overwritten,
-    /// and the contact store is never touched by this path. Learned records
-    /// don't get petnames, aren't served onward, and don't open the D0c
-    /// serving gate — advisory input with provenance, not contacts.
+    /// `learned/<subject>/<responder>.record` + a receipt-time sibling +
+    /// the responder's caller-validated endorsements (D4a). Latest answer
+    /// per responder wins — the whole entry replaces, endorsements
+    /// included, so a withdrawn vouch disappears with the next freshness
+    /// pull; nothing else is ever overwritten, and the contact store is
+    /// never touched by this path. Learned records don't get petnames,
+    /// aren't served onward, and don't open the D0c serving gate —
+    /// advisory input with provenance, not contacts.
     pub fn save_learned(
         &self,
         subject: &PublicKey,
         responder: &PublicKey,
         record: &ContactRecord,
+        endorsements: &[SignedAttestation],
         received_ms: u64,
     ) -> Result<(), Error> {
         let stem = self
@@ -539,6 +582,13 @@ impl ClientState {
         create_parent(&stem.with_extension("record"))?;
         write_atomic(&stem.with_extension("record"), &record.to_bytes())
             .map_err(|e| Error::Storage(format!("write learned record: {e}")))?;
+        let path = stem.with_extension("endorsements");
+        if endorsements.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            write_atomic(&path, &encode_attestations(endorsements))
+                .map_err(|e| Error::Storage(format!("write endorsements: {e}")))?;
+        }
         write_atomic(
             &stem.with_extension("time"),
             received_ms.to_string().as_bytes(),
@@ -575,9 +625,13 @@ impl ClientState {
                 .ok()
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0);
+            let endorsements = std::fs::read(path.with_extension("endorsements"))
+                .map(|bytes| decode_attestations(&bytes))
+                .unwrap_or_default();
             learned.push(LearnedRecord {
                 responder,
                 record,
+                endorsements,
                 received_ms,
             });
         }
@@ -667,9 +721,43 @@ fn parse_outbox_entry(path: &std::path::Path) -> Option<OutboxEntry> {
 pub struct LearnedRecord {
     pub responder: PublicKey,
     pub record: ContactRecord,
+    /// The responder's own claims about the subject (D4a) — validated at
+    /// receipt (attester == responder, subject matches, signature).
+    pub endorsements: Vec<SignedAttestation>,
     /// Local receipt time (ms) — orders answers *within* a provenance
     /// class; trusted because we wrote it, unlike anything in the record.
     pub received_ms: u64,
+}
+
+/// Local file framing for attestation lists (u32-LE length + wire bytes
+/// per entry) — a storage convention, never on the wire; damaged tails
+/// are skipped like every advisory store.
+fn encode_attestations(list: &[SignedAttestation]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for signed in list {
+        let bytes = signed.to_bytes();
+        out.extend((bytes.len() as u32).to_le_bytes());
+        out.extend(bytes);
+    }
+    out
+}
+
+fn decode_attestations(bytes: &[u8]) -> Vec<SignedAttestation> {
+    let mut list = Vec::new();
+    let mut rest = bytes;
+    while rest.len() >= 4 {
+        let len = u32::from_le_bytes(rest[..4].try_into().expect("4 bytes")) as usize;
+        rest = &rest[4..];
+        if rest.len() < len {
+            break;
+        }
+        match SignedAttestation::try_from_bytes(&rest[..len]) {
+            Ok(signed) => list.push(signed),
+            Err(_) => tracing::warn!("skipping a damaged stored attestation"),
+        }
+        rest = &rest[len..];
+    }
+    list
 }
 
 fn create_parent(path: &std::path::Path) -> Result<(), Error> {

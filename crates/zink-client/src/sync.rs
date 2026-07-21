@@ -155,6 +155,10 @@ impl ProtocolHandler for SyncHandler {
                 Some(SyncOp::WhoIs { key }) => match serves.then(|| self.who_is(key)).flatten() {
                     Some(record) => SyncResult::Known {
                         record: Box::new(record),
+                        // This device's OWN issued claims about the
+                        // subject (D4a) — never anything learned or
+                        // relayed: hop limit 1 is structural.
+                        endorsements: self.state.vouch_for(&key).into_iter().collect(),
                     },
                     None => SyncResult::NotHeld,
                 },

@@ -43,15 +43,19 @@ pre-external-deployment norm — same category as D0b's `RelayEntry`):
 
 ```
 SyncOp::WhoIs      { key: PublicKey }
-SyncResult::Known  { record: Box<ContactRecord> }
+SyncResult::Known  { record: Box<ContactRecord>,
+                     endorsements: Vec<SignedAttestation> }   // D4a
 // negative answer: the existing SyncResult::NotHeld — declining, not-knowing,
 // and not-serving-you are indistinguishable on the wire (SPEC §5.2)
 ```
 
 The record is served **as stored** — the responder relays the subject's signed
-self-attestations verbatim; it adds nothing of its own (issuing third-party
-claims is D4). The requester verifies everything (§5): the responder is trusted
-no more than a relay.
+self-attestations verbatim. Its own voice rides *beside* the record (D4a,
+web-of-trust.md §3): `endorsements` are the responder's issued claims about
+the subject — its vouch, later its disavowal — accepted only when the
+attester IS the answering connection key, so nothing second-hand ever
+travels. The requester verifies everything (§5): the responder is trusted no
+more than a relay.
 
 ## 4. Serving policy
 
@@ -136,7 +140,11 @@ MVP precedence, deterministic and honest about provenance:
    records held by B, D"*. Conflicting names across answers (a rename caught
    mid-propagation) resolve by attestation `revision` (SPEC §3.2 supersession:
    highest wins); a genuine tie surfaces both, honestly.
-3. **Key** — abbreviated hex, as today.
+3. **Endorsed name** (D4a, web-of-trust.md §2) — a name contacts *vouch*
+   with their own signature: *"vouched by B, D"*. Ranks below any verified
+   self-claim; endorsement revisions are the voucher's own counter and
+   never mix into the self-claim ordering.
+4. **Key** — abbreviated hex, as today.
 
 Weighting *which contact* served an answer (close friend vs. acquaintance) is
 D4 differentiation; MVP treats all contacts equally and shows the list.

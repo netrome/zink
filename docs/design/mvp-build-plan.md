@@ -977,13 +977,32 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   *field* (`Known` gains `endorsements`), zero new claim kinds, zero new
   stores; the §4 voiding rule pins cross-kind `Negative` supersession;
   evidence accumulates, nobody arbitrates).
-  - [ ] **D4a · Endorsements + vouch.** Wire field (in-place at v1);
+  - [x] **D4a · Endorsements + vouch.** Wire field (in-place at v1);
     serve-side attach (own claims only — attester IS the answering key);
     requester validation + learned store; `Client::vouch(petname)` /
     withdraw; the endorsed-name ranking class; CLI `vouch`. *Done when:*
     headless e2e — an endorsed name renders with provenance; a relayed
     endorsement (attester ≠ responder) is dropped; nothing
     auto-broadcasts.
+    ✅ *(2026-07-21: `Known` gained `endorsements` (in-place at v1); the
+    serve side attaches only `vouches/<subject>` — this device's own
+    issued claim, never anything learned. Requester: `valid_endorsements`
+    (pure, unit-tested: relayed, forged, and off-subject claims all drop)
+    feeds `save_learned` — the per-responder entry replaces **wholesale,
+    endorsements included**, which is what makes `unvouch` propagate by
+    absence on the next freshness pull (the *active* disavowal stays
+    D4b's `Negative`). `vouch(petname)` signs `Name(petname)` about the
+    contact's identity key at the next revision (re-vouch supersedes;
+    persistence + revision unit-tested); stored endorsements are framed
+    with a local length-prefix convention (no new deps). Ranking:
+    `LearnedName.endorsed_by`; self-claimed names > endorsed-only, then
+    self-claim revision (endorsement revisions are the voucher's scope,
+    never mixed), then agreement — rendered by CLI `who-is` ("vouched by
+    bob") and the app's candidate provenance. e2e: pre-vouch answer
+    carries nothing (no auto-broadcast) → vouch → endorsed name surfaces
+    below the self-claim with its voucher named → unvouch → gone after
+    one re-ask. SPEC §11 row pinned; who-is-this.md §3/§6 +
+    client-core.md updated. 182 tests.)*
   - [ ] **D4b · Negative claims + repudiation.** The voiding rule in the
     protocol (`link_tier`, name claims) + SPEC §3.2 sharpened;
     `Client::repudiate(key)` (publish; un-recognize siblings); read-time

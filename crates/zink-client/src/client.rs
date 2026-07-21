@@ -1059,6 +1059,57 @@ impl Client {
         self.state.recognized_devices()
     }
 
+    /// Vouch for a contact (D4a, web-of-trust.md §2): sign "I call this
+    /// key <petname>" and serve it as an endorsement with every `WhoIs`
+    /// answer about them from now on. **Explicit** — it broadcasts your
+    /// petname, which stays private by default (SPEC §3.2); nothing
+    /// vouches on add. A re-vouch (after a rename, say) supersedes at the
+    /// next revision. Returns the vouched key.
+    pub fn vouch(&self, petname: &str) -> Result<PublicKey, Error> {
+        let subject = self.contact_key(petname)?;
+        let revision = self
+            .state
+            .vouch_for(&subject)
+            .map(|prior| prior.attestation.revision + 1)
+            .unwrap_or(0);
+        let vouch = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: self.device.public(),
+                subject,
+                claim: Claim::Name(petname.to_string()),
+                revision,
+            },
+            &self.device,
+        );
+        self.state.save_vouch(&subject, &vouch)?;
+        Ok(subject)
+    }
+
+    /// Withdraw a vouch: it stops being served, and observers'
+    /// per-responder learned entries replace it away on their next
+    /// freshness pull. The *active* disavowal (`Negative`) is D4b.
+    pub fn unvouch(&self, petname: &str) -> Result<(), Error> {
+        let subject = self.contact_key(petname)?;
+        self.state.remove_vouch(&subject);
+        Ok(())
+    }
+
+    /// Whether this device currently vouches for a key (edge rendering).
+    pub fn vouches(&self, subject: &PublicKey) -> bool {
+        self.state.vouch_for(subject).is_some()
+    }
+
+    /// A contact entry's identity key (its record's first key).
+    fn contact_key(&self, petname: &str) -> Result<PublicKey, Error> {
+        self.state
+            .contacts()?
+            .into_iter()
+            .find(|(name, _)| name == petname)
+            .and_then(|(_, record)| record.keys.first().copied())
+            .ok_or_else(|| Error::NotAContact(format!("no contact named {petname:?}")))
+    }
+
     /// This device's key cluster as its own client sees it: self plus the
     /// recognized devices (D3c). Edges filter "other participants" with
     /// this — a conversation with a contact is not "with mårten laptop".
@@ -1238,7 +1289,10 @@ impl Client {
                     }
                 };
             match net::sync_request(&connection, SyncOp::WhoIs { key: subject }).await {
-                Ok(SyncResult::Known { record: served }) => {
+                Ok(SyncResult::Known {
+                    record: served,
+                    endorsements,
+                }) => {
                     // Validated like a scanned QR: the record must name the
                     // subject; name claims verify at read time (§5).
                     if !served.keys.contains(&subject) {
@@ -1249,6 +1303,7 @@ impl Client {
                         responder,
                         responder_petname: petname,
                         record: *served,
+                        endorsements: valid_endorsements(responder, subject, endorsements),
                     })
                 }
                 Ok(SyncResult::NotHeld) => Query::Nothing,
@@ -1271,6 +1326,7 @@ impl Client {
                         &subject,
                         &answer.responder,
                         &answer.record,
+                        &answer.endorsements,
                         now_ms(),
                     )?;
                     answers.push(answer);
@@ -1561,7 +1617,8 @@ impl Client {
         };
         let mut groups: BTreeMap<String, (LearnedName, ContactRecord, (u64, u64))> =
             BTreeMap::new();
-        for entry in self.state.learned(&subject) {
+        let entries = self.state.learned(&subject);
+        for entry in &entries {
             let Some((name, revision)) = entry.record.self_name_claim() else {
                 continue; // no verifiable self-claim — relays-only evidence
             };
@@ -1574,6 +1631,7 @@ impl Client {
                         revision,
                         held_by: Vec::new(),
                         confirmed_by_subject: false,
+                        endorsed_by: Vec::new(),
                     },
                     entry.record.clone(),
                     rank,
@@ -1590,13 +1648,49 @@ impl Client {
                 group.2 = rank;
             }
         }
+        // Endorsed names (D4a): each responder's own vouch joins its name
+        // group — or founds one, paired with that responder's served
+        // record as the promotable payload. Endorsement revisions are the
+        // voucher's counter (a different supersession scope), so they
+        // never mix into the group's self-claim `revision`.
+        for entry in &entries {
+            for signed in &entry.endorsements {
+                let Claim::Name(name) = &signed.attestation.claim else {
+                    continue; // `Negative` evaluation lands with D4b
+                };
+                let name = name.clone();
+                let rank = (0, entry.received_ms);
+                let group = groups.entry(name.clone()).or_insert_with(|| {
+                    (
+                        LearnedName {
+                            name,
+                            revision: 0,
+                            held_by: Vec::new(),
+                            confirmed_by_subject: false,
+                            endorsed_by: Vec::new(),
+                        },
+                        entry.record.clone(),
+                        rank,
+                    )
+                });
+                group.0.endorsed_by.push(petname_of(entry.responder));
+            }
+        }
         let mut candidates: Vec<(LearnedName, ContactRecord)> = groups
             .into_values()
             .map(|(name, record, _)| (name, record))
             .collect();
+        // Ranking (web-of-trust.md §2): names with verified self-claim
+        // evidence outrank endorsed-only ones; then self-claim revision,
+        // then agreement, then name — a deterministic *default lens*.
         candidates.sort_by(|a, b| {
-            b.0.revision
-                .cmp(&a.0.revision)
+            let self_claimed =
+                |name: &LearnedName| name.confirmed_by_subject || !name.held_by.is_empty();
+            let agreement = |name: &LearnedName| name.held_by.len() + name.endorsed_by.len();
+            self_claimed(&b.0)
+                .cmp(&self_claimed(&a.0))
+                .then_with(|| b.0.revision.cmp(&a.0.revision))
+                .then_with(|| agreement(&b.0).cmp(&agreement(&a.0)))
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
         Ok(candidates)
@@ -2119,6 +2213,33 @@ pub struct WhoIsAnswer {
     /// The petname the responder is stored under (the contact we asked).
     pub responder_petname: String,
     pub record: ContactRecord,
+    /// The responder's own validated claims about the subject (D4a).
+    pub endorsements: Vec<SignedAttestation>,
+}
+
+/// Endorsement validation (D4a, web-of-trust.md §3): keep only claims the
+/// answering key itself signed about the queried subject — signature
+/// verifies, `attester` IS the responder (relaying others' claims would
+/// be second-hand gossip; hop limit 1 stays structural), `subject` is the
+/// queried key. Anything else is dropped with a warning, never fatal.
+pub(crate) fn valid_endorsements(
+    responder: PublicKey,
+    subject: PublicKey,
+    endorsements: Vec<SignedAttestation>,
+) -> Vec<SignedAttestation> {
+    endorsements
+        .into_iter()
+        .filter(|signed| {
+            let attestation = &signed.attestation;
+            let valid = attestation.attester == responder
+                && attestation.subject == subject
+                && signed.verify().is_ok();
+            if !valid {
+                tracing::warn!("dropping an invalid endorsement");
+            }
+            valid
+        })
+        .collect()
 }
 
 /// `resolve_name`'s verdict (who-is-this.md §6).
@@ -2135,13 +2256,18 @@ pub enum ResolvedName {
 /// One name the learned store supports, with its provenance.
 pub struct LearnedName {
     pub name: String,
-    /// The claim's supersession counter (SPEC §3.2) — orders conflicting
-    /// names across answers.
+    /// The *self-claim's* supersession counter (SPEC §3.2) — orders
+    /// conflicting names across answers; 0 for endorsed-only names
+    /// (endorsement revisions are the voucher's own counter, a different
+    /// scope, never mixed in).
     pub revision: u64,
     /// Petnames of the contacts serving a record with this claim.
     pub held_by: Vec<String>,
     /// The subject itself served a record claiming this name.
     pub confirmed_by_subject: bool,
+    /// Petnames of the contacts who *vouch* this name — their own signed
+    /// claim, not the subject's (D4a: "your friends call them…").
+    pub endorsed_by: Vec<String>,
 }
 
 /// One contact's verified link evidence for an unknown key (D3c,
@@ -2995,7 +3121,7 @@ mod tests {
             }],
         );
         a.state
-            .save_learned(&carol.public(), &carol.public(), &served, 1)
+            .save_learned(&carol.public(), &carol.public(), &served, &[], 1)
             .expect("learn subject-served");
         let hearsay = ContactRecord::new(
             vec![carol.public()],
@@ -3010,6 +3136,7 @@ mod tests {
                 &carol.public(),
                 &DeviceKey::from_seed([24; 32]).public(),
                 &hearsay,
+                &[],
                 2,
             )
             .expect("learn hearsay");
@@ -3358,7 +3485,8 @@ mod tests {
         assert_eq!(
             known,
             SyncResult::Known {
-                record: Box::new(laptop_record)
+                record: Box::new(laptop_record),
+                endorsements: vec![],
             }
         );
 
@@ -3549,7 +3677,7 @@ mod tests {
             mailbox_only("ll@203.0.113.2:2"),
         );
         a.state
-            .save_learned(&laptop.public(), &p.public(), &laptop_record, 1)
+            .save_learned(&laptop.public(), &p.public(), &laptop_record, &[], 1)
             .expect("learn");
 
         // Then: upgraded to mutually confirmed
@@ -3567,7 +3695,7 @@ mod tests {
             mailbox_only("ss@203.0.113.3:3"),
         );
         a.state
-            .save_learned(&stranger.public(), &p.public(), &spoof, 2)
+            .save_learned(&stranger.public(), &p.public(), &spoof, &[], 2)
             .expect("learn");
         assert!(
             a.device_evidence(stranger.public())
@@ -3603,6 +3731,151 @@ mod tests {
         assert!(a.own_keys().contains(&a.public_key()));
 
         let _ = std::fs::remove_dir_all(temp_root("labels-device"));
+    }
+
+    #[test]
+    fn valid_endorsements__should_keep_only_the_responders_own_claims() {
+        // Given: responder R answering about subject S — a genuine vouch,
+        // a relayed third-party vouch, a forged one, and one about a
+        // different subject
+        let responder = DeviceKey::from_seed([80; 32]);
+        let third_party = DeviceKey::from_seed([81; 32]);
+        let subject = DeviceKey::from_seed([82; 32]).public();
+        let other = DeviceKey::from_seed([83; 32]).public();
+        let claim = |attester: &DeviceKey, about: PublicKey, signer: &DeviceKey| {
+            SignedAttestation::new(
+                Attestation {
+                    version: FORMAT_VERSION,
+                    attester: attester.public(),
+                    subject: about,
+                    claim: Claim::Name("Carol".to_string()),
+                    revision: 0,
+                },
+                signer,
+            )
+        };
+        let genuine = claim(&responder, subject, &responder);
+        let relayed = claim(&third_party, subject, &third_party); // hop-2 gossip
+        let forged = claim(&responder, subject, &third_party);
+        let off_subject = claim(&responder, other, &responder);
+
+        // When
+        let kept = valid_endorsements(
+            responder.public(),
+            subject,
+            vec![relayed, forged, off_subject, genuine.clone()],
+        );
+
+        // Then: only the responder's own, correctly-subjected, verified claim
+        assert_eq!(kept, vec![genuine]);
+    }
+
+    #[tokio::test]
+    async fn vouch__should_persist_and_supersede_per_revision() {
+        // Given
+        let a = Client::open_or_create(&temp_key("vouch", "a"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([84; 32]);
+        a.add_contact(
+            &ContactRecord::new(
+                vec![carol.public()],
+                vec![],
+                mailbox_only("cc@203.0.113.1:1"),
+            ),
+            Some("Carrie".to_string()),
+        )
+        .expect("add");
+
+        // When / Then: the explicit act signs at revision 0; a re-vouch
+        // supersedes; withdrawal removes; a non-contact errors
+        assert!(!a.vouches(&carol.public()));
+        a.vouch("Carrie").expect("vouch");
+        let first = a.state.vouch_for(&carol.public()).expect("stored");
+        assert_eq!(first.attestation.revision, 0);
+        assert_eq!(first.attestation.claim, Claim::Name("Carrie".to_string()));
+        assert_eq!(first.verify(), Ok(()));
+        a.vouch("Carrie").expect("re-vouch");
+        assert_eq!(
+            a.state
+                .vouch_for(&carol.public())
+                .expect("stored")
+                .attestation
+                .revision,
+            1
+        );
+        a.unvouch("Carrie").expect("unvouch");
+        assert!(!a.vouches(&carol.public()));
+        assert!(matches!(a.vouch("nobody"), Err(Error::NotAContact(_))));
+
+        let _ = std::fs::remove_dir_all(temp_root("vouch"));
+    }
+
+    #[tokio::test]
+    async fn who_is__should_carry_the_responders_vouch_as_an_endorsement() {
+        // Given: B holds Carol's record and A as a contact; A holds B as
+        // a dialable contact ("bob")
+        let (_relay, url) = spawn_test_relay().await;
+        let a = open_homed("endorse", "asker", &url).await;
+        let b = open_homed("endorse", "responder", &url).await;
+        befriend(&b, &a);
+        let b_record = ContactRecord::new(
+            vec![b.public_key()],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "bb@203.0.113.2:2".to_string(),
+                relay_url: Some(url.clone()),
+            }],
+        );
+        a.add_contact(&b_record, Some("bob".to_string()))
+            .expect("add bob");
+        let carol = DeviceKey::from_seed([85; 32]);
+        let carol_record = signed_record(&carol, "Carol", 0, mailbox_only("cc@203.0.113.9:9"));
+        b.add_contact(&carol_record, Some("Carrie".to_string()))
+            .expect("add carol");
+        b.endpoint.online().await;
+
+        // When: A asks before B has vouched
+        let outcome = a.who_is(carol.public()).await.expect("who_is");
+
+        // Then: an answer, but no endorsement — nothing auto-broadcasts
+        assert_eq!(outcome.answers.len(), 1);
+        assert!(outcome.answers[0].endorsements.is_empty());
+
+        // When: B vouches (the explicit act) and A re-asks
+        b.vouch("Carrie").expect("vouch");
+        let outcome = a.who_is(carol.public()).await.expect("who_is");
+
+        // Then: the endorsement rides the answer; the ranking shows the
+        // endorsed name with its voucher, below the verified self-claim
+        assert_eq!(outcome.answers[0].endorsements.len(), 1);
+        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        let carrie = candidates
+            .iter()
+            .find(|(name, _)| name.name == "Carrie")
+            .expect("endorsed name surfaced");
+        assert_eq!(carrie.0.endorsed_by, vec!["bob".to_string()]);
+        assert!(carrie.0.held_by.is_empty() && !carrie.0.confirmed_by_subject);
+        assert_eq!(
+            candidates[0].0.name, "Carol",
+            "the self-claimed name outranks the endorsed-only one"
+        );
+
+        // When: B withdraws and A re-asks — the per-responder entry
+        // replaces wholesale, endorsements included
+        b.unvouch("Carrie").expect("unvouch");
+        let _ = a.who_is(carol.public()).await.expect("who_is");
+
+        // Then: the withdrawn vouch is gone from the ranking
+        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        assert!(
+            candidates
+                .iter()
+                .all(|(name, _)| name.endorsed_by.is_empty()),
+            "withdrawal propagates by replacement"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("endorse"));
     }
 
     #[tokio::test]
@@ -4126,6 +4399,7 @@ mod tests {
                 &carol.public(),
                 &DeviceKey::from_seed([26; 32]).public(),
                 &older,
+                &[],
                 1,
             )
             .expect("learn older");
@@ -4134,6 +4408,7 @@ mod tests {
                 &carol.public(),
                 &DeviceKey::from_seed([27; 32]).public(),
                 &newer,
+                &[],
                 2,
             )
             .expect("learn newer");
@@ -4186,6 +4461,7 @@ mod tests {
                     &carol.public(),
                     &DeviceKey::from_seed([n; 32]).public(),
                     record,
+                    &[],
                     at,
                 )
                 .expect("learn");
@@ -4273,7 +4549,8 @@ mod tests {
         assert_eq!(
             known,
             SyncResult::Known {
-                record: Box::new(carol_record)
+                record: Box::new(carol_record),
+                endorsements: vec![],
             }
         );
         assert_eq!(unknown, SyncResult::NotHeld);
@@ -4319,7 +4596,7 @@ mod tests {
         a.state
             .save_profile("alice", std::slice::from_ref(&relay))
             .expect("save profile");
-        let SyncResult::Known { record } = net::sync_request(
+        let SyncResult::Known { record, .. } = net::sync_request(
             &connection,
             SyncOp::WhoIs {
                 key: a.public_key(),

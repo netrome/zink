@@ -47,6 +47,8 @@ async fn main() -> ExitCode {
         Some("recognize") => recognize(&args[1..]).await,
         Some("devices") => devices(&args[1..]).await,
         Some("rewrap") => rewrap(&args[1..]).await,
+        Some("vouch") => vouch(&args[1..]).await,
+        Some("unvouch") => unvouch(&args[1..]).await,
         Some("send") => send(&args[1..]).await,
         Some("recv") => recv(&args[1..]).await,
         Some("conversations") => conversations(&args[1..]).await,
@@ -77,6 +79,8 @@ const USAGE: &str = "usage:
   zink-cli recognize --key <file> <ZINK:...>
   zink-cli devices --key <file>
   zink-cli rewrap --key <file>
+  zink-cli vouch --key <file> <petname>
+  zink-cli unvouch --key <file> <petname>
   zink-cli send --key <file> --to <petname | pubkey@relay[,relay...]> [--to ...]
                 [--image <file> [--thumb <file>]] <text>
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
@@ -181,6 +185,33 @@ async fn recognize(args: &[String]) -> Result<(), String> {
         record.self_claimed_name().unwrap_or("<unnamed>"),
         &hex::encode(&key.0)[..8],
     );
+    client.close().await;
+    Ok(())
+}
+
+/// Vouch for a contact (D4a): share your petname for them with anyone who
+/// asks you about them. Explicit — nothing vouches on add.
+async fn vouch(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [petname] = positionals.as_slice() else {
+        return Err(format!("exactly one petname expected\n{USAGE}"));
+    };
+    let client = open_client(&flags).await?;
+    client.vouch(petname)?;
+    println!("vouching for {petname:?} — served to anyone who asks you about them");
+    client.close().await;
+    Ok(())
+}
+
+/// Withdraw a vouch: it stops being served; fresh answers replace it away.
+async fn unvouch(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [petname] = positionals.as_slice() else {
+        return Err(format!("exactly one petname expected\n{USAGE}"));
+    };
+    let client = open_client(&flags).await?;
+    client.unvouch(petname)?;
+    println!("no longer vouching for {petname:?}");
     client.close().await;
     Ok(())
 }
@@ -582,8 +613,13 @@ async fn who_is(args: &[String]) -> Result<(), String> {
                 } else {
                     format!(", records held by {}", name.held_by.join(", "))
                 };
+                let endorsed = if name.endorsed_by.is_empty() {
+                    String::new()
+                } else {
+                    format!(", vouched by {}", name.endorsed_by.join(", "))
+                };
                 println!(
-                    "resolved: {:?} (revision {}){confirmed}{held}",
+                    "resolved: {:?} (revision {}){confirmed}{held}{endorsed}",
                     name.name, name.revision
                 );
             }
