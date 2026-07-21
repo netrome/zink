@@ -1113,14 +1113,11 @@ impl Client {
         Ok(())
     }
 
-    /// Repudiate a key (D4b, web-of-trust.md §4/§5): sign "I disavow this
-    /// key" at a revision above every claim of ours it must void — the
-    /// vouch, and the device link when it's a sibling — store it as our
-    /// current stance (served as an endorsement, published in
-    /// `my_record`), and un-recognize a repudiated sibling: serving,
-    /// send-to-self, and re-wrap stop immediately. Advisory like every
-    /// claim: observers weigh it by their own policy; a yet-higher
-    /// re-vouch restores.
+    /// Repudiate a key (web-of-trust.md §4/§5): sign the `Negative` that
+    /// voids our earlier claims about it, publish it (record +
+    /// endorsements), and un-recognize a repudiated sibling. Advisory
+    /// like every claim — observers weigh it by their own policy, and a
+    /// yet-higher re-vouch restores.
     pub fn repudiate(&self, key: PublicKey) -> Result<(), Error> {
         if key == self.device.public() {
             return Err(Error::InvalidInput("that is this device's own key".into()));
@@ -1159,16 +1156,10 @@ impl Client {
         Ok(())
     }
 
-    /// Valid disavowals of a key across everything held (D4b). Each says
-    /// WHO, and whether the observer's MVP policy excludes the key from
-    /// addressed sets: only a disavowal from this client's own stance or
-    /// from *the same person* — a shared contact entry, or any held
-    /// `SamePersonAs` between attester and key. The same-person scoping
-    /// deliberately ignores voiding (sharpened at implementation): a
-    /// voided link no longer clusters, but it remains proof the keys were
-    /// one person — exactly what makes the disavowal self-referential
-    /// ("their own key disavowed it") rather than third-party griefing,
-    /// which renders as a warning and never excludes.
+    /// Valid disavowals of a key across everything held, each saying WHO
+    /// and whether it `excludes` the key from addressed sets — true only
+    /// for our own stance or a same-person disavowal; third-party
+    /// negatives warn, never exclude (web-of-trust.md §4).
     pub fn disavowals(&self, key: PublicKey) -> Result<Vec<Disavowal>, Error> {
         let contacts = self.state.contacts()?;
         let attestations = self.held_attestations(key)?;
@@ -1177,6 +1168,9 @@ impl Client {
                 .iter()
                 .any(|(_, record)| record.keys.contains(attester) && record.keys.contains(&key))
         };
+        // No voiding here, deliberately: a voided link no longer clusters,
+        // but it still proves the keys were one person — which is what
+        // makes a disavowal "their own" (web-of-trust.md §4).
         let linked = |attester: &PublicKey| {
             attestations.iter().any(|signed| {
                 let attestation = &signed.attestation;
