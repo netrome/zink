@@ -16,7 +16,9 @@ mod sync;
 #[cfg(test)]
 mod testutil;
 
-pub use attestation::{Attestation, AttestationId, Claim, LinkTier, SignedAttestation, link_tier};
+pub use attestation::{
+    Attestation, AttestationId, Claim, LinkTier, SignedAttestation, link_tier, verified_negative,
+};
 pub use codec::DecodeError;
 pub use contact_record::{ContactRecord, RelayEntry};
 pub use crypto::{ContentKey, CryptoError};

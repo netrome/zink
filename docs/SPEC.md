@@ -94,7 +94,13 @@ Uses, all the same primitive:
 your avatar never disturbs your name, and linking a second device never unlinks the
 first. There is **no separate `revoke`**: to withdraw a claim you supersede it with a
 higher-`revision` `negative` — active disavowal that travels, rather than silence that
-doesn't.
+doesn't. **The voiding rule** (sharpened 2026-07-21, web-of-trust.md §4): a claim by
+K that *binds* key L — a `name` about L, or a `same-person-as` link whose linked key
+is L — is void while K's `negative` about L stands at a strictly higher revision.
+Deliberately cross-kind (the negative at `(K, L)` voids the link living at
+`(K, K, same-person-as L)`), and per-attester: revisions are each attester's own
+counter, so nobody can outbid anyone's claims but their own. A yet-higher positive
+claim restores — supersession stays one mechanism, with no revocation state.
 
 On the wire, attestations link **key → key**. A human label enters the protocol
 *only* as a broadcast `name` attestation. The label you assign but keep to yourself —
@@ -480,6 +486,7 @@ custom conversation views — is **client policy/UX**.
 | `who-is-this` format & hops | **`WhoIs{key}` on the peer sync ALPN → the responder's stored ContactRecord (self-claims verbatim) or `NotHeld`; default policy contacts-only; hop limit 1, structurally** (learned answers are never re-served; no forwarding — a later version bump may add it) | One primitive doubles as identity discovery *and* record freshness (§3.6); social graph as the trust boundary; declining ≡ not-knowing on the wire ([who-is-this.md](../docs/design/who-is-this.md), resolved 2026-07-19). |
 | Re-wrap op | **`GetKeys{ids}` on the peer sync ALPN → `Wraps{(id, KeyWrap)}` re-sealed to the caller's connection key; batch-capped both sides (`MAX_GET_KEYS_IDS`); served to recognized own devices only — anyone else gets `NotHeld`** | One bounded op is the whole "new device reads old history" story (§5.2 — cheap, no body re-encryption, ids never move); "willingness to re-wrap" stays at its narrowest until the recovery flows (D4+) need more ([multi-device.md](../docs/design/multi-device.md) §6, resolved 2026-07-19). |
 | Endorsements | **The `WhoIs` answer carries the responder's own signed claims about the subject (`Known{record, endorsements}`); an endorsement counts only when its `attester` IS the answering connection key** | §3.5's "return their attestations about that key", cashed in; relaying others' claims would be second-hand gossip, so the attester-is-responder rule keeps hop limit 1 structural for the whole trust layer ([web-of-trust.md](../docs/design/web-of-trust.md) §3, resolved 2026-07-21). |
+| `Negative` evaluation | **Read-time only, per the §3.2 voiding rule; a repudiation is published in the issuer's record and served as an endorsement. Addressing exclusion is per-observer policy — MVP: only a disavowal from the observer's own keys or from *the same person* (shared contact entry, or any held `same-person-as` between attester and key — the same-person scoping ignores voiding: a voided link no longer clusters but still scopes whose word counts); third-party negatives warn, never exclude** | §3.3's "a repudiated key drops out of the set" made precise; nothing is enforced, deleted, or arbitrated — mutual disavowals surface, and explicit sends to a disavowed entry still work (the manual override) ([web-of-trust.md](../docs/design/web-of-trust.md) §4, resolved 2026-07-21). |
 
 **Still to pin down (implementation-level):** sync-time head/`seq` exchange, relay
 discovery/config UX, and the

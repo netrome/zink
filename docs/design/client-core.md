@@ -81,6 +81,16 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 // wholesale, so unvouch propagates by absence. LearnedName gains
 // endorsed_by; ranking: self-claimed names > endorsed-only, then
 // revision, then agreement.
+// repudiation (D4b, web-of-trust.md §4/§5): repudiate(key) — signs the
+// Negative above every claim of ours it must void, stores it as the
+// current stance (one latest claim per subject in vouches/), publishes
+// it in my_record, un-recognizes a repudiated sibling. disavowals(key)
+// -> Vec<Disavowal>: every valid negative with WHO, `excludes` true only
+// for own/same-person disavowals (the scoping ignores voiding — a voided
+// link still scopes whose word counts); reply_contacts drops excluded
+// keys into ReplyContacts.disavowed (the deliberate stop-include);
+// explicit send-by-name is untouched — the manual override. link_tier
+// and endorsed names honor the voiding rule at read time.
 // stored history (C3a):
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's

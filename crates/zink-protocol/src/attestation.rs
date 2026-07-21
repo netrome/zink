@@ -103,26 +103,38 @@ pub enum LinkTier {
 
 /// Evaluate the link evidence for `candidate` against `trusted`, over
 /// attestations aggregated from held records (the caller gathers stored +
-/// learned; this stays pure). A link counts only if its signature verifies
-/// and it is genuinely self-attested (`attester == subject` — "I, K, am the
-/// same person as L"); anything else is inert, never a downgrade. `Negative`
-/// supersession is deferred with the recovery flows (D4).
+/// learned; this stays pure). A link counts only if its signature verifies,
+/// it is genuinely self-attested (`attester == subject` — "I, K, am the
+/// same person as L"), and it is not voided by its attester's
+/// higher-revision `Negative` (D4b, web-of-trust.md §4); anything else is
+/// inert, never a downgrade.
 pub fn link_tier(
     trusted: &[PublicKey],
     candidate: PublicKey,
     attestations: &[SignedAttestation],
 ) -> LinkTier {
-    let links: Vec<(PublicKey, PublicKey)> =
+    let links: Vec<(PublicKey, PublicKey, u64)> =
         attestations.iter().filter_map(verified_self_link).collect();
-    let vouched = links
-        .iter()
-        .any(|(from, to)| trusted.contains(from) && *to == candidate);
+    let negatives: Vec<(PublicKey, PublicKey, u64)> =
+        attestations.iter().filter_map(verified_negative).collect();
+    // The voiding rule (D4b, web-of-trust.md §4): a link is void while its
+    // attester's `Negative` about the linked key stands at a strictly
+    // higher revision; a yet-higher re-vouch restores it — supersession
+    // stays one mechanism, no revocation state.
+    let live = |from: PublicKey, to: PublicKey, revision: u64| {
+        !negatives
+            .iter()
+            .any(|(a, l, r)| *a == from && *l == to && *r > revision)
+    };
+    let vouched = links.iter().any(|(from, to, rev)| {
+        trusted.contains(from) && *to == candidate && live(*from, *to, *rev)
+    });
     if !vouched {
         return LinkTier::None;
     }
-    let confirmed_back = links
-        .iter()
-        .any(|(from, to)| *from == candidate && trusted.contains(to));
+    let confirmed_back = links.iter().any(|(from, to, rev)| {
+        *from == candidate && trusted.contains(to) && live(*from, *to, *rev)
+    });
     if confirmed_back {
         LinkTier::MutuallyConfirmed
     } else {
@@ -130,16 +142,32 @@ pub fn link_tier(
     }
 }
 
-/// A verified, self-attested `SamePersonAs` as `(attester, linked key)`;
-/// `None` for anything else — forged, tampered, or third-party claims are
-/// inert evidence, never errors (the inputs came from untrusted channels).
-fn verified_self_link(signed: &SignedAttestation) -> Option<(PublicKey, PublicKey)> {
+/// A verified `Negative` as `(attester, disavowed key, revision)` — the
+/// voiding rule's input (web-of-trust.md §4). Unlike links, a negative is
+/// *about* another key: no self-attestation requirement.
+pub fn verified_negative(signed: &SignedAttestation) -> Option<(PublicKey, PublicKey, u64)> {
+    let attestation = &signed.attestation;
+    (matches!(attestation.claim, Claim::Negative) && signed.verify().is_ok()).then_some((
+        attestation.attester,
+        attestation.subject,
+        attestation.revision,
+    ))
+}
+
+/// A verified, self-attested `SamePersonAs` as `(attester, linked key,
+/// revision)`; `None` for anything else — forged, tampered, or third-party
+/// claims are inert evidence, never errors (the inputs came from untrusted
+/// channels).
+fn verified_self_link(signed: &SignedAttestation) -> Option<(PublicKey, PublicKey, u64)> {
     let attestation = &signed.attestation;
     let Claim::SamePersonAs(linked) = attestation.claim else {
         return None;
     };
-    (attestation.attester == attestation.subject && signed.verify().is_ok())
-        .then_some((attestation.attester, linked))
+    (attestation.attester == attestation.subject && signed.verify().is_ok()).then_some((
+        attestation.attester,
+        linked,
+        attestation.revision,
+    ))
 }
 
 #[cfg(test)]
@@ -339,6 +367,103 @@ mod tests {
         // When / Then
         assert_eq!(
             link_tier(&[phone.public()], laptop.public(), &links),
+            LinkTier::VouchedFromTrust
+        );
+    }
+
+    /// "I, `attester`, disavow `disavowed`" at `revision` — signed by
+    /// `signer` (pass a non-attester to forge).
+    fn negative(
+        attester: &DeviceKey,
+        disavowed: PublicKey,
+        revision: u64,
+        signer: &DeviceKey,
+    ) -> SignedAttestation {
+        SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: attester.public(),
+                subject: disavowed,
+                claim: Claim::Negative,
+                revision,
+            },
+            signer,
+        )
+    }
+
+    #[test]
+    fn link_tier__should_void_a_link_behind_a_higher_revision_negative() {
+        // Given: the phone vouched the laptop (rev 0), then disavowed it
+        // (rev 1) — the lost-device repudiation
+        let phone = device_key(1);
+        let laptop = device_key(2);
+        let attestations = [
+            link(&phone, laptop.public(), &phone),
+            negative(&phone, laptop.public(), 1, &phone),
+        ];
+
+        // When / Then: the voided link contributes nothing
+        assert_eq!(
+            link_tier(&[phone.public()], laptop.public(), &attestations),
+            LinkTier::None
+        );
+    }
+
+    #[test]
+    fn link_tier__should_restore_a_link_re_vouched_above_the_negative() {
+        // Given: vouch (rev 0) → disavow (rev 1) → re-vouch (rev 2): the
+        // found-it-again flow; supersession stays one mechanism
+        let phone = device_key(1);
+        let laptop = device_key(2);
+        let re_vouch = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: phone.public(),
+                subject: phone.public(),
+                claim: Claim::SamePersonAs(laptop.public()),
+                revision: 2,
+            },
+            &phone,
+        );
+        let attestations = [
+            link(&phone, laptop.public(), &phone), // rev 0 — stays voided
+            negative(&phone, laptop.public(), 1, &phone),
+            re_vouch,
+        ];
+
+        // When / Then
+        assert_eq!(
+            link_tier(&[phone.public()], laptop.public(), &attestations),
+            LinkTier::VouchedFromTrust
+        );
+    }
+
+    #[test]
+    fn link_tier__should_ignore_lower_revision_and_forged_negatives() {
+        // Given: a live link at rev 2; a stale negative below it, and a
+        // *forged* higher one — neither voids
+        let phone = device_key(1);
+        let laptop = device_key(2);
+        let forger = device_key(3);
+        let live_link = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: phone.public(),
+                subject: phone.public(),
+                claim: Claim::SamePersonAs(laptop.public()),
+                revision: 2,
+            },
+            &phone,
+        );
+        let attestations = [
+            live_link,
+            negative(&phone, laptop.public(), 1, &phone), // stale
+            negative(&phone, laptop.public(), 9, &forger), // won't verify
+        ];
+
+        // When / Then
+        assert_eq!(
+            link_tier(&[phone.public()], laptop.public(), &attestations),
             LinkTier::VouchedFromTrust
         );
     }

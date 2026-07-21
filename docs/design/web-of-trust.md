@@ -124,10 +124,21 @@ storage:
   attester's contribution; a disavowal from the *subject's own* sibling
   key or from contacts renders as its own line, not silence.
 - Reply/fan-out resolution (SPEC §3.3 "a repudiated key drops out of the
-  set"): when the observer's policy accepts the disavowal — MVP default:
-  it comes from a key the observer holds in the same contact entry, or
-  from the observer's own devices — the key is excluded from addressed
-  sets. A deliberate stop-include (§2 table).
+  set"): when the observer's policy accepts the disavowal — MVP default
+  (**sharpened at implementation, 2026-07-21**): it comes from the
+  observer's own keys, or from *the same person* — a shared contact
+  entry, **or any held `SamePersonAs` between attester and key, where the
+  same-person test deliberately ignores voiding**: a voided link no
+  longer clusters, but it remains proof the keys were once one person,
+  which is exactly what makes the disavowal self-referential ("their own
+  key disavowed it") rather than third-party. Per-device contact entries
+  made the original same-entry wording insufficient — the phone and the
+  lost laptop are separate entries, and the surviving same-person
+  evidence is the laptop's own reverse link in its promoted record. The
+  key is then excluded from addressed sets: a deliberate stop-include
+  (§2 table). Third-party negatives render as warnings, never exclude
+  (§7). Explicit acts — sending to the disavowed entry by name — always
+  still work: that IS the manual override, with no extra state.
 - The own-devices store: repudiating a sibling also un-recognizes it
   locally (serving, send-to-self, and re-wrap stop; the vouch in
   `my_record` is superseded by the published `Negative`).
@@ -222,16 +233,22 @@ The drill, end to end — every step an existing primitive plus §3/§4:
   next pull; endorsement revisions never mix into self-claim ordering
   (different supersession scopes); endorsed-only name groups pair with
   the endorsing responder's served record as their promotable payload.)*
-- **D4b · Negative claims + repudiation.** The §4 voiding rule in the
-  protocol (`link_tier`, name claims) with the cross-kind supersession
-  pinned in SPEC §3.2; `Client::repudiate(key)` (sign + publish + serve;
-  un-recognize when it's a sibling); read-time exclusion from clusters and
-  addressed sets; CLI `repudiate`. *Done when:* unit + headless e2e — a
-  higher-revision negative voids the vouch and the device link (and a
-  yet-higher re-vouch restores it); after the phone repudiates its lost
-  laptop, a contact's next freshness pull stops sealing to the laptop and
-  renders the disavowal; the observer's manual override survives
-  everything.
+- **D4b · Negative claims + repudiation — done (2026-07-21).** The §4
+  voiding rule in the protocol (`link_tier`, name claims) with the
+  cross-kind supersession pinned in SPEC §3.2; `Client::repudiate(key)`
+  (sign + publish + serve; un-recognize when it's a sibling); read-time
+  exclusion from clusters and addressed sets; CLI `repudiate`. *Done
+  when:* unit + headless e2e — a higher-revision negative voids the vouch
+  and the device link (and a yet-higher re-vouch restores it); after the
+  phone repudiates its lost laptop, a contact's next freshness pull stops
+  sealing to the laptop and renders the disavowal; the observer's manual
+  override survives everything.
+  *(As built: the stance store holds one latest claim per subject, so
+  re-vouch-after-repudiate is free; the §4 same-person scoping was
+  sharpened at implementation (see the §4 note); the manual override is
+  structural — exclusion applies only to automatic reply fan-out, never
+  to explicit sends — and the record path carries a repudiated sibling's
+  disavowal, since its own record stops being servable.)*
 - **D4c · Recovery acceptance + UI.** The §5 drill live: vouch toggle,
   disavowal warnings, un-recognize vs repudiate in the device list, the
   friend-assisted flow. *Done when:* the lost-device drill runs across

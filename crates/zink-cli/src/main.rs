@@ -49,6 +49,7 @@ async fn main() -> ExitCode {
         Some("rewrap") => rewrap(&args[1..]).await,
         Some("vouch") => vouch(&args[1..]).await,
         Some("unvouch") => unvouch(&args[1..]).await,
+        Some("repudiate") => repudiate(&args[1..]).await,
         Some("send") => send(&args[1..]).await,
         Some("recv") => recv(&args[1..]).await,
         Some("conversations") => conversations(&args[1..]).await,
@@ -81,6 +82,7 @@ const USAGE: &str = "usage:
   zink-cli rewrap --key <file>
   zink-cli vouch --key <file> <petname>
   zink-cli unvouch --key <file> <petname>
+  zink-cli repudiate --key <file> <petname | pubkey-hex>
   zink-cli send --key <file> --to <petname | pubkey@relay[,relay...]> [--to ...]
                 [--image <file> [--thumb <file>]] <text>
   zink-cli recv --key <file> [--relay <relay> ...] [--blobs-dir <dir>]
@@ -199,6 +201,26 @@ async fn vouch(args: &[String]) -> Result<(), String> {
     let client = open_client(&flags).await?;
     client.vouch(petname)?;
     println!("vouching for {petname:?} — served to anyone who asks you about them");
+    client.close().await;
+    Ok(())
+}
+
+/// Repudiate a key (D4b): "I no longer recognize this key" — published in
+/// your record, served with answers, and a repudiated sibling is
+/// un-recognized on the spot. Advisory: observers decide what it means.
+async fn repudiate(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [target] = positionals.as_slice() else {
+        return Err(format!("exactly one petname or key hex expected\n{USAGE}"));
+    };
+    let client = open_client(&flags).await?;
+    let key = resolve_peer_key(&client, target)?;
+    client.repudiate(key)?;
+    println!(
+        "repudiated {} — published in your record; contacts learn it from \
+         their next pull",
+        &hex::encode(&key.0)[..8],
+    );
     client.close().await;
     Ok(())
 }
@@ -583,6 +605,19 @@ async fn who_is(args: &[String]) -> Result<(), String> {
             "{} holds a record: calls themself {name:?} — {}",
             answer.responder_petname,
             answer.record.to_qr_string()
+        );
+    }
+    // Disavowals (D4b): every valid negative renders with WHO says it;
+    // only same-person ones exclude from addressing.
+    for disavowal in client.disavowals(key)? {
+        println!(
+            "disavowed by {}{}",
+            disavowal.attester_label,
+            if disavowal.excludes {
+                " — excluded from your replies (their own key disavowed it)"
+            } else {
+                " (third-party claim — a warning, never an exclusion)"
+            }
         );
     }
     // Link evidence (D3c, multi-device.md §7): says WHO claims, tiered —

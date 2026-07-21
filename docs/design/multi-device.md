@@ -41,8 +41,10 @@ contacts' clients get honest *evidence* to cluster both keys as one person
 — if and how they render that is theirs.
 
 **Non-goals (deferred, with homes):** repudiation / lost-device recovery
-(`Negative` claims + the social flow — D4/post-MVP; the repudiation-lag note
-from groups planning parks here too); friend-re-wraps-for-you (SPEC allows
+(`Negative` claims + the social flow — **landed at D4b, 2026-07-21**:
+web-of-trust.md §4/§5 — repudiating a sibling un-recognizes it and
+publishes the disavowal; the repudiation-lag note finally has its
+decreasing tail); friend-re-wraps-for-you (SPEC allows
 it; the *willingness* gate for non-own-devices is a later policy — D3 serves
 re-wraps to own devices only); >2 devices (nothing below assumes 2, but the
 UX and tests target the pair case); any auto-pairing or device discovery
@@ -265,11 +267,14 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
   cluster and its growth. Inherent (recipients must be visible to route,
   SPEC §6) and deliberate — the signed list IS the announcement (§5); one
   more reason metadata minimisation stays a later track.
-- **Repudiation lag** (parked, recorded): a lost device keeps receiving
-  until contacts learn otherwise; the lazy model's cost concentrates here.
-  Sibling devices are the *primary* completeness channel; contacts'
-  fan-out is robustness — never load-bearing (the over-complication guard
-  from the reorg discussion).
+- **Repudiation lag** (parked here; **resolved at D4b, 2026-07-21** —
+  web-of-trust.md §4/§5): a lost device keeps receiving until contacts
+  learn otherwise; the lazy model's cost concentrates here. D4b gives the
+  lag its decreasing tail — `repudiate` un-recognizes the sibling and
+  publishes the `Negative`, and contacts stop addressing it as their
+  pulls land. Sibling devices are the *primary* completeness channel;
+  contacts' fan-out is robustness — never load-bearing (the
+  over-complication guard from the reorg discussion).
 
 ## 9. Slices
 

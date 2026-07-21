@@ -31,8 +31,8 @@ use std::path::PathBuf;
 
 use crate::error::Error;
 use zink_protocol::{
-    BlobHash, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey, RelayEntry,
-    SignedAttestation,
+    BlobHash, Claim, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey,
+    RelayEntry, SignedAttestation,
 };
 
 #[derive(Clone, Debug)]
@@ -502,6 +502,36 @@ impl ClientState {
             .join(hex(&subject.0))
             .with_extension("attestation");
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Every issued `Negative` stance (D4b) — what `my_record` publishes
+    /// so contacts learn a repudiation from any freshness pull on *us*.
+    pub fn issued_negatives(&self) -> Vec<SignedAttestation> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("vouches")) else {
+            return Vec::new();
+        };
+        let mut negatives = Vec::new();
+        for entry in entries.flatten() {
+            let Some(signed) = std::fs::read(entry.path())
+                .ok()
+                .and_then(|bytes| SignedAttestation::try_from_bytes(&bytes).ok())
+            else {
+                continue;
+            };
+            if matches!(signed.attestation.claim, Claim::Negative) {
+                negatives.push(signed);
+            }
+        }
+        negatives
+    }
+
+    /// Drop a device from the own-devices store (D4b: repudiating a
+    /// sibling un-recognizes it — serving, send-to-self, and re-wrap all
+    /// stop reading it from here on).
+    pub fn remove_recognized_device(&self, key: &PublicKey) {
+        let stem = self.root.join("devices").join(hex(&key.0));
+        let _ = std::fs::remove_file(stem.with_extension("record"));
+        let _ = std::fs::remove_file(stem.with_extension("vouch"));
     }
 
     /// Replace a stored contact's record — the explicit key-overlap update

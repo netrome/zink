@@ -219,8 +219,22 @@ impl Client {
         let me = self.device.public();
         let mut contacts = Vec::new();
         let mut unknown = Vec::new();
+        let mut disavowed = Vec::new();
         for key in self.membership(conversation)? {
             if key == me {
+                continue;
+            }
+            // An accepted disavowal is the deliberate stop-include (D4b,
+            // web-of-trust.md §4): the key stays in history, stops being
+            // addressed — unlike routelessness, exclusion is the point.
+            // Explicit acts (send to the entry by name) still work: that
+            // is the manual override.
+            if self
+                .disavowals(key)?
+                .iter()
+                .any(|disavowal| disavowal.excludes)
+            {
+                disavowed.push(key);
                 continue;
             }
             // Contact record, or a recognized own device's (D3c): a
@@ -239,7 +253,11 @@ impl Client {
                 relays,
             });
         }
-        Ok(ReplyContacts { contacts, unknown })
+        Ok(ReplyContacts {
+            contacts,
+            unknown,
+            disavowed,
+        })
     }
 
     /// A draft threaded onto the stored DAG's heads (body filled by
@@ -1095,6 +1113,127 @@ impl Client {
         Ok(())
     }
 
+    /// Repudiate a key (D4b, web-of-trust.md §4/§5): sign "I disavow this
+    /// key" at a revision above every claim of ours it must void — the
+    /// vouch, and the device link when it's a sibling — store it as our
+    /// current stance (served as an endorsement, published in
+    /// `my_record`), and un-recognize a repudiated sibling: serving,
+    /// send-to-self, and re-wrap stop immediately. Advisory like every
+    /// claim: observers weigh it by their own policy; a yet-higher
+    /// re-vouch restores.
+    pub fn repudiate(&self, key: PublicKey) -> Result<(), Error> {
+        if key == self.device.public() {
+            return Err(Error::InvalidInput("that is this device's own key".into()));
+        }
+        let stance = self
+            .state
+            .vouch_for(&key)
+            .map(|prior| prior.attestation.revision);
+        let device_link = self
+            .state
+            .recognized_devices()
+            .iter()
+            .find(|(device_key, _)| *device_key == key)
+            .and_then(|_| {
+                self.state.device_vouches().into_iter().find(|vouch| {
+                matches!(vouch.attestation.claim, Claim::SamePersonAs(linked) if linked == key)
+            })
+            })
+            .map(|vouch| vouch.attestation.revision);
+        let revision = match stance.into_iter().chain(device_link).max() {
+            Some(highest) => highest + 1,
+            None => 0,
+        };
+        let negative = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: self.device.public(),
+                subject: key,
+                claim: Claim::Negative,
+                revision,
+            },
+            &self.device,
+        );
+        self.state.save_vouch(&key, &negative)?;
+        self.state.remove_recognized_device(&key);
+        Ok(())
+    }
+
+    /// Valid disavowals of a key across everything held (D4b). Each says
+    /// WHO, and whether the observer's MVP policy excludes the key from
+    /// addressed sets: only a disavowal from this client's own stance or
+    /// from *the same person* — a shared contact entry, or any held
+    /// `SamePersonAs` between attester and key. The same-person scoping
+    /// deliberately ignores voiding (sharpened at implementation): a
+    /// voided link no longer clusters, but it remains proof the keys were
+    /// one person — exactly what makes the disavowal self-referential
+    /// ("their own key disavowed it") rather than third-party griefing,
+    /// which renders as a warning and never excludes.
+    pub fn disavowals(&self, key: PublicKey) -> Result<Vec<Disavowal>, Error> {
+        let contacts = self.state.contacts()?;
+        let attestations = self.held_attestations(key)?;
+        let same_entry = |attester: &PublicKey| {
+            contacts
+                .iter()
+                .any(|(_, record)| record.keys.contains(attester) && record.keys.contains(&key))
+        };
+        let linked = |attester: &PublicKey| {
+            attestations.iter().any(|signed| {
+                let attestation = &signed.attestation;
+                let Claim::SamePersonAs(to) = attestation.claim else {
+                    return false;
+                };
+                attestation.attester == attestation.subject
+                    && signed.verify().is_ok()
+                    && ((attestation.attester == *attester && to == key)
+                        || (attestation.attester == key && to == *attester))
+            })
+        };
+        let own = self.own_keys();
+        let mut disavowals: Vec<Disavowal> = Vec::new();
+        for signed in &attestations {
+            let Some((attester, disavowed, _)) = zink_protocol::verified_negative(signed) else {
+                continue;
+            };
+            if disavowed != key || disavowals.iter().any(|d| d.attester == attester) {
+                continue;
+            }
+            let excludes = own.contains(&attester) || same_entry(&attester) || linked(&attester);
+            disavowals.push(Disavowal {
+                attester,
+                attester_label: self
+                    .participant_labels(&[attester])?
+                    .pop()
+                    .unwrap_or_default(),
+                excludes,
+            });
+        }
+        Ok(disavowals)
+    }
+
+    /// Every attestation this client holds that could bear on `key`: its
+    /// own stances, stored contact records, and the learned records +
+    /// endorsements for the key and for each contact's keys.
+    fn held_attestations(&self, key: PublicKey) -> Result<Vec<SignedAttestation>, Error> {
+        let mut attestations: Vec<SignedAttestation> = Vec::new();
+        attestations.extend(self.state.vouch_for(&key));
+        attestations.extend(self.state.issued_negatives());
+        for entry in self.state.learned(&key) {
+            attestations.extend(entry.record.attestations.clone());
+            attestations.extend(entry.endorsements.clone());
+        }
+        for (_, record) in self.state.contacts()? {
+            for contact_key in &record.keys {
+                for entry in self.state.learned(contact_key) {
+                    attestations.extend(entry.record.attestations.clone());
+                    attestations.extend(entry.endorsements.clone());
+                }
+            }
+            attestations.extend(record.attestations);
+        }
+        Ok(attestations)
+    }
+
     /// Whether this device currently vouches for a key (edge rendering).
     pub fn vouches(&self, subject: &PublicKey) -> bool {
         self.state.vouch_for(subject).is_some()
@@ -1652,12 +1791,28 @@ impl Client {
         // group — or founds one, paired with that responder's served
         // record as the promotable payload. Endorsement revisions are the
         // voucher's counter (a different supersession scope), so they
-        // never mix into the group's self-claim `revision`.
+        // never mix into the group's self-claim `revision`. The voiding
+        // rule applies per voucher (D4b): a name behind the same
+        // attester's higher-revision `Negative` is withdrawn, not shown.
+        let negatives: Vec<(PublicKey, u64)> = entries
+            .iter()
+            .flat_map(|entry| entry.endorsements.iter())
+            .filter_map(zink_protocol::verified_negative)
+            .filter(|(_, disavowed, _)| *disavowed == subject)
+            .map(|(attester, _, revision)| (attester, revision))
+            .collect();
         for entry in &entries {
             for signed in &entry.endorsements {
                 let Claim::Name(name) = &signed.attestation.claim else {
-                    continue; // `Negative` evaluation lands with D4b
+                    continue; // negatives render via `disavowals`, not here
                 };
+                let voided = negatives.iter().any(|(attester, revision)| {
+                    *attester == signed.attestation.attester
+                        && *revision > signed.attestation.revision
+                });
+                if voided || signed.verify().is_err() {
+                    continue;
+                }
                 let name = name.clone();
                 let rank = (0, entry.received_ms);
                 let group = groups.entry(name.clone()).or_insert_with(|| {
@@ -1706,18 +1861,9 @@ impl Client {
     /// tier only ever produces an offer, accepted via `add_contact`.
     pub fn device_evidence(&self, subject: PublicKey) -> Result<Vec<DeviceEvidence>, Error> {
         let contacts = self.state.contacts()?;
-        let mut attestations: Vec<SignedAttestation> = Vec::new();
-        for entry in self.state.learned(&subject) {
-            attestations.extend(entry.record.attestations.clone());
-        }
-        for (_, record) in &contacts {
-            attestations.extend(record.attestations.clone());
-            for key in &record.keys {
-                for entry in self.state.learned(key) {
-                    attestations.extend(entry.record.attestations.clone());
-                }
-            }
-        }
+        // Links AND negatives now travel as endorsements too, so the pool
+        // is everything held (D4b) — `link_tier` applies the voiding rule.
+        let attestations = self.held_attestations(subject)?;
         let mut evidence: Vec<DeviceEvidence> = contacts
             .iter()
             .filter_map(|(petname, record)| {
@@ -2124,6 +2270,11 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
     // (SPEC §3.6). `keys` stays this device's own key; observers gather
     // link evidence across the records they hold.
     attestations.extend(state.device_vouches());
+    // …and the issued repudiations (D4b, web-of-trust.md §5): a lost key's
+    // disavowal reaches contacts through any freshness pull on US — the
+    // endorsement channel needs a servable record for the *subject*, which
+    // an un-recognized key no longer has.
+    attestations.extend(state.issued_negatives());
     Some(ContactRecord::new(vec![me], attestations, relays))
 }
 
@@ -2280,11 +2431,24 @@ pub struct DeviceEvidence {
     pub tier: zink_protocol::LinkTier,
 }
 
-/// Whom a reply reaches: the resolvable participants, and the keys we hold
-/// no record for (unreachable — surfaced, not silently dropped).
+/// One valid `Negative` about a key, with the observer's verdict (D4b).
+pub struct Disavowal {
+    pub attester: PublicKey,
+    /// The attester rendered (petname / device name / short hex).
+    pub attester_label: String,
+    /// Whether the MVP policy excludes the key from addressed sets: true
+    /// only for this client's own stance or a same-person disavowal;
+    /// third-party negatives warn, never exclude.
+    pub excludes: bool,
+}
+
+/// Whom a reply reaches: the resolvable participants, the keys we hold no
+/// record for (unreachable — surfaced, not silently dropped), and the keys
+/// excluded by an accepted disavowal (D4b — the deliberate stop-include).
 pub struct ReplyContacts {
     pub contacts: Vec<Contact>,
     pub unknown: Vec<PublicKey>,
+    pub disavowed: Vec<PublicKey>,
 }
 
 /// One stored conversation, as the edge lists it. Participants are keys —
@@ -3809,6 +3973,219 @@ mod tests {
         assert!(matches!(a.vouch("nobody"), Err(Error::NotAContact(_))));
 
         let _ = std::fs::remove_dir_all(temp_root("vouch"));
+    }
+
+    #[tokio::test]
+    async fn repudiate__should_supersede_the_vouch_and_unrecognize_the_sibling() {
+        // Given: a profiled phone that vouched a contact and recognized a
+        // laptop
+        let a = Client::open_or_create(&temp_key("repudiate", "a"))
+            .await
+            .expect("open");
+        let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
+        a.set_profile("mårten phone", std::slice::from_ref(&relay))
+            .await
+            .expect("profile");
+        let carol = DeviceKey::from_seed([90; 32]);
+        a.add_contact(
+            &ContactRecord::new(
+                vec![carol.public()],
+                vec![],
+                mailbox_only("cc@203.0.113.1:1"),
+            ),
+            Some("Carrie".to_string()),
+        )
+        .expect("add");
+        a.vouch("Carrie").expect("vouch");
+        let laptop = DeviceKey::from_seed([91; 32]);
+        a.recognize_device(&signed_record(
+            &laptop,
+            "mårten laptop",
+            0,
+            mailbox_only("ll@203.0.113.5:5"),
+        ))
+        .expect("recognize");
+        let old_record = a.my_record().expect("record");
+
+        // When: both get repudiated
+        a.repudiate(carol.public()).expect("repudiate carol");
+        a.repudiate(laptop.public()).expect("repudiate laptop");
+
+        // Then: the negative supersedes the vouch (rev 1 over rev 0), the
+        // sibling is un-recognized, and the fresh record publishes both
+        let carol_stance = a.state.vouch_for(&carol.public()).expect("stance");
+        assert!(matches!(carol_stance.attestation.claim, Claim::Negative));
+        assert_eq!(carol_stance.attestation.revision, 1);
+        assert!(a.recognized_devices().is_empty());
+        let fresh = a.my_record().expect("record");
+        assert_eq!(
+            fresh
+                .attestations
+                .iter()
+                .filter(|signed| matches!(signed.attestation.claim, Claim::Negative))
+                .count(),
+            2
+        );
+        // …an observer combining the OLD record (live link) with the fresh
+        // negatives sees the device link voided
+        let mut held = old_record.attestations.clone();
+        held.extend(fresh.attestations.clone());
+        assert_eq!(
+            zink_protocol::link_tier(&[a.public_key()], laptop.public(), &held),
+            zink_protocol::LinkTier::None
+        );
+        // …and a yet-higher re-vouch restores the contact's name stance
+        a.vouch("Carrie").expect("re-vouch");
+        let restored = a.state.vouch_for(&carol.public()).expect("stance");
+        assert_eq!(restored.attestation.revision, 2);
+        assert!(matches!(restored.attestation.claim, Claim::Name(_)));
+
+        let _ = std::fs::remove_dir_all(temp_root("repudiate"));
+    }
+
+    #[tokio::test]
+    async fn disavowals__should_exclude_same_person_only_and_void_endorsed_names() {
+        // Given: bob's learned endorsements about carol carry a vouch
+        // superseded by his own negative — but bob and carol share no
+        // entry and no link: a third-party claim
+        let a = Client::open_or_create(&temp_key("disavow", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([92; 32]);
+        let carol = DeviceKey::from_seed([93; 32]);
+        for (device, name, mailbox) in [
+            (&bob, "bob", "bb@203.0.113.1:1"),
+            (&carol, "carol", "cc@203.0.113.2:2"),
+        ] {
+            a.add_contact(
+                &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
+                Some(name.to_string()),
+            )
+            .expect("add");
+        }
+        let endorse = |claim: Claim, revision: u64| {
+            SignedAttestation::new(
+                Attestation {
+                    version: FORMAT_VERSION,
+                    attester: bob.public(),
+                    subject: carol.public(),
+                    claim,
+                    revision,
+                },
+                &bob,
+            )
+        };
+        let carol_record = signed_record(&carol, "Carol", 0, mailbox_only("cc@203.0.113.2:2"));
+        a.state
+            .save_learned(
+                &carol.public(),
+                &bob.public(),
+                &carol_record,
+                &[
+                    endorse(Claim::Name("Caroline".to_string()), 0),
+                    endorse(Claim::Negative, 1),
+                ],
+                1,
+            )
+            .expect("learn");
+
+        // Then: the endorsed name is voided by its attester's negative…
+        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        assert!(
+            candidates
+                .iter()
+                .all(|(name, _)| name.endorsed_by.is_empty()),
+            "a name behind the attester's higher negative must not render"
+        );
+        // …the disavowal renders with WHO — but as third-party it never
+        // excludes (the griefing bound, web-of-trust.md §7)
+        let disavowals = a.disavowals(carol.public()).expect("disavowals");
+        assert_eq!(disavowals.len(), 1);
+        assert_eq!(disavowals[0].attester_label, "bob");
+        assert!(!disavowals[0].excludes);
+
+        let _ = std::fs::remove_dir_all(temp_root("disavow"));
+    }
+
+    #[tokio::test]
+    async fn repudiation__should_stop_replies_to_the_lost_device_after_a_pull() {
+        // Given: the lost-device drill (web-of-trust.md §5.1). The phone
+        // paired a laptop (the laptop's record carries its reverse link —
+        // the same-person evidence alice will hold); alice has both as
+        // contact entries and a conversation whose membership carries all
+        // three keys via the phone's send-to-self.
+        let (_relay, url) = spawn_test_relay().await;
+        let phone = open_homed("drill", "phone", &url).await;
+        let alice = open_homed("drill", "alice", &url).await;
+        befriend(&phone, &alice); // alice is served by the phone
+        let laptop = DeviceKey::from_seed([94; 32]);
+        let laptop_link = SignedAttestation::new(
+            Attestation {
+                version: FORMAT_VERSION,
+                attester: laptop.public(),
+                subject: laptop.public(),
+                claim: Claim::SamePersonAs(phone.public_key()),
+                revision: 0,
+            },
+            &laptop,
+        );
+        let mut laptop_record = signed_record(
+            &laptop,
+            "mårten laptop",
+            0,
+            mailbox_only("ll@203.0.113.5:5"),
+        );
+        laptop_record.attestations.push(laptop_link);
+        phone.recognize_device(&laptop_record).expect("recognize");
+        let to_alice = vec![Contact {
+            keys: vec![alice.public_key()],
+            relays: vec!["aa@203.0.113.9:9".to_string()],
+        }];
+        // The relay route is fake — the send queues, but the sealed core
+        // (with the laptop appended) is stored; hand it to alice directly.
+        let result = phone.send(&to_alice, b"hi".to_vec(), vec![]).await;
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        let conversation = phone.state.conversations()[0];
+        for envelope in phone.state.load_envelopes(conversation).expect("stored") {
+            alice
+                .state
+                .store_envelope(conversation, &envelope)
+                .expect("copy");
+        }
+        alice
+            .add_contact(
+                &phone.my_record().expect("record"),
+                Some("mårten".to_string()),
+            )
+            .expect("add phone");
+        alice.add_contact(&laptop_record, None).expect("add laptop");
+
+        // Baseline: a reply addresses both of mårten's keys
+        let baseline = alice.reply_contacts(conversation).expect("reply");
+        assert_eq!(baseline.contacts.len(), 2);
+        assert!(baseline.disavowed.is_empty());
+
+        // When: the phone repudiates the lost laptop; alice's next
+        // freshness pull on the phone brings the fresh record
+        phone.repudiate(laptop.public()).expect("repudiate");
+        phone.endpoint.online().await;
+        let outcome = alice.who_is(phone.public_key()).await.expect("pull");
+        assert!(!outcome.answers.is_empty());
+
+        // Then: the laptop drops out of the addressed set — the accepted
+        // disavowal is the deliberate stop-include — and renders with WHO
+        let after = alice.reply_contacts(conversation).expect("reply");
+        assert_eq!(after.contacts.len(), 1);
+        assert_eq!(after.disavowed, vec![laptop.public()]);
+        let disavowals = alice.disavowals(laptop.public()).expect("disavowals");
+        assert_eq!(disavowals.len(), 1);
+        assert!(disavowals[0].excludes);
+        assert_eq!(disavowals[0].attester_label, "mårten");
+        // …while the explicit act survives everything: sending to the
+        // entry by name is the manual override
+        assert!(alice.resolve_contact("mårten laptop").is_ok());
+
+        let _ = std::fs::remove_dir_all(temp_root("drill"));
     }
 
     #[tokio::test]

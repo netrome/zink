@@ -1003,13 +1003,43 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     below the self-claim with its voucher named → unvouch → gone after
     one re-ask. SPEC §11 row pinned; who-is-this.md §3/§6 +
     client-core.md updated. 182 tests.)*
-  - [ ] **D4b · Negative claims + repudiation.** The voiding rule in the
+  - [x] **D4b · Negative claims + repudiation.** The voiding rule in the
     protocol (`link_tier`, name claims) + SPEC §3.2 sharpened;
     `Client::repudiate(key)` (publish; un-recognize siblings); read-time
     exclusion from clusters + addressed sets; CLI `repudiate`. *Done
     when:* a higher-revision negative voids the vouch and device link
     (re-vouch restores); after repudiating a lost sibling, a contact's
     freshness pull stops sealing to it; manual override survives.
+    ✅ *(2026-07-21: protocol — `link_tier` applies the voiding rule
+    (`verified_negative` public; voids, restores at a yet-higher
+    re-vouch, ignores stale + forged negatives — all tested).
+    `repudiate(key)`: revision above every claim of ours it must void
+    (vouch stance + sibling link), stored as the current stance in
+    `vouches/` (one latest claim per subject — so `vouch` after
+    `repudiate` restores at rev+1 for free), published via
+    `build_own_record` (**the record path is load-bearing**: an
+    un-recognized key has no servable record left, so the endorsement
+    channel can't carry its disavowal — freshness pulls on the *issuer*
+    can), sibling un-recognized on the spot. Evaluation:
+    `disavowals(key)` over everything held (`held_attestations` — records
+    + endorsements + own stances; `device_evidence` moved onto the same
+    pool), each with WHO and `excludes` — **design sharpened at
+    implementation** (web-of-trust.md §4 updated): per-device contact
+    entries broke the same-entry wording, so same-person = shared entry
+    OR any held `SamePersonAs` between attester and key, with the scoping
+    test deliberately voiding-exempt (a voided link no longer clusters
+    but still proves the keys were one person — the surviving evidence is
+    the lost device's own reverse link in its promoted record).
+    `reply_contacts` drops excluded keys into `.disavowed` (the
+    deliberate stop-include); third-party negatives warn, never exclude
+    (the griefing bound, tested); explicit send-by-name untouched — the
+    manual override, no extra state. Endorsed names honor per-attester
+    voiding. CLI `repudiate` + who-is disavowal lines. e2e: the
+    lost-device drill — baseline replies address both keys → phone
+    repudiates → alice's one freshness pull → the laptop drops to
+    `.disavowed`, labeled "mårten", resolve-by-name still works. SPEC
+    §3.2 voiding rule + §11 row pinned (called out); multi-device.md's
+    repudiation-lag + Negative deferrals resolved. 188 tests.)*
   - [ ] **D4c · Recovery acceptance + UI.** Vouch toggle, disavowal
     warnings, un-recognize vs repudiate, the friend-assisted flow. *Done
     when:* the lost-device drill runs live — contacts converge on the new
