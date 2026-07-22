@@ -9,7 +9,7 @@ each runnable and reviewed before the next.
 **This pass is UI-only.** No protocol changes, no `zink-protocol` touch, no new
 Rust dependencies. Everything below is layout, CSS, view structure, and the
 words on screen. The one thing that *could* graduate to the protocol layer —
-renaming a couple of precise-but-jargon terms — is called out in §6 as a
+renaming a couple of precise-but-jargon terms — is called out in §7 as a
 **separate proposal**, never encoded silently here.
 
 Guiding voice: Steve Krug — *make the user think as little as possible.* The
@@ -71,12 +71,67 @@ Baseline audit of `app/ui/src/lib.rs` + `app/dist/index.html` (2026-07-22):
 | Screen split | The 4-in-1 `ContactsView` splits along its natural seams: *Me* (your identity + devices + relays), *People* (others), with add/pair as focused sub-flows. |
 | Relays | **First-class and user-visible** (multi-relay supported out of the box), but surfaced to the *minimum* extent: a friendly list under **Me**, framed socially ("where your messages wait when you're offline"). **No hard-coded default relay** now — the user provides at least one (their own, or one a friend shares). A hard-coded default list is explicitly deferred. |
 | First-run relay | Because there's no default, onboarding *must* include a relay step — but a gentle, well-explained one (paste/scan-friendly), not a raw field shown cold. |
-| Vocabulary | **Translate** protocol terms to social ones in the UI (§6). Terms that read better may be floated as **protocol back-port proposals** — separately, never silently. |
+| Person = lens over keys | A person is a **local lens over a key-set** (`Contact.keys` is already `Vec<PublicKey>`), never a shared object. Screens render three separated belief layers — mine / their self-claim / friends' vouches (§4) — and are built **cluster-first**; the single-key DTOs widen to carry the set. |
+| Friends' lens | Render **vouched names** now (built, D4a): "Alice calls them 'Bobby' · vouched by B, D". A friend's **avatar** (per-attester avatar lens) is **deferred in web-of-trust.md §6** — rendered once the claim exists, tracked there, not a facelift slice. |
+| Local avatar override | **In scope** (U6). Your lens may carry a photo *you* chose for a contact (client-side only, like a phone contact card), overriding the resolved avatar. |
+| Friends' labels are only what's shared | You only ever see a friend's *vouched* label — never their private petname (who-is-this.md §6). "Through your friends' eyes" = what they chose to publish; the UX copy says so. |
+| Vocabulary | **Translate** protocol terms to social ones in the UI (§7). Terms that read better may be floated as **protocol back-port proposals** — separately, never silently. |
 | Concurrency markers | `crossed` / `merged` (tenet 7 honesty data) are **hidden by default**, available behind an optional "show concurrency" affordance — they're for advanced users, not everyday noise. |
 | Manual refresh | Removed. Live delivery + the 60 s backstop poll already cover it; a visible refresh button only sows doubt. (Pull-to-refresh is an acceptable later nicety.) |
 | Scope tracking | Tracked here, parallel to the MVP plan; same one-slice-per-turn cadence. |
 
-## 4. Design system (the tokens)
+## 4. The identity model the screens render
+
+zink's model — and, it turns out, `zink-client` already — treats a **person as a
+local lens over a set of keys**, never a shared object. `Contact` is
+`keys: Vec<PublicKey>` (a cluster whose label sits at its first key);
+`SamePersonAs` links are **self-attested only**, so recognition is *directional*
+and need never be symmetric (your phone can recognize your laptop while the
+laptop doesn't reciprocate); vouching (D4a, done) is the **per-attester lens** —
+a friend's label reaches you only if they *chose to publish* it (who-is-this.md
+§6, web-of-trust.md §6). "Seeing people through your friends' eyes" is this lens,
+made first-class in the UI.
+
+**The corner to avoid — and it's the only one.** The core is cluster-first, but
+the DTO/UI layer flattened it: `ContactRow` carries a single `key`,
+`Message.sender_key` is singular. Build U4/U5 on that and we silently re-bake
+"one key = one person," fighting the model. **Guardrail:** the People/Me screens
+render a `Person` view-model = `{ key-set, my petname, my avatar
+(override-or-resolved), per-key trust/recognition state }`, and the DTOs widen to
+carry it. Cluster-first, never key-first.
+
+**Three layers of belief, always visually separated** (the heart of the person
+detail screen):
+
+1. **My lens** — authoritative to me: my petname, my avatar for them (a photo I
+   chose, else the resolved one), the keys I've grouped under this person.
+2. **Their self-claim** — verified self-name / self-avatar, plus any self-attested
+   `SamePersonAs` links ("this key says it's also …").
+3. **Friends' lens** — the vouched names mutual contacts published: *"Alice calls
+   them 'Bobby' · vouched by B, D."* **Privacy invariant, printed in the copy:**
+   you only ever see what a friend *chose to share* — never their private petname.
+
+**Three kinds of clustering, each rendered honestly:**
+
+- **Self-attested link** (crypto-backed): "recognized as the same person — they
+  say so," shown with **directionality** ("this device recognizes it; scan back to
+  confirm both ways" — matches the existing pair copy). Never implies symmetry.
+- **Your local grouping** (no claim, fuzzy — the "someone in my football team"
+  case): "you've grouped these," visibly *your* choice, arbitrary keys allowed. The
+  `Vec<PublicKey>` shape already permits it; it needs a manual "group with…"
+  gesture (U6), not a new data model.
+- **Never a third-party device link** — a friend can vouch a *name*, never link
+  someone else's devices (web-of-trust.md §6). Structurally impossible; we don't
+  offer it.
+
+**Not free (tracked, not silently absorbed):** a friend's *avatar* for someone (the
+per-attester avatar lens) is deferred in web-of-trust.md §6. The facelift renders
+friends' vouched **names** now and their avatars the moment third-party avatar
+claims land — that protocol/client-core work is tracked there, not as a facelift
+slice (§8 follow-ups). A **local avatar override** (a photo *you* assign) is
+client-side and *is* in this pass (U6).
+
+## 5. Design system (the tokens)
 
 A dozen CSS custom properties in `dist/index.html` are the entire "system".
 Zinc neutrals + violet accent; semantic colors for state. Concrete starting
@@ -132,7 +187,7 @@ All interactive targets ≥ `--tap`.
 - `min-height: 100vh` → `100dvh` (dynamic viewport height).
 - Pad the bottom bar / composer with `env(safe-area-inset-bottom)`.
 
-## 5. Information architecture
+## 6. Information architecture
 
 Three destinations, each answering one question. Bottom tab bar.
 
@@ -140,16 +195,18 @@ Three destinations, each answering one question. Bottom tab bar.
   to it. A single **+** starts a new chat (pick people → chat opens with an
   empty composer). No permanent compose form, no refresh button.
 - **People** — *"who do I know?"* Just the contact list + a **+** (scan / paste
-  / pair as focused sub-flows). Tapping a person opens a **detail screen**:
-  avatar, what they call themselves, your petname, trust actions (vouch /
-  repudiate), and their devices.
+  / pair as focused sub-flows). Tapping a person opens a **detail screen** built
+  as the §4 lens: my lens (petname, avatar, grouped keys) · their self-claim ·
+  **friends' lens** (vouched names). Trust actions (vouch / repudiate) and
+  disavowal warnings in context.
 - **Me** — *"who am I, and how do I reach the world?"* Name, avatar, my QR, my
-  linked devices, and my relays (the multi-relay list, framed gently).
+  linked devices (with directional recognition, §4), and my relays (the
+  multi-relay list, framed gently).
 
 First run is a calm sequence, reusing the Me widgets: **name (+ optional
 avatar) → add a relay (explained, paste/scan-friendly) → here's your code**.
 
-## 6. Vocabulary: translate in the UI, propose upward separately
+## 7. Vocabulary: translate in the UI, propose upward separately
 
 UI-facing words (protocol names stay as-is in code/spec unless a back-port is
 separately accepted):
@@ -171,13 +228,13 @@ device" / "same-person-as" wants a clearer canonical name. If any is worth it,
 it gets its own doc/spec change per AGENTS.md; nothing here changes the
 protocol.
 
-## 7. Slices (the tracker)
+## 8. Slices (the tracker)
 
 Same format as the MVP plan. **Definition of done (every slice):** runnable /
 WASM UI builds · `cargo fmt` + `clippy` clean (Rust touched) · the app runs and
 the change is visible on device where relevant · this doc updated.
 
-- [ ] **U1 · Design tokens + safe-area fix.** The CSS custom properties of §4
+- [ ] **U1 · Design tokens + safe-area fix.** The CSS custom properties of §5
   in `dist/index.html`; recolor the existing UI from teal → violet + zinc with
   no structural change yet; type scale; button roles; `viewport-fit=cover` +
   `100dvh` + `env(safe-area-inset-bottom)`. *Done when:* the app is visibly
@@ -194,25 +251,43 @@ the change is visible on device where relevant · this doc updated.
   opens "start a chat" (pick one or more people → chat opens). Remove the
   permanent multi-select form and the refresh button. *Done when:* starting a
   new chat is a deliberate + action and the list shows only conversations.
-- [ ] **U4 · People + person detail.** Contact rows → tap-through detail screen
-  (avatar, self-name, petname, vouch/repudiate, their devices, disavowal
-  warnings). Add/scan/paste/pair as focused sub-flows off a **+**. *Done when:*
-  every D1–D4 contact action lives on a coherent detail screen, not a flat row
-  of stacked buttons.
+- [ ] **U4 · People + person detail (lens-first).** Contact rows → tap-through
+  detail screen built as the §4 **Person lens**: three separated belief layers —
+  *my lens* (petname, avatar, the keys I've grouped here) · *their self-claim*
+  (self-name/avatar, self-attested `SamePersonAs` links shown directionally) ·
+  *friends' lens* (vouched names — "Alice calls them 'Bobby' · vouched by B, D",
+  with the "only what they shared" privacy note). Trust actions (vouch /
+  repudiate) and disavowal warnings live in context; add/scan/paste/pair as
+  focused sub-flows off a **+**. Widen `ContactRow`/`Message` DTOs to carry the
+  key-set + layers. *Done when:* the detail screen shows all three belief layers
+  cluster-first, every D1–D4 action lives there, and nothing assumes
+  one-key-per-person.
 - [ ] **U5 · Me: profile, devices, relays.** The identity screen: name, avatar,
-  QR/"your code", linked devices, and the **multi-relay list** framed per §6
-  (add/remove, "where your messages wait"). *Done when:* a user can manage
-  name, avatar, devices, and ≥1 relay from one calm screen.
-- [ ] **U6 · First-run onboarding.** The §5 sequence (name/avatar → relay →
+  QR/"your code", your **linked devices shown with directional recognition** (§4
+  — "this device recognizes X; scan back to confirm both ways"), and the
+  **multi-relay list** framed per §7 (add/remove, "where your messages wait").
+  *Done when:* a user can manage name, avatar, devices, and ≥1 relay from one
+  calm screen, with recognition directionality honest.
+- [ ] **U6 · My-lens extras: local avatar + grouping.** Let your lens carry a
+  photo *you* chose for a contact (client-side override of the resolved avatar;
+  reuses the U5 canvas path) and a manual "group with…" gesture that clusters
+  keys under one local person (the football-team case — `Contact.keys` already
+  holds a set). Both are local, no protocol, no broadcast. *Done when:* you can
+  set a private photo for a contact and group two keys as one person, and
+  neither ever leaves the device.
+- [ ] **U7 · First-run onboarding.** The §6 sequence (name/avatar → relay →
   your code), replacing the "dumped into the mega-screen" first run. Reuses U5
   widgets. *Done when:* a fresh install walks a new user to a shareable code
   without ever showing a raw dial string cold.
-- [ ] **U7 · Language + metadata legibility.** Apply the §6 vocabulary across
+- [ ] **U8 · Language + metadata legibility.** Apply the §7 vocabulary across
   the UI; make message metadata scannable (states as small pills/icons with
   meaning, not a symbol run-on); hide `crossed`/`merged` behind an optional
   "show concurrency" toggle. *Done when:* no protocol jargon is user-facing by
   default and the message row reads at a glance.
 
-Follow-ups / parked: pull-to-refresh; a "show concurrency" advanced view beyond
-the toggle; any accepted vocabulary back-port (separate doc); PWA styling
-(post-MVP, when the browser client returns).
+Follow-ups / parked: **vouched avatars (friend-lens photos)** — the per-attester
+avatar lens is deferred in web-of-trust.md §6; when third-party avatar claims
+land there, U4's friends'-lens renders them with no facelift redesign. Also:
+pull-to-refresh; a "show concurrency" advanced view beyond the toggle; any
+accepted vocabulary back-port (separate doc); PWA styling (post-MVP, when the
+browser client returns).
