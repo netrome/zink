@@ -53,6 +53,20 @@ async fn client(
             tauri::async_runtime::spawn(async move {
                 push.push_avatar().await;
             });
+            // C4c-i heartbeat: a Dozed/frozen process can't beat, so gaps
+            // between these lines — and `late_ms` spikes — are the freeze
+            // detector the overnight diagnosis reads.
+            tauri::async_runtime::spawn(async {
+                let mut beat = 0u64;
+                let mut last = std::time::Instant::now();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    beat += 1;
+                    let late_ms = last.elapsed().as_millis().saturating_sub(60_000) as u64;
+                    last = std::time::Instant::now();
+                    tracing::info!(beat, late_ms, "heartbeat");
+                }
+            });
             Ok::<_, String>(client)
         })
         .await?
@@ -786,16 +800,49 @@ fn qr_payload(record: &ContactRecord) -> Result<QrPayload, String> {
     Ok(QrPayload { svg, text })
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // Logs to stderr — visible in the `cargo tauri dev` terminal on desktop.
-    // (On Android stderr goes nowhere; a logcat layer is a later add.)
+/// Tracing to stderr (the `cargo tauri dev` terminal) AND a size-capped
+/// file in the app data dir (C4c-i): on Android stderr goes nowhere, and
+/// the background-delivery diagnosis reads this file the morning after —
+/// the subscription loop's lifecycle lines are the whole point.
+fn init_diagnostics(app: &AppHandle) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    // The reconnect-backoff lines are debug-level in zink-client.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,zink_client=debug"));
+    let stderr = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let file = app.path().app_data_dir().ok().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("diag.log");
+        // Dumb rotation: one predecessor kept, nothing unbounded.
+        if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 5 * 1024 * 1024) {
+            let _ = std::fs::rename(&path, dir.join("diag.log.1"));
+        }
+        let file = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file)),
+        )
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stderr)
+        .with(file)
         .try_init()
         .ok();
+    // A fresh line per process: a "process start" with no heartbeats and
+    // no "subscription live" after it is the revived-but-idle signature
+    // (START_STICKY restarts the service; nothing restarts the loops).
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "process start");
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
     let builder = tauri::Builder::default()
         .manage(ManagedClient {
             client: tokio::sync::OnceCell::new(),
@@ -804,6 +851,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_notification::init())
         .setup(|_app| {
+            init_diagnostics(_app.handle());
             // Android 13+ gates notifications behind a runtime permission;
             // ask once at startup, off the main thread (it shows a dialog).
             #[cfg(mobile)]

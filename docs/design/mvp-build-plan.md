@@ -290,6 +290,27 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   still stalls until app open in the field, but the diagnostic is
   orthogonal to the identity layer (pull-based, no shared surface), so it
   waits until after Stage D closes rather than interleaving with D4.)*
+  *(2026-07-22 — **C4c-i instrumentation built**, diagnosis in progress.
+  Code inspection first: iroh 1.0.2's defaults already keep-alive user
+  connections (5 s heartbeat, 15 s path / 30 s connection idle timeout),
+  so the suspect list is Android-side, not transport-side: (1) Doze
+  freezing timers/network — the phone can't send keepalives OR notice
+  death, parks in `accept_uni` until app open (matches the field
+  symptom exactly; the relay reaps its side in ~30 s, deposits keep
+  landing durably); (2) the battery exemption not actually in effect
+  (prompted once, never verified); (3) OEM process kill; (4) found by
+  inspection: START_STICKY revives the *service* but nothing restarts
+  the Rust subscription loops — a revived process idles until app open.
+  Instrumentation: app tracing → size-capped `diag.log` in the app data
+  dir (stderr layer kept for desktop dev; `zink_client=debug` so
+  reconnect lines show); a 60 s heartbeat task whose gaps/`late_ms` are
+  the freeze detector; "process start" line per process (branch 4's
+  signature: process start, no heartbeats, no "subscription live");
+  Kotlin `diagLog` → logcat + `files/kotlin-diag.log` (exemption status
+  every launch, service started/destroyed/task-removed). Protocol: one
+  overnight — exemption verified, screen off, unplugged, test messages
+  at intervals — then read heartbeat gaps + subscription events against
+  send times; the branch picks the C4c-ii fix.)*
 
 **🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
 (+ Linux desktop), online and offline, with notifications.

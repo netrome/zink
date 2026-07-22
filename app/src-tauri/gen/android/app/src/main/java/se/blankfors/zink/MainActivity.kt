@@ -25,7 +25,11 @@ class MainActivity : TauriActivity() {
    */
   private fun requestBatteryExemption() {
     val power = getSystemService(PowerManager::class.java)
-    if (!power.isIgnoringBatteryOptimizations(packageName)) {
+    val granted = power.isIgnoringBatteryOptimizations(packageName)
+    // C4c-i: the single most likely reason background delivery dies is
+    // this exemption not actually being in effect — log it every launch.
+    diagLog("battery exemption granted: $granted")
+    if (!granted) {
       startActivity(
         Intent(
           Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,

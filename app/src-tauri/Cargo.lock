@@ -7854,6 +7854,7 @@ dependencies = [
  "tauri-plugin-barcode-scanner",
  "tauri-plugin-notification",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "zink-app-dto",
  "zink-client",

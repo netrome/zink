@@ -40,6 +40,21 @@ class DeliveryService : Service() {
     } else {
       startForeground(1, notification)
     }
+    // C4c-i: a "service started" in a fresh process with no Rust
+    // "process start"/heartbeats beside it is the revived-but-idle
+    // signature (START_STICKY restarts this shell, nothing restarts the
+    // subscription loops).
+    diagLog("delivery service started (startId=$startId)")
     return START_STICKY
+  }
+
+  override fun onDestroy() {
+    diagLog("delivery service destroyed")
+    super.onDestroy()
+  }
+
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    diagLog("task removed (app swiped away)")
+    super.onTaskRemoved(rootIntent)
   }
 }

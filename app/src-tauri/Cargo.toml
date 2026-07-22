@@ -23,7 +23,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-barcode-scanner = "2.4.5"
 tauri-plugin-notification = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zink-app-dto = { path = "../dto" }
 zink-client = { version = "0.1.0", path = "../../crates/zink-client" }
