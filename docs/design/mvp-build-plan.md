@@ -3,6 +3,9 @@
 The slice checklist and shared task tracker for reaching a working MVP. Downstream of
 [SPEC.md](../SPEC.md); governed by [../../AGENTS.md](../../AGENTS.md).
 
+> The UX/visual polish pass runs in its own tracker, parallel to this one:
+> [ui-facelift.md](./ui-facelift.md).
+
 **How to use this doc.** We build in small vertical slices, native-first, walking-
 skeleton first. Each slice ends in something *runnable* with focused tests. Check items
 off as they land; add follow-ups inline. Write a short `docs/design/<name>.md` only for
