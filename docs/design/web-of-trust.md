@@ -249,8 +249,7 @@ The drill, end to end — every step an existing primitive plus §3/§4:
   structural — exclusion applies only to automatic reply fan-out, never
   to explicit sends — and the record path carries a repudiated sibling's
   disavowal, since its own record stops being servable.)*
-- **D4c · Recovery acceptance + UI — code complete (2026-07-21), awaiting
-  the live drill.** The §5 drill live: vouch toggle, disavowal warnings,
+- **D4c · Recovery acceptance + UI — done (verified live 2026-07-22).** The §5 drill live: vouch toggle, disavowal warnings,
   un-recognize vs repudiate in the device list, the friend-assisted flow.
   *Done when:* the lost-device drill runs across real devices — contacts
   converge on the new key and stop addressing the old one, each through
@@ -259,9 +258,14 @@ The drill, end to end — every step an existing primitive plus §3/§4:
   warnings say WHO and whether they exclude; the friend-assisted flow
   needed no new mechanism — it is the vouch toggle plus the contact-row
   repudiate, exactly as §5.2 promised.)*
-- **D4d · Fork views.** The §6 concurrency indicator, derived at history
-  build. *Done when:* two clients send concurrently and both render the
-  crossed-in-flight marker on sync, with the linear default unchanged.
+- **D4d · Fork views — done (2026-07-22; D4 complete).** The §6
+  concurrency indicator, derived at history build. *Done when:* two
+  clients send concurrently and both render the crossed-in-flight marker
+  on sync, with the linear default unchanged.
+  *(As built: `ConversationDag::is_ancestor` + `crossed_in_flight` in the
+  pure core; `HistoryMessage.{crossed, merged}`; markers in both edges.
+  Orthogonal to the trust layer, as noted — it shipped last purely as
+  bookkeeping.)*
 
 ## 9. Doc touchpoints when this lands
 

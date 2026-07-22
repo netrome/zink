@@ -448,6 +448,8 @@ async fn messages(
                 .map(|body| String::from_utf8_lossy(&body).into_owned()),
             timestamp_ms: message.timestamp_ms,
             pending: message.pending,
+            crossed: message.crossed,
+            merged: message.merged,
             blobs: message
                 .blob_refs
                 .iter()

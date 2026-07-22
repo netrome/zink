@@ -963,7 +963,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     `AppState` gains `devices` (+ `DeviceRow`/`RecordPreview` DTOs).
     UI wasm bundle + aarch64 debug APK both build; 179 workspace tests
     unchanged (app crates carry no logic, per the README rule).)*
-- [ ] **D4 · Web-of-trust.** 🎯 Third-party profile attestations
+- [x] **D4 · Web-of-trust.** 🎯 Third-party profile attestations
   (endorsements: "your friends call them…"), `Negative` claims +
   repudiation / the social recovery flow, and concurrency-aware message
   views. *(Position confirmed at the 2026-07-19 reorg: D4 layers
@@ -1040,12 +1040,15 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     `.disavowed`, labeled "mårten", resolve-by-name still works. SPEC
     §3.2 voiding rule + §11 row pinned (called out); multi-device.md's
     repudiation-lag + Negative deferrals resolved. 188 tests.)*
-  - [ ] **D4c · Recovery acceptance + UI.** Vouch toggle, disavowal
+  - [x] **D4c · Recovery acceptance + UI.** Vouch toggle, disavowal
     warnings, un-recognize vs repudiate, the friend-assisted flow. *Done
     when:* the lost-device drill runs live — contacts converge on the new
     key and stop addressing the old.
-    *(2026-07-21: code complete — **awaiting the live drill**, which
-    ticks this box. As built: contact rows gain the vouch toggle (with
+    ✅ **Verified live 2026-07-22** — the drill ran across devices: the
+    disavowed warning appeared and replies stopped addressing the
+    repudiated key. (UX polish deliberately deferred with the rest —
+    fundamentals proven.)
+    *(2026-07-21: code complete. As built: contact rows gain the vouch toggle (with
     the honest broadcast framing in the flash message) and a repudiate
     action; device rows split **un-recognize** (local only — losing
     interest) from **repudiate** (published — declaring compromised),
@@ -1068,9 +1071,26 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     a fresh identity, the friend vouches it + repudiates the old key on
     your say-so, and a third participant asking that friend learns all
     three facts.)*
-  - [ ] **D4d · Fork views.** The crossed-in-flight / merge indicators
+  - [x] **D4d · Fork views.** The crossed-in-flight / merge indicators
     from the DAG at history build. *Done when:* concurrent sends render
     the marker on both clients; the linear default unchanged.
+    ✅ *(2026-07-22: `ConversationDag::is_ancestor` (parent-edge BFS; a
+    missing parent is an honest gap, not an edge) +
+    `crossed_in_flight()` — ids causally incomparable with their
+    linearized predecessor; pure, in-core, tested (concurrent pair marks
+    exactly the linearized-second; linear chains mark nothing; the merge
+    that follows both is NOT crossed). `HistoryMessage` gains `crossed`
+    + `merged` (parents > 1); CLI history renders `[⇄ crossed in
+    flight]` / `[merged branches]`, the app's message meta line "⇄
+    crossed in flight" / "⋈ merged branches" — presentation only, the
+    (logical, id) order untouched (tenet 7). e2e: two clients reply
+    concurrently with relays down, cross-deliver, and render identical
+    linear orders with the same message marked on both sides; the next
+    reply renders as the merge it is. 192 tests. **D4 complete — and
+    with it Stage D's critical path: D0–D4 all live; D5 stays
+    deliberately off-path, and the parked pre-deployment items
+    (quarantine view, per-type versions) plus C4c's notification
+    diagnostic are what remain before the MVP is called done.** 🎉)*
 - [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
   device is online and reachable (via D0b connectivity — holepunched direct, or
   relay-routed as fallback), deliver the envelope peer-to-peer over the D0a peer ALPN

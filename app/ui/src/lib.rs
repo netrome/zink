@@ -823,6 +823,16 @@ fn ChatView(
                                 .pending
                                 .then_some(" · ⏳ not delivered yet")
                                 .unwrap_or_default();
+                            // Concurrency markers (D4d): real data, shown —
+                            // the rendered order stays the linear default.
+                            let crossed = message
+                                .crossed
+                                .then_some(" · ⇄ crossed in flight")
+                                .unwrap_or_default();
+                            let merged = message
+                                .merged
+                                .then_some(" · ⋈ merged branches")
+                                .unwrap_or_default();
                             let avatar_key = (!message.mine).then(|| message.sender_key.clone());
                             let deltas: Vec<String> = message
                                 .joined
@@ -845,7 +855,8 @@ fn ChatView(
                                             }
                                         })}
                                     <span class="dim">
-                                        {message.sender} " · " {time_of(message.timestamp_ms)} {delivery}
+                                        {message.sender} " · " {time_of(message.timestamp_ms)}
+                                        {delivery} {crossed} {merged}
                                     </span>
                                     {(!deltas.is_empty())
                                         .then(|| view! { <div class="dim">{deltas.join(" · ")}</div> })}

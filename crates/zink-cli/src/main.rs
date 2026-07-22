@@ -465,9 +465,24 @@ async fn history(args: &[String]) -> Result<(), String> {
             println!("  [- {}]", label(&contacts, key));
         }
         let pending = if message.pending { " [pending]" } else { "" };
+        // Concurrency markers (D4d, tenet 7): real data the linear
+        // default would otherwise hide; the order is unchanged.
+        let crossed = if message.crossed {
+            " [⇄ crossed in flight]"
+        } else {
+            ""
+        };
+        let merged = if message.merged {
+            " [merged branches]"
+        } else {
+            ""
+        };
         match &message.body {
-            Ok(plaintext) => println!("{from}: {}{pending}", String::from_utf8_lossy(plaintext)),
-            Err(e) => println!("{from}: <unopenable: {e}>{pending}"),
+            Ok(plaintext) => println!(
+                "{from}: {}{pending}{crossed}{merged}",
+                String::from_utf8_lossy(plaintext)
+            ),
+            Err(e) => println!("{from}: <unopenable: {e}>{pending}{crossed}{merged}"),
         }
         match &blobs_dir {
             Some(dir) => {

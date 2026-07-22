@@ -94,6 +94,11 @@ pub struct Message {
     /// True while ≥1 relay is still owed this message (outbox, C4a) —
     /// delivery will be retried; render a "not yet delivered" cue.
     pub pending: bool,
+    /// Causally incomparable with the message above it — they crossed in
+    /// flight (D4d, tenet 7). The rendered order is unchanged.
+    pub crossed: bool,
+    /// Merges concurrent branches (more than one parent).
+    pub merged: bool,
     /// The sender's key (hex) when it belongs to no stored contact — the
     /// "who is this?" handle (D1c). `None` for own and contacts' messages.
     pub unknown_sender: Option<String>,

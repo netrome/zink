@@ -839,6 +839,7 @@ impl Client {
             .collect();
         let dag = self.state.load_dag(conversation)?;
         let pending = self.state.pending_messages();
+        let crossed = dag.crossed_in_flight();
         Ok(dag
             .linearize()
             .iter()
@@ -855,6 +856,8 @@ impl Client {
                     pending: pending.contains(&id),
                     joined,
                     left,
+                    crossed: crossed.contains(&id),
+                    merged: envelope.core.parents.len() > 1,
                 }
             })
             .collect())
@@ -2483,6 +2486,11 @@ pub struct HistoryMessage {
     /// and when no parent is held (partial view).
     pub joined: Vec<PublicKey>,
     pub left: Vec<PublicKey>,
+    /// Causally incomparable with the message rendered just above it —
+    /// they crossed in flight (D4d, tenet 7). The order is unchanged.
+    pub crossed: bool,
+    /// Merges concurrent branches (more than one parent).
+    pub merged: bool,
 }
 
 /// One message's participant set: `recipients` ∪ `sender` (signed core).
@@ -3975,6 +3983,94 @@ mod tests {
         assert!(matches!(a.vouch("nobody"), Err(Error::NotAContact(_))));
 
         let _ = std::fs::remove_dir_all(temp_root("vouch"));
+    }
+
+    #[tokio::test]
+    async fn history__should_mark_crossed_in_flight_on_both_clients() {
+        // Given: alice and bob share a genesis, then reply concurrently —
+        // relays down, so neither sees the other's until the copies land
+        let open = |name: &'static str| async move {
+            let key = temp_key("crossed", name);
+            keystore::create(&key).expect("key");
+            Client::open_with(
+                &key,
+                ClientConfig {
+                    connect_timeout: Duration::from_millis(300),
+                },
+            )
+            .await
+            .expect("open")
+        };
+        let alice = open("alice").await;
+        let bob = open("bob").await;
+        let contact = |key: PublicKey| {
+            vec![Contact {
+                keys: vec![key],
+                relays: vec![format!("{}@203.0.113.7:1", hex::encode(&key.0))],
+            }]
+        };
+        let result = alice
+            .send(&contact(bob.public_key()), b"genesis".to_vec(), vec![])
+            .await;
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        let conversation = alice.state.conversations()[0];
+        let copy = |from: &Client, to: &Client| {
+            for envelope in from.state.load_envelopes(conversation).expect("load") {
+                to.state
+                    .store_envelope(conversation, &envelope)
+                    .expect("copy");
+            }
+        };
+        copy(&alice, &bob);
+
+        // When: concurrent replies, then cross-delivery
+        let _ = alice
+            .send_in(
+                conversation,
+                &contact(bob.public_key()),
+                b"from alice".to_vec(),
+                vec![],
+            )
+            .await;
+        let _ = bob
+            .send_in(
+                conversation,
+                &contact(alice.public_key()),
+                b"from bob".to_vec(),
+                vec![],
+            )
+            .await;
+        copy(&alice, &bob);
+        copy(&bob, &alice);
+
+        // Then: identical linear order on both sides — and both mark the
+        // linearized-second of the concurrent pair, nothing else
+        let history_a = alice.history(conversation).expect("history");
+        let history_b = bob.history(conversation).expect("history");
+        let order_a: Vec<MessageId> = history_a.iter().map(|m| m.id).collect();
+        let order_b: Vec<MessageId> = history_b.iter().map(|m| m.id).collect();
+        assert_eq!(order_a, order_b, "the linear default is unchanged");
+        assert_eq!(history_a.len(), 3);
+        for history in [&history_a, &history_b] {
+            assert!(!history[0].crossed && !history[1].crossed);
+            assert!(history[2].crossed, "the second of the concurrent pair");
+            assert!(history.iter().all(|m| !m.merged));
+        }
+
+        // And: the next reply sees both heads — it renders as the merge
+        // it is, not as crossed
+        let _ = alice
+            .send_in(
+                conversation,
+                &contact(bob.public_key()),
+                b"merge".to_vec(),
+                vec![],
+            )
+            .await;
+        let history_a = alice.history(conversation).expect("history");
+        assert!(history_a[3].merged && !history_a[3].crossed);
+
+        let _ = std::fs::remove_dir_all(temp_root("crossed"));
     }
 
     #[tokio::test]

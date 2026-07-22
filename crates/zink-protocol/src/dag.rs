@@ -128,6 +128,41 @@ impl ConversationDag {
         keyed.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// Ids that are causally incomparable with their `linearize`
+    /// predecessor — pairs the deterministic default renders adjacent but
+    /// which actually **crossed in flight** (tenet 7: concurrency is real
+    /// data; web-of-trust.md §6). Presentation data only; the linear
+    /// order itself is untouched.
+    pub fn crossed_in_flight(&self) -> BTreeSet<MessageId> {
+        let order = self.linearize();
+        order
+            .windows(2)
+            .filter(|pair| !self.is_ancestor(pair[0], pair[1]))
+            .map(|pair| pair[1])
+            .collect()
+    }
+
+    /// Whether `ancestor` is reachable from `descendant` through parent
+    /// edges — the causal-order test. A message is not its own ancestor.
+    pub fn is_ancestor(&self, ancestor: MessageId, descendant: MessageId) -> bool {
+        let mut pending = vec![descendant];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            let Some(core) = self.messages.get(&id) else {
+                continue; // a missing parent is an honest gap, not an edge
+            };
+            for parent in &core.parents {
+                if *parent == ancestor {
+                    return true;
+                }
+                if seen.insert(*parent) {
+                    pending.push(*parent);
+                }
+            }
+        }
+        false
+    }
+
     /// Lamport value for the next message sent from this view.
     pub fn next_logical(&self) -> u64 {
         1 + self
@@ -250,6 +285,68 @@ mod tests {
             key_commit: KeyCommitment([0; 32]),
             blob_refs: vec![],
         }
+    }
+
+    #[test]
+    fn crossed_in_flight__should_mark_concurrent_neighbors_and_only_them() {
+        // Given: genesis → A, and B concurrent with A (same parent); then
+        // C merging both — the classic crossed-in-flight fork
+        let mut dag = ConversationDag::new(genesis()).unwrap();
+        let root = dag.conversation();
+        let a = message(&dag, vec![root], 1, 0, 2, 1);
+        let b = message(&dag, vec![root], 1, 0, 3, 2);
+        dag.insert(a.clone()).unwrap();
+        dag.insert(b.clone()).unwrap();
+        let c = message(&dag, vec![a.id(), b.id()], 2, 1, 2, 3);
+        dag.insert(c.clone()).unwrap();
+
+        // When
+        let crossed = dag.crossed_in_flight();
+
+        // Then: exactly the linearized-second of the concurrent pair is
+        // marked — the chain edges (genesis→first, merge) are not
+        let order = dag.linearize();
+        assert_eq!(order.len(), 4);
+        assert_eq!(crossed.len(), 1);
+        assert!(crossed.contains(&order[2]), "the second of the A/B pair");
+        assert!(!crossed.contains(&order[1]));
+        assert!(!crossed.contains(&c.id()), "the merge follows both");
+    }
+
+    #[test]
+    fn crossed_in_flight__should_be_empty_for_a_linear_chain() {
+        // Given
+        let mut dag = ConversationDag::new(genesis()).unwrap();
+        let a = message(&dag, vec![dag.conversation()], 1, 0, 2, 1);
+        dag.insert(a.clone()).unwrap();
+        let b = message(&dag, vec![a.id()], 2, 1, 2, 2);
+        dag.insert(b).unwrap();
+
+        // When / Then
+        assert!(dag.crossed_in_flight().is_empty());
+    }
+
+    #[test]
+    fn is_ancestor__should_follow_parent_edges_and_nothing_else() {
+        // Given: genesis → A → B, with X concurrent to both
+        let mut dag = ConversationDag::new(genesis()).unwrap();
+        let root = dag.conversation();
+        let a = message(&dag, vec![root], 1, 0, 2, 1);
+        dag.insert(a.clone()).unwrap();
+        let b = message(&dag, vec![a.id()], 2, 1, 2, 2);
+        dag.insert(b.clone()).unwrap();
+        let x = message(&dag, vec![root], 1, 0, 3, 3);
+        dag.insert(x.clone()).unwrap();
+
+        // Then
+        assert!(dag.is_ancestor(root, b.id()));
+        assert!(dag.is_ancestor(a.id(), b.id()));
+        assert!(!dag.is_ancestor(b.id(), a.id()), "never backwards");
+        assert!(
+            !dag.is_ancestor(x.id(), b.id()),
+            "concurrency is not descent"
+        );
+        assert!(!dag.is_ancestor(b.id(), b.id()), "not its own ancestor");
     }
 
     #[test]

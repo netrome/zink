@@ -81,6 +81,9 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 // wholesale, so unvouch propagates by absence. LearnedName gains
 // endorsed_by; ranking: self-claimed names > endorsed-only, then
 // revision, then agreement.
+// fork views (D4d, web-of-trust.md §6): HistoryMessage.{crossed, merged}
+// from ConversationDag::{crossed_in_flight, is_ancestor} — presentation
+// data; the (logical, id) linear default is untouched (tenet 7).
 // repudiation (D4b, web-of-trust.md §4/§5): repudiate(key) — signs the
 // Negative above every claim of ours it must void, stores it as the
 // current stance (one latest claim per subject in vouches/), publishes
