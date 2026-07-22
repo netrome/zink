@@ -234,7 +234,7 @@ Same format as the MVP plan. **Definition of done (every slice):** runnable /
 WASM UI builds · `cargo fmt` + `clippy` clean (Rust touched) · the app runs and
 the change is visible on device where relevant · this doc updated.
 
-- [ ] **U1 · Design tokens + safe-area fix.** The CSS custom properties of §5
+- [x] **U1 · Design tokens + safe-area fix.** The CSS custom properties of §5
   in `dist/index.html`; recolor the existing UI from teal → violet + zinc with
   no structural change yet; type scale; button roles; `viewport-fit=cover` +
   `100dvh` + `env(safe-area-inset-bottom)`. *Done when:* the app is visibly
