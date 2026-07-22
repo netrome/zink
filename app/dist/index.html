@@ -2,46 +2,123 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- viewport-fit=cover: draw edge-to-edge so env(safe-area-inset-*) is
+       non-zero and we can pad clear of the phone's system bars (U1). -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>zink</title>
   <style>
+    /* Design tokens (ui-facelift.md §5): violet accent from the logo, zinc
+       neutrals, semantic state colors. Light + dark. Every rule below styles
+       from these — no hard-coded colors. */
+    :root {
+      --accent:        #7c3aed;  /* violet-600 — the logo */
+      --accent-strong: #6d28d9;  /* pressed / active */
+      --accent-weak:   #ede9fe;  /* own-message bubble tint */
+      --bg:            #fafafa;
+      --surface:       #ffffff;
+      --surface-alt:   #f4f4f5;  /* incoming bubble, inactive tab, rows */
+      --border:        #e4e4e7;
+      --text:          #18181b;  /* zinc-900 */
+      --muted:         #71717a;  /* zinc-500 — timestamps, hints */
+      --danger:        #dc2626;
+      --ok:            #16a34a;
+      --warn:          #b45309;  /* the "wild key" attention accent */
+      --radius:        10px;
+      --radius-sm:     6px;
+      --tap:           44px;     /* min touch target */
+      --text-xs:       .75rem;
+      --text-sm:       .875rem;
+      --text-title:    1.25rem;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --accent:        #a78bfa;  /* violet-400 — the logo's dark variant */
+        --accent-strong: #8b5cf6;
+        --accent-weak:   #2e1065;
+        --bg:            #0b0b0f;
+        --surface:       #18181b;
+        --surface-alt:   #27272a;
+        --border:        #3f3f46;
+        --text:          #fafafa;
+        --muted:         #a1a1aa;
+        --danger:        #f87171;
+        --ok:            #4ade80;
+        --warn:          #fbbf24;
+      }
+    }
+
     * { box-sizing: border-box; }
     body {
       font-family: system-ui, sans-serif; max-width: 28rem; margin: 0 auto;
-      padding: .5rem 1rem; display: flex; flex-direction: column;
-      min-height: 100vh;
+      /* Safe-area padding (U1): clears the top status bar / notch and the
+         bottom gesture/nav bar, so the composer's send button is reachable
+         without rotating the phone. */
+      padding: calc(.5rem + env(safe-area-inset-top)) 1rem
+               calc(.5rem + env(safe-area-inset-bottom));
+      display: flex; flex-direction: column; min-height: 100dvh;
+      background: var(--bg); color: var(--text);
+      -webkit-font-smoothing: antialiased;
     }
     header { display: flex; gap: .4rem; padding: .3rem 0 .5rem; }
-    header button { flex: 1; background: #ddd; color: #333; }
-    header button.active { background: #0e6b64; color: #fff; }
+    header button { flex: 1; background: var(--surface-alt); color: var(--muted); }
+    header button.active { background: var(--accent); color: #fff; }
     main { flex: 1; display: flex; flex-direction: column; }
-    h3 { margin: 1rem 0 .4rem; border-bottom: 1px solid #ddd; }
-    input, textarea, select, button {
-      width: 100%; font-size: 1rem; padding: .55rem; margin: .2rem 0 .4rem;
+    h3 {
+      margin: 1rem 0 .4rem; padding-bottom: .3rem; font-size: var(--text-title);
+      border-bottom: 1px solid var(--border);
     }
-    button { background: #0e6b64; color: #fff; border: none; border-radius: .4rem; }
-    button.secondary { background: #555; }
-    #status { min-height: 1.3em; font-size: .9rem; }
-    .ok { color: green; } .err { color: crimson; }
-    #qr { text-align: center; margin: .5rem 0; }
+
+    /* Text inputs / textareas / selects: full-width form controls. Checkboxes
+       keep native rendering (excluded from the box styling). */
+    input, textarea, select, button {
+      font-size: 1rem; font-family: inherit; margin: .2rem 0 .4rem;
+    }
+    input:not([type=checkbox]), textarea, select {
+      width: 100%; padding: .55rem; color: var(--text); background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius);
+    }
+    textarea { resize: vertical; }
+
+    /* Button roles (U1): primary (filled violet), secondary (ghost/outline),
+       danger (red outline). Full-width block by default. */
+    button {
+      width: 100%; min-height: var(--tap); padding: .55rem; cursor: pointer;
+      font-weight: 500; color: #fff; background: var(--accent);
+      border: none; border-radius: var(--radius);
+    }
+    button:active { background: var(--accent-strong); }
+    button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    button.secondary:active { background: var(--surface-alt); }
+    button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* Inline row/pick actions: compact, auto-width — not stacked full-width blocks. */
+    .row button, .picks button {
+      width: auto; min-height: auto; padding: .3rem .6rem; margin: 0;
+      font-size: var(--text-sm);
+    }
+
+    #status { min-height: 1.3em; font-size: var(--text-sm); }
+    .ok { color: var(--ok); } .err { color: var(--danger); }
+    /* White plate keeps the QR scannable in dark mode (dark modules). */
+    #qr { text-align: center; margin: .5rem 0; background: #fff; padding: .5rem; border-radius: var(--radius); }
     #qr svg { max-width: 240px; }
-    #record-text { font-family: monospace; font-size: .6rem; word-break: break-all; color: #777; }
-    .row { padding: .55rem .2rem; border-bottom: 1px solid #eee; cursor: pointer; }
+    #record-text { font-family: ui-monospace, monospace; font-size: var(--text-xs); word-break: break-all; color: var(--muted); }
+    .row { padding: .55rem .2rem; border-bottom: 1px solid var(--border); cursor: pointer; }
     .row b { margin-right: .5rem; }
-    .dim { color: #888; font-size: .8rem; }
-    .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; }
-    .msg { max-width: 85%; align-self: flex-start; background: #eee;
-           border-radius: .6rem; padding: .4rem .6rem; word-break: break-word; }
-    .msg.mine { align-self: flex-end; background: #d3ece9; }
+    .dim { color: var(--muted); font-size: var(--text-sm); }
+    .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; padding: .4rem 0; }
+    .msg { max-width: 85%; align-self: flex-start; background: var(--surface-alt);
+           border-radius: var(--radius); padding: .4rem .6rem; word-break: break-word; }
+    .msg.mine { align-self: flex-end; background: var(--accent-weak); }
     .compose { margin-top: auto; padding-top: .5rem; }
     .thumb { display: block; max-width: 12rem; max-height: 12rem;
-             border-radius: .4rem; margin: .2rem 0; cursor: pointer; }
-    .panel { border: 1px solid #ccc; border-radius: .5rem; padding: .5rem; margin: .4rem 0; }
+             border-radius: var(--radius-sm); margin: .2rem 0; cursor: pointer; }
+    .panel { border: 1px solid var(--border); border-radius: var(--radius); padding: .5rem; margin: .4rem 0; background: var(--surface); }
     .avatar { width: 2rem; height: 2rem; border-radius: 50%; object-fit: cover; vertical-align: middle; }
     .picks { display: flex; flex-wrap: wrap; gap: .3rem .8rem; align-items: center; margin-bottom: .3rem; }
     .pick { white-space: nowrap; }
-    .wild { border-left: 3px solid #e8b339; padding-left: .5rem; margin: .3rem 0; }
+    .wild { border-left: 3px solid var(--warn); padding-left: .5rem; margin: .3rem 0; }
     .avatar-lg { width: 3.5rem; height: 3.5rem; }
     .panel .row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
     .pending { display: flex; align-items: center; gap: .5rem; }
@@ -55,7 +132,8 @@
     html.scanning, html.scanning body { background: transparent; }
     html.scanning header, html.scanning #status,
     html.scanning main > :not(.scan-overlay) { display: none; }
-    .scan-overlay { position: fixed; inset: auto 0 2rem 0; z-index: 20;
+    .scan-overlay { position: fixed; z-index: 20;
+                    inset: auto 0 calc(2rem + env(safe-area-inset-bottom)) 0;
                     display: flex; flex-direction: column; gap: .5rem;
                     align-items: center; }
     .scan-overlay span { color: #fff; text-shadow: 0 1px 3px #000; }
