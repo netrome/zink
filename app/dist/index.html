@@ -51,18 +51,28 @@
     * { box-sizing: border-box; }
     body {
       font-family: system-ui, sans-serif; max-width: 28rem; margin: 0 auto;
-      /* Safe-area padding (U1): clears the top status bar / notch and the
-         bottom gesture/nav bar, so the composer's send button is reachable
-         without rotating the phone. */
-      padding: calc(.5rem + env(safe-area-inset-top)) 1rem
-               calc(.5rem + env(safe-area-inset-bottom));
+      /* Safe-area padding: top status bar / notch here; the bottom inset now
+         lives on the sticky .tabbar (U2), so the tab row clears the phone's
+         gesture/nav bar and the composer sits above it. */
+      padding: calc(.5rem + env(safe-area-inset-top)) 1rem 0;
       display: flex; flex-direction: column; min-height: 100dvh;
       background: var(--bg); color: var(--text);
       -webkit-font-smoothing: antialiased;
     }
-    header { display: flex; gap: .4rem; padding: .3rem 0 .5rem; }
-    header button { flex: 1; background: var(--surface-alt); color: var(--muted); }
-    header button.active { background: var(--accent); color: #fff; }
+    /* Bottom tab bar (U2): sticky to the viewport bottom, safe-area padded so
+       it clears the phone's gesture/nav bar and stays put while content
+       scrolls. Active tab reads as a violet pill. */
+    .tabbar {
+      position: sticky; bottom: 0; z-index: 5;
+      display: flex; gap: .4rem; margin-top: .5rem;
+      padding: .3rem 0 calc(.3rem + env(safe-area-inset-bottom));
+      background: var(--bg); border-top: 1px solid var(--border);
+    }
+    .tabbar button {
+      flex: 1; min-height: var(--tap); background: transparent; color: var(--muted);
+      border: none; border-radius: var(--radius); font-weight: 500;
+    }
+    .tabbar button.active { color: var(--accent); background: var(--accent-weak); }
     main { flex: 1; display: flex; flex-direction: column; }
     h3 {
       margin: 1rem 0 .4rem; padding-bottom: .3rem; font-size: var(--text-title);
@@ -130,7 +140,7 @@
     /* windowed QR scan: camera renders behind the webview — page goes
        transparent, everything hides except the cancel overlay */
     html.scanning, html.scanning body { background: transparent; }
-    html.scanning header, html.scanning #status,
+    html.scanning .tabbar, html.scanning #status,
     html.scanning main > :not(.scan-overlay) { display: none; }
     .scan-overlay { position: fixed; z-index: 20;
                     inset: auto 0 calc(2rem + env(safe-area-inset-bottom)) 0;

@@ -27,7 +27,8 @@ pub fn start() {
 enum View {
     Chats,
     Chat { id: String, label: String },
-    Contacts,
+    People,
+    Me,
 }
 
 #[derive(Serialize)]
@@ -49,9 +50,9 @@ fn App() -> impl IntoView {
         spawn_local(async move {
             match invoke::invoke::<AppState>("app_state", &NoArgs {}).await {
                 Ok(loaded) => {
-                    // First run: no profile yet → straight to the setup view.
+                    // First run: no profile yet → straight to the Me setup view.
                     if loaded.name.is_none() {
-                        view.set(View::Contacts);
+                        view.set(View::Me);
                     }
                     state.set(Some(loaded));
                 }
@@ -114,26 +115,6 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        <header>
-            <button
-                class:active=move || matches!(view.get(), View::Chats | View::Chat { .. })
-                on:click=move |_| {
-                    load_conversations();
-                    view.set(View::Chats);
-                }
-            >
-                "chats"
-            </button>
-            <button
-                class:active=move || view.get() == View::Contacts
-                on:click=move |_| {
-                    load_state();
-                    view.set(View::Contacts);
-                }
-            >
-                "contacts"
-            </button>
-        </header>
         <div
             id="status"
             class=move || status.get().1
@@ -164,11 +145,44 @@ fn App() -> impl IntoView {
                 />
             }
             .into_any(),
-            View::Contacts => view! {
-                <ContactsView state=state reload=load_state ok=ok err=err />
+            View::People => view! {
+                <PeopleView state=state reload=load_state ok=ok err=err />
+            }
+            .into_any(),
+            View::Me => view! {
+                <MeView state=state reload=load_state ok=ok err=err />
             }
             .into_any(),
         }}
+        <nav class="tabbar">
+            <button
+                class:active=move || matches!(view.get(), View::Chats | View::Chat { .. })
+                on:click=move |_| {
+                    load_conversations();
+                    view.set(View::Chats);
+                }
+            >
+                "Chats"
+            </button>
+            <button
+                class:active=move || view.get() == View::People
+                on:click=move |_| {
+                    load_state();
+                    view.set(View::People);
+                }
+            >
+                "People"
+            </button>
+            <button
+                class:active=move || view.get() == View::Me
+                on:click=move |_| {
+                    load_state();
+                    view.set(View::Me);
+                }
+            >
+                "Me"
+            </button>
+        </nav>
     }
 }
 
@@ -947,10 +961,12 @@ fn ChatView(
     }
 }
 
-/// Profile (name + home relay + QR) and contact management — the C2 flows,
-/// ported: display/copy your record, scan or paste a friend's.
+/// "Me" — your own identity: profile (name, home relay, avatar, QR), your
+/// recognized devices, and device pairing. The C2/D3e flows, unchanged — the
+/// U2 screen split just homes them here. Its scan always pairs (previews a
+/// record before signing); the contact-adding scan lives in `PeopleView`.
 #[component]
-fn ContactsView(
+fn MeView(
     state: RwSignal<Option<AppState>>,
     reload: impl Fn() + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
@@ -958,6 +974,7 @@ fn ContactsView(
 ) -> impl IntoView {
     let name = RwSignal::new(String::new());
     let relay = RwSignal::new(String::new());
+    // Pairing paste buffer (a device record to recognize).
     let paste = RwSignal::new(String::new());
 
     // Prefill the form from the loaded profile (once per state change).
@@ -989,118 +1006,6 @@ fn ContactsView(
                     reload();
                     ok("profile saved — let a friend scan your QR");
                 }
-                Err(e) => err(e),
-            }
-        });
-    };
-
-    let add = move |payload: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                payload: &'a str,
-                petname: Option<&'a str>,
-            }
-            let args = Args {
-                payload: &payload,
-                petname: None,
-            };
-            match invoke::invoke::<String>("add_contact", &args).await {
-                Ok(petname) => {
-                    paste.set(String::new());
-                    reload();
-                    ok(&format!("added {petname}"));
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
-
-    // Pair mode (D3e, multi-device.md §3): a scanned/pasted record is
-    // previewed — name + full-key fingerprint — and NOTHING is signed
-    // until the explicit confirm. `pair_scan` routes the next scan result
-    // into the preview instead of add_contact.
-    let pair_scan = RwSignal::new(false);
-    let pair_preview = RwSignal::new(None::<(String, RecordPreview)>);
-    let preview = move |payload: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                payload: &'a str,
-            }
-            let args = Args { payload: &payload };
-            match invoke::invoke::<RecordPreview>("inspect_record", &args).await {
-                Ok(decoded) => pair_preview.set(Some((payload, decoded))),
-                Err(e) => err(e),
-            }
-        });
-    };
-    let recognize = move |payload: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                payload: &'a str,
-            }
-            let args = Args { payload: &payload };
-            match invoke::invoke::<String>("recognize_device", &args).await {
-                Ok(name) => {
-                    pair_preview.set(None);
-                    paste.set(String::new());
-                    reload();
-                    ok(&format!(
-                        "recognized {name} as your device — scan back from it \
-                         to pair both ways"
-                    ));
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
-
-    // Scanning state drives the cancel overlay AND page transparency: with
-    // `windowed: true` the camera renders *behind* the webview, so html/body
-    // must go transparent (the `scanning` class) for it to show through —
-    // and our own overlay stays on top with a way out (the C2 footgun).
-    let scanning = RwSignal::new(false);
-    Effect::new(move |_| {
-        if let Some(root) = document().document_element() {
-            root.set_class_name(if scanning.get() { "scanning" } else { "" });
-        }
-    });
-
-    let scan = move |_| {
-        scanning.set(true);
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct ScanArgs {
-                windowed: bool,
-                formats: Vec<&'static str>,
-            }
-            #[derive(serde::Deserialize)]
-            struct Scanned {
-                content: String,
-            }
-            if let Err(e) = invoke::invoke::<serde::de::IgnoredAny>(
-                "plugin:barcode-scanner|request_permissions",
-                &NoArgs {},
-            )
-            .await
-            {
-                scanning.set(false);
-                return err(e);
-            }
-            let args = ScanArgs {
-                windowed: true,
-                formats: vec!["QR_CODE"],
-            };
-            let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
-            scanning.set(false);
-            match result {
-                // Pair mode previews (confirm before signing); the normal
-                // path adds a contact.
-                Ok(scanned) if pair_scan.get_untracked() => preview(scanned.content),
-                Ok(scanned) => add(scanned.content),
-                // A cancelled scan also lands here — worth no red banner.
                 Err(e) => err(e),
             }
         });
@@ -1147,107 +1052,39 @@ fn ContactsView(
         });
     };
 
-    // Contact avatars, lazily fetched per row (same pattern as the chat).
-    let contact_avatars = RwSignal::new(HashMap::<String, String>::new());
-    Effect::new(move |_| {
-        for contact in state.get().map(|state| state.contacts).unwrap_or_default() {
-            let key = contact.key;
-            if key.is_empty()
-                || contact_avatars.with_untracked(|avatars| avatars.contains_key(&key))
-            {
-                continue;
-            }
-            contact_avatars.update(|avatars| {
-                avatars.insert(key.clone(), String::new());
-            });
-            spawn_local(async move {
-                if let Ok(Some(url)) = avatar_data_url(&key).await {
-                    contact_avatars.update(|avatars| {
-                        avatars.insert(key, url);
-                    });
-                }
-            });
-        }
-    });
-
-    // Freshness pull (D1c, who-is-this.md §7): re-ask the network about a
-    // contact. Fresh answers land in the learned store and sharpen relay
-    // resolution on their own — nothing to apply, nothing overwritten.
-    let refresh_contact = move |subject: String| {
+    // Pair mode (D3e, multi-device.md §3): a scanned/pasted record is
+    // previewed — name + full-key fingerprint — and NOTHING is signed
+    // until the explicit confirm.
+    let pair_preview = RwSignal::new(None::<(String, RecordPreview)>);
+    let preview = move |payload: String| {
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
-                subject: &'a str,
+                payload: &'a str,
             }
-            let args = Args { subject: &subject };
-            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
-                Ok(report) => {
+            let args = Args { payload: &payload };
+            match invoke::invoke::<RecordPreview>("inspect_record", &args).await {
+                Ok(decoded) => pair_preview.set(Some((payload, decoded))),
+                Err(e) => err(e),
+            }
+        });
+    };
+    let recognize = move |payload: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+            }
+            let args = Args { payload: &payload };
+            match invoke::invoke::<String>("recognize_device", &args).await {
+                Ok(name) => {
+                    pair_preview.set(None);
+                    paste.set(String::new());
+                    reload();
                     ok(&format!(
-                        "{} answer(s) (asked {}, {} unreachable) — fresh records apply automatically",
-                        report.answers, report.asked, report.unreachable
+                        "recognized {name} as your device — scan back from it \
+                         to pair both ways"
                     ));
-                    // A fresh answer can carry a new avatar claim (De3):
-                    // re-fetch past any recorded miss.
-                    if let Ok(Some(url)) = avatar_data_url(&subject).await {
-                        contact_avatars.update(|avatars| {
-                            avatars.insert(subject, url);
-                        });
-                    }
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
-
-    let cancel_scan = move |_| {
-        spawn_local(async move {
-            // Rejects the pending scan invoke, which resets `scanning`.
-            let _ = invoke::invoke::<serde::de::IgnoredAny>(
-                "plugin:barcode-scanner|cancel",
-                &NoArgs {},
-            )
-            .await;
-        });
-    };
-
-    // D4c: vouching and repudiation. Repudiation is armed-then-confirmed
-    // (two taps) — it publishes.
-    let toggle_vouch = move |petname: String, vouched: bool| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                petname: &'a str,
-            }
-            let args = Args { petname: &petname };
-            let command = if vouched { "unvouch" } else { "vouch" };
-            match invoke::invoke::<serde::de::IgnoredAny>(command, &args).await {
-                Ok(_) => {
-                    reload();
-                    ok(if vouched {
-                        "no longer vouching for them"
-                    } else {
-                        "vouching — shares the name you call them with anyone \
-                         who asks you about them"
-                    });
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
-    let armed = RwSignal::new(None::<String>);
-    let repudiate = move |key: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                key: &'a str,
-            }
-            let args = Args { key: &key };
-            match invoke::invoke::<serde::de::IgnoredAny>("repudiate_key", &args).await {
-                Ok(_) => {
-                    armed.set(None);
-                    reload();
-                    ok("repudiated — published in your record; contacts learn \
-                        it from their next pull");
                 }
                 Err(e) => err(e),
             }
@@ -1267,6 +1104,83 @@ fn ContactsView(
                 }
                 Err(e) => err(e),
             }
+        });
+    };
+    // Repudiation of a device key (D4c) — armed-then-confirmed (two taps); it
+    // publishes.
+    let armed = RwSignal::new(None::<String>);
+    let repudiate = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("repudiate_key", &args).await {
+                Ok(_) => {
+                    armed.set(None);
+                    reload();
+                    ok("repudiated — published in your record; contacts learn \
+                        it from their next pull");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Scanning state drives the cancel overlay AND page transparency: with
+    // `windowed: true` the camera renders *behind* the webview, so html/body
+    // must go transparent (the `scanning` class) for it to show through —
+    // and our own overlay stays on top with a way out (the C2 footgun).
+    let scanning = RwSignal::new(false);
+    Effect::new(move |_| {
+        if let Some(root) = document().document_element() {
+            root.set_class_name(if scanning.get() { "scanning" } else { "" });
+        }
+    });
+    let scan = move |_| {
+        scanning.set(true);
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct ScanArgs {
+                windowed: bool,
+                formats: Vec<&'static str>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Scanned {
+                content: String,
+            }
+            if let Err(e) = invoke::invoke::<serde::de::IgnoredAny>(
+                "plugin:barcode-scanner|request_permissions",
+                &NoArgs {},
+            )
+            .await
+            {
+                scanning.set(false);
+                return err(e);
+            }
+            let args = ScanArgs {
+                windowed: true,
+                formats: vec!["QR_CODE"],
+            };
+            let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
+            scanning.set(false);
+            match result {
+                // Always pair mode here — preview before signing.
+                Ok(scanned) => preview(scanned.content),
+                // A cancelled scan also lands here — worth no red banner.
+                Err(e) => err(e),
+            }
+        });
+    };
+    let cancel_scan = move |_| {
+        spawn_local(async move {
+            // Rejects the pending scan invoke, which resets `scanning`.
+            let _ = invoke::invoke::<serde::de::IgnoredAny>(
+                "plugin:barcode-scanner|cancel",
+                &NoArgs {},
+            )
+            .await;
         });
     };
 
@@ -1374,10 +1288,16 @@ fn ContactsView(
                         .into_any()
                 }
             }}
-            <button on:click=move |ev| {
-                pair_scan.set(true);
-                scan(ev);
-            }>"pair: scan a device's QR"</button>
+            <button on:click=scan>"pair: scan a device's QR"</button>
+            <textarea
+                rows="2"
+                placeholder="…or paste a ZINK: payload to pair"
+                prop:value=move || paste.get()
+                on:input=move |ev| paste.set(event_target_value(&ev))
+            />
+            <button class="secondary" on:click=move |_| preview(paste.get_untracked())>
+                "pair from pasted text"
+            </button>
             {move || {
                 pair_preview
                     .get()
@@ -1412,11 +1332,211 @@ fn ContactsView(
                         }
                     })
             }}
+            {move || {
+                scanning
+                    .get()
+                    .then(|| {
+                        view! {
+                            <div class="scan-overlay">
+                                <span>"point the camera at a zink QR"</span>
+                                <button class="secondary" on:click=cancel_scan>
+                                    "cancel"
+                                </button>
+                            </div>
+                        }
+                    })
+            }}
+        </main>
+    }
+}
+
+/// "People" — your contacts: adding one (scan / paste) and the list with its
+/// identity actions (who-is freshness pull, vouch, repudiate). The C2/D1/D4
+/// flows, unchanged — the U2 screen split homes them here. Its scan always
+/// adds a contact; the device-pairing scan lives in `MeView`.
+#[component]
+fn PeopleView(
+    state: RwSignal<Option<AppState>>,
+    reload: impl Fn() + Copy + Send + 'static,
+    ok: impl Fn(&str) + Copy + Send + 'static,
+    err: impl Fn(String) + Copy + Send + 'static,
+) -> impl IntoView {
+    let paste = RwSignal::new(String::new());
+
+    let add = move |payload: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+                petname: Option<&'a str>,
+            }
+            let args = Args {
+                payload: &payload,
+                petname: None,
+            };
+            match invoke::invoke::<String>("add_contact", &args).await {
+                Ok(petname) => {
+                    paste.set(String::new());
+                    reload();
+                    ok(&format!("added {petname}"));
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Contact avatars, lazily fetched per row (same pattern as the chat).
+    let contact_avatars = RwSignal::new(HashMap::<String, String>::new());
+    Effect::new(move |_| {
+        for contact in state.get().map(|state| state.contacts).unwrap_or_default() {
+            let key = contact.key;
+            if key.is_empty()
+                || contact_avatars.with_untracked(|avatars| avatars.contains_key(&key))
+            {
+                continue;
+            }
+            contact_avatars.update(|avatars| {
+                avatars.insert(key.clone(), String::new());
+            });
+            spawn_local(async move {
+                if let Ok(Some(url)) = avatar_data_url(&key).await {
+                    contact_avatars.update(|avatars| {
+                        avatars.insert(key, url);
+                    });
+                }
+            });
+        }
+    });
+
+    // Freshness pull (D1c, who-is-this.md §7): re-ask the network about a
+    // contact. Fresh answers land in the learned store and sharpen relay
+    // resolution on their own — nothing to apply, nothing overwritten.
+    let refresh_contact = move |subject: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &subject };
+            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
+                Ok(report) => {
+                    ok(&format!(
+                        "{} answer(s) (asked {}, {} unreachable) — fresh records apply automatically",
+                        report.answers, report.asked, report.unreachable
+                    ));
+                    // A fresh answer can carry a new avatar claim (De3):
+                    // re-fetch past any recorded miss.
+                    if let Ok(Some(url)) = avatar_data_url(&subject).await {
+                        contact_avatars.update(|avatars| {
+                            avatars.insert(subject, url);
+                        });
+                    }
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // D4c: vouching and repudiation. Repudiation is armed-then-confirmed
+    // (two taps) — it publishes.
+    let toggle_vouch = move |petname: String, vouched: bool| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                petname: &'a str,
+            }
+            let args = Args { petname: &petname };
+            let command = if vouched { "unvouch" } else { "vouch" };
+            match invoke::invoke::<serde::de::IgnoredAny>(command, &args).await {
+                Ok(_) => {
+                    reload();
+                    ok(if vouched {
+                        "no longer vouching for them"
+                    } else {
+                        "vouching — shares the name you call them with anyone \
+                         who asks you about them"
+                    });
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    let armed = RwSignal::new(None::<String>);
+    let repudiate = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("repudiate_key", &args).await {
+                Ok(_) => {
+                    armed.set(None);
+                    reload();
+                    ok("repudiated — published in your record; contacts learn \
+                        it from their next pull");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Scanning state drives the cancel overlay AND page transparency (see the
+    // note in `MeView`). This scan always adds a contact.
+    let scanning = RwSignal::new(false);
+    Effect::new(move |_| {
+        if let Some(root) = document().document_element() {
+            root.set_class_name(if scanning.get() { "scanning" } else { "" });
+        }
+    });
+    let scan = move |_| {
+        scanning.set(true);
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct ScanArgs {
+                windowed: bool,
+                formats: Vec<&'static str>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Scanned {
+                content: String,
+            }
+            if let Err(e) = invoke::invoke::<serde::de::IgnoredAny>(
+                "plugin:barcode-scanner|request_permissions",
+                &NoArgs {},
+            )
+            .await
+            {
+                scanning.set(false);
+                return err(e);
+            }
+            let args = ScanArgs {
+                windowed: true,
+                formats: vec!["QR_CODE"],
+            };
+            let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
+            scanning.set(false);
+            match result {
+                Ok(scanned) => add(scanned.content),
+                // A cancelled scan also lands here — worth no red banner.
+                Err(e) => err(e),
+            }
+        });
+    };
+    let cancel_scan = move |_| {
+        spawn_local(async move {
+            let _ = invoke::invoke::<serde::de::IgnoredAny>(
+                "plugin:barcode-scanner|cancel",
+                &NoArgs {},
+            )
+            .await;
+        });
+    };
+
+    view! {
+        <main>
             <h3>"add contact"</h3>
-            <button on:click=move |ev| {
-                pair_scan.set(false);
-                scan(ev);
-            }>"scan QR"</button>
+            <button on:click=scan>"scan QR"</button>
             <textarea
                 rows="2"
                 placeholder="…or paste a ZINK: payload"
@@ -1425,9 +1545,6 @@ fn ContactsView(
             />
             <button class="secondary" on:click=move |_| add(paste.get_untracked())>
                 "add from pasted text"
-            </button>
-            <button class="secondary" on:click=move |_| preview(paste.get_untracked())>
-                "pair from pasted text"
             </button>
             <h3>"contacts"</h3>
             {move || {
