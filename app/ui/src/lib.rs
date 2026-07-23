@@ -127,7 +127,6 @@ fn App() -> impl IntoView {
                     conversations=conversations
                     state=state
                     open_chat=open_chat
-                    reload=load_conversations
                     ok=ok
                     err=err
                 />
@@ -186,20 +185,29 @@ fn App() -> impl IntoView {
     }
 }
 
-/// Conversation list + the "new chat" composer (pick a contact, write the
-/// first message — later messages happen inside the chat view).
+/// Conversation list. Starting a new chat is a deliberate "+" action (pick one
+/// or more people, write the first message); later messages happen inside the
+/// chat view. No permanent form, no refresh button — live delivery + the
+/// backstop poll keep the list current.
 #[component]
 fn ChatsView(
     conversations: RwSignal<Vec<Conversation>>,
     state: RwSignal<Option<AppState>>,
     open_chat: impl Fn(String, String) + Copy + Send + 'static,
-    reload: impl Fn() + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let selected = RwSignal::new(std::collections::BTreeSet::<String>::new());
     let text = RwSignal::new(String::new());
+    // Whether the "new chat" composer is open (vs the plain list).
+    let composing = RwSignal::new(false);
     let contacts = move || state.get().map(|state| state.contacts).unwrap_or_default();
+
+    let close_compose = move || {
+        composing.set(false);
+        selected.update(|selected| selected.clear());
+        text.set(String::new());
+    };
 
     // Multi-select compose (D2c): a group is just several recipients.
     let start_chat = move |_| {
@@ -225,6 +233,7 @@ fn ChatsView(
                 Ok(conversation) => {
                     text.set(String::new());
                     selected.update(|selected| selected.clear());
+                    composing.set(false);
                     ok("sent");
                     open_chat(conversation, label);
                 }
@@ -236,63 +245,96 @@ fn ChatsView(
     view! {
         <main>
             {move || {
-                conversations
-                    .get()
-                    .into_iter()
-                    .map(|conversation| {
-                        let (id, label) = (conversation.id.clone(), conversation.label.clone());
-                        view! {
-                            <div class="row" on:click=move |_| open_chat(id.clone(), label.clone())>
-                                <b>{conversation.label}</b>
-                                <span class="dim">{format!("{} message(s)", conversation.message_count)}</span>
-                            </div>
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            }}
-            <div class="compose">
-                <div class="picks">
-                    <span class="dim">"new chat with:"</span>
-                    {move || {
-                        contacts()
-                            .into_iter()
-                            .map(|contact| {
-                                let name = contact.petname.clone();
-                                let toggled = contact.petname.clone();
+                if composing.get() {
+                    // The "new chat" composer: pick people, write the first message.
+                    view! {
+                        <h3>"new chat"</h3>
+                        <div class="picks">
+                            <span class="dim">"with:"</span>
+                            {move || {
+                                contacts()
+                                    .into_iter()
+                                    .map(|contact| {
+                                        let name = contact.petname.clone();
+                                        let toggled = contact.petname.clone();
+                                        view! {
+                                            <label class="pick">
+                                                <input
+                                                    type="checkbox"
+                                                    prop:checked=move || {
+                                                        selected.with(|selected| selected.contains(&name))
+                                                    }
+                                                    on:change=move |_| {
+                                                        selected
+                                                            .update(|selected| {
+                                                                if !selected.remove(&toggled) {
+                                                                    selected.insert(toggled.clone());
+                                                                }
+                                                            })
+                                                    }
+                                                />
+                                                {contact.petname}
+                                            </label>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            }}
+                        </div>
+                        <textarea
+                            rows="2"
+                            placeholder="first message"
+                            prop:value=move || text.get()
+                            on:input=move |ev| text.set(event_target_value(&ev))
+                        />
+                        <button on:click=start_chat>"send"</button>
+                        <button class="secondary" on:click=move |_| close_compose()>
+                            "cancel"
+                        </button>
+                    }
+                        .into_any()
+                } else {
+                    // The plain list + the deliberate "+" to start a chat.
+                    view! {
+                        <button on:click=move |_| composing.set(true)>"+ new chat"</button>
+                        {move || {
+                            let list = conversations.get();
+                            if list.is_empty() {
                                 view! {
-                                    <label class="pick">
-                                        <input
-                                            type="checkbox"
-                                            prop:checked=move || {
-                                                selected.with(|selected| selected.contains(&name))
-                                            }
-                                            on:change=move |_| {
-                                                selected
-                                                    .update(|selected| {
-                                                        if !selected.remove(&toggled) {
-                                                            selected.insert(toggled.clone());
-                                                        }
-                                                    })
-                                            }
-                                        />
-                                        {contact.petname}
-                                    </label>
+                                    <div class="dim">
+                                        "no conversations yet — tap + new chat to start one"
+                                    </div>
                                 }
-                            })
-                            .collect::<Vec<_>>()
-                    }}
-                </div>
-                <textarea
-                    rows="2"
-                    placeholder="first message"
-                    prop:value=move || text.get()
-                    on:input=move |ev| text.set(event_target_value(&ev))
-                />
-                <button on:click=start_chat>"send"</button>
-                <button class="secondary" on:click=move |_| reload()>
-                    "refresh"
-                </button>
-            </div>
+                                    .into_any()
+                            } else {
+                                list.into_iter()
+                                    .map(|conversation| {
+                                        let (id, label) = (
+                                            conversation.id.clone(),
+                                            conversation.label.clone(),
+                                        );
+                                        view! {
+                                            <div
+                                                class="row"
+                                                on:click=move |_| open_chat(id.clone(), label.clone())
+                                            >
+                                                <b>{conversation.label}</b>
+                                                <span class="dim">
+                                                    {format!(
+                                                        "{} message(s)",
+                                                        conversation.message_count,
+                                                    )}
+                                                </span>
+                                            </div>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into_any()
+                            }
+                        }}
+                    }
+                        .into_any()
+                }
+            }}
         </main>
     }
 }

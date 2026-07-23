@@ -288,6 +288,7 @@ the change is visible on device where relevant · this doc updated.
 Follow-ups / parked: **vouched avatars (friend-lens photos)** — the per-attester
 avatar lens is deferred in web-of-trust.md §6; when third-party avatar claims
 land there, U4's friends'-lens renders them with no facelift redesign. Also:
-pull-to-refresh; a "show concurrency" advanced view beyond the toggle; any
-accepted vocabulary back-port (separate doc); PWA styling (post-MVP, when the
-browser client returns).
+**reclaim vertical space in the chat view** (message rows are tall — noted at
+U3, 2026-07-23); pull-to-refresh; a "show concurrency" advanced view beyond the
+toggle; any accepted vocabulary back-port (separate doc); PWA styling (post-MVP,
+when the browser client returns).
