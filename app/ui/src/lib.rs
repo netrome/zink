@@ -1426,8 +1426,13 @@ fn PeopleView(
     let paste = RwSignal::new(String::new());
     // Whether the add-contact form is open (vs the plain list).
     let adding = RwSignal::new(false);
+    // Optional petname to set at add time (my lens); empty → their
+    // self-claimed name. Applies to both the scan and paste paths.
+    let new_name = RwSignal::new(String::new());
 
     let add = move |payload: String| {
+        let petname = new_name.get_untracked();
+        let petname = (!petname.trim().is_empty()).then_some(petname);
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
@@ -1436,11 +1441,12 @@ fn PeopleView(
             }
             let args = Args {
                 payload: &payload,
-                petname: None,
+                petname: petname.as_deref(),
             };
             match invoke::invoke::<String>("add_contact", &args).await {
                 Ok(petname) => {
                     paste.set(String::new());
+                    new_name.set(String::new());
                     adding.set(false);
                     reload();
                     ok(&format!("added {petname}"));
@@ -1532,6 +1538,11 @@ fn PeopleView(
                     // Add-contact composer (scan / paste), off the "+".
                     view! {
                         <h3>"add contact"</h3>
+                        <input
+                            placeholder="your name for them (optional)"
+                            prop:value=move || new_name.get()
+                            on:input=move |ev| new_name.set(event_target_value(&ev))
+                        />
                         <button on:click=scan>"scan QR"</button>
                         <textarea
                             rows="2"
@@ -1547,6 +1558,7 @@ fn PeopleView(
                             on:click=move |_| {
                                 adding.set(false);
                                 paste.set(String::new());
+                                new_name.set(String::new());
                             }
                         >
                             "cancel"
@@ -1640,6 +1652,8 @@ fn PersonView(
     let petname = StoredValue::new(petname);
     let detail = RwSignal::new(None::<PersonDetail>);
     let avatar = RwSignal::new(None::<String>);
+    // The editable petname (my lens) — prefilled from the loaded detail.
+    let rename_to = RwSignal::new(String::new());
     // Repudiation is armed-then-confirmed (two taps) — it publishes.
     let armed = RwSignal::new(false);
 
@@ -1654,12 +1668,45 @@ fn PersonView(
             match invoke::invoke::<PersonDetail>("person_detail", &args).await {
                 Ok(loaded) => {
                     let key = loaded.avatar_key.clone();
+                    rename_to.set(loaded.petname.clone());
                     detail.set(Some(loaded));
                     if !key.is_empty()
                         && let Ok(url) = avatar_data_url(&key).await
                     {
                         avatar.set(url);
                     }
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Rename — set my petname for them (my lens). Local only; sharing that
+    // name with friends is the separate `vouch` below.
+    let do_rename = move || {
+        let current = petname.get_value();
+        let new = rename_to.get_untracked();
+        if new.trim().is_empty() || new == current {
+            return;
+        }
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                current: &'a str,
+                new: &'a str,
+            }
+            let args = Args {
+                current: &current,
+                new: &new,
+            };
+            match invoke::invoke::<serde::de::IgnoredAny>("rename_contact", &args).await {
+                Ok(_) => {
+                    // The view now tracks the new name (person_detail is
+                    // keyed by petname).
+                    petname.set_value(new.clone());
+                    reload();
+                    load_detail();
+                    ok(&format!("renamed to {new}"));
                 }
                 Err(e) => err(e),
             }
@@ -1772,6 +1819,15 @@ fn PersonView(
                                 }}
                                 <h3>{person.petname.clone()}</h3>
                             </div>
+                            // My lens: the name I call them (editable, local).
+                            <div class="dim">"your name for them"</div>
+                            <input
+                                prop:value=move || rename_to.get()
+                                on:input=move |ev| rename_to.set(event_target_value(&ev))
+                            />
+                            <button class="secondary" on:click=move |_| do_rename()>
+                                "rename"
+                            </button>
                             // Disavowal warnings — context at the moment of decision.
                             {disavowals
                                 .into_iter()
@@ -1829,10 +1885,19 @@ fn PersonView(
                                     }
                                 })
                                 .collect::<Vec<_>>()}
-                            // Actions, in context.
+                            // Actions, in context. Vouching *is* sharing your
+                            // name for them — say so plainly (the friends'
+                            // lens above is the other side of this act).
                             <button on:click=move |_| toggle_vouch()>
-                                {if person.vouched { "withdraw vouch" } else { "vouch for them" }}
+                                {if person.vouched {
+                                    "stop sharing your name for them"
+                                } else {
+                                    "share the name you call them"
+                                }}
                             </button>
+                            <div class="dim">
+                                "lets friends who ask you about them see this name"
+                            </div>
                             <button class="secondary" on:click=move |_| refresh()>
                                 "refresh — who is this?"
                             </button>

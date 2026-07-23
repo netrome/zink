@@ -1030,6 +1030,31 @@ impl Client {
         Ok(petname)
     }
 
+    /// Rename a contact — set *my* petname for them (my lens, U4). Purely
+    /// local: the petname is a key-stemmed sibling file, so this rewrites it
+    /// in place; nothing is published (sharing a name with friends is the
+    /// explicit `vouch`). Rejects an empty name or a collision with another
+    /// contact, so send-by-name stays unambiguous.
+    pub fn rename(&self, current: &str, new: &str) -> Result<(), Error> {
+        let new = new.trim();
+        if new.is_empty() {
+            return Err(Error::InvalidInput("petname cannot be empty".into()));
+        }
+        if new == current {
+            return Ok(());
+        }
+        let contacts = self.state.contacts()?;
+        let record = contacts
+            .iter()
+            .find(|(name, _)| name == current)
+            .map(|(_, record)| record.clone())
+            .ok_or_else(|| Error::NotAContact(format!("no contact named {current:?}")))?;
+        if contacts.iter().any(|(name, _)| name == new) {
+            return Err(Error::PetnameCollision(new.to_string()));
+        }
+        self.state.save_contact(new, &record)
+    }
+
     /// All stored contacts as `(petname, record)`.
     pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, Error> {
         self.state.contacts()

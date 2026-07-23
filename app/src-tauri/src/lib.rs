@@ -369,6 +369,20 @@ async fn add_contact(
     Ok(client.add_contact(&record, petname.filter(|name| !name.trim().is_empty()))?)
 }
 
+/// Rename a contact — set my petname for them (my lens, U4). Local only;
+/// sharing that name with friends is the separate, explicit `vouch`.
+#[tauri::command]
+async fn rename_contact(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    current: String,
+    new: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.rename(&current, &new)?;
+    Ok(())
+}
+
 /// The person-detail screen's three belief layers for one contact (U4,
 /// ui-facelift.md §4), all read-time (no network): my lens (petname + the
 /// keys I've grouped), their self-claim (`self_name`), and the friends' lens
@@ -919,6 +933,7 @@ pub fn run() {
             app_state,
             set_profile,
             add_contact,
+            rename_contact,
             person_detail,
             conversations,
             messages,
