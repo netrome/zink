@@ -252,7 +252,7 @@ the change is visible on device where relevant · this doc updated.
   opens "start a chat" (pick one or more people → chat opens). Remove the
   permanent multi-select form and the refresh button. *Done when:* starting a
   new chat is a deliberate + action and the list shows only conversations.
-- [ ] **U4 · People + person detail (lens-first).** Contact rows → tap-through
+- [x] **U4 · People + person detail (lens-first).** Contact rows → tap-through
   detail screen built as the §4 **Person lens**: three separated belief layers —
   *my lens* (petname, avatar, the keys I've grouped here) · *their self-claim*
   (self-name/avatar, self-attested `SamePersonAs` links shown directionally) ·
