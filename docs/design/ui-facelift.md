@@ -241,7 +241,7 @@ the change is visible on device where relevant · this doc updated.
   violet/coherent and the composer's send button clears the phone's nav bar
   without rotating. **Highest visible-improvement-to-risk ratio; fixes the
   reported bug; lays the tokens every later slice uses. Recommended first.**
-- [ ] **U2 · Bottom-tab navigation + screen split.** Replace the top
+- [x] **U2 · Bottom-tab navigation + screen split.** Replace the top
   two-button header with a bottom tab bar (Chats / People / Me, safe-area
   padded). Relocate the existing `ContactsView` content into **Me** (profile +
   devices + relays) and **People** (list + add/pair), no redesign of the
