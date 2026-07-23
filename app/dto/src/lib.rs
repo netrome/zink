@@ -44,13 +44,48 @@ pub struct RecordPreview {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ContactRow {
     pub petname: String,
-    /// The record's first key, hex — the `who_is` handle.
+    /// The record's first key, hex — the row's avatar / `who_is` handle.
     pub key: String,
+    /// The full cluster of keys grouped under this person, hex — cluster-first
+    /// (U4, ui-facelift.md §4); consumers read the set, never assume `key` is
+    /// the only one.
+    pub keys: Vec<String>,
     /// Whether this device currently vouches for them (D4c toggle).
     pub vouched: bool,
     /// Render-ready disavowal warnings, e.g. "disavowed by mårten —
     /// excluded from your replies" (D4c). Empty for the common case.
     pub disavowals: Vec<String>,
+}
+
+/// The person-detail screen (U4, ui-facelift.md §4): the three separated
+/// belief layers, all read-time (no network pull). Fetched by petname when a
+/// People row is tapped.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PersonDetail {
+    /// My petname for them (my lens).
+    pub petname: String,
+    /// The keys I've grouped under this person, hex — cluster-first, never
+    /// one-key-per-person.
+    pub keys: Vec<String>,
+    /// The key avatar lookup uses (the cluster's first).
+    pub avatar_key: String,
+    /// Whether I currently vouch for them.
+    pub vouched: bool,
+    /// Their own verified self-claimed name, if any (their self-claim layer).
+    pub self_name: Option<String>,
+    /// How mutual friends label them — vouched names only, never a friend's
+    /// private petname (the friends' lens; who-is-this.md §6).
+    pub friends: Vec<FriendLabel>,
+    /// Render-ready disavowal warnings (D4c) — context for a trust decision.
+    pub disavowals: Vec<String>,
+}
+
+/// One vouched name from the friends' lens: a name, and the petnames of the
+/// friends who vouch it for this person.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FriendLabel {
+    pub name: String,
+    pub vouched_by: Vec<String>,
 }
 
 /// A displayable ContactRecord: SVG for the screen, text for copy/paste.

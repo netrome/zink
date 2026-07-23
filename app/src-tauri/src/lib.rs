@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AppState, BlobInfo, ContactRow, Conversation, DeviceRow, Message, OutgoingImage, QrPayload,
-    RecordPreview, UnknownMember, WhoIsCandidate, WhoIsReport,
+    AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Message, OutgoingImage,
+    PersonDetail, QrPayload, RecordPreview, UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -169,6 +169,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
                 rows.push(ContactRow {
                     petname,
                     key: key.map(|key| hex::encode(&key.0)).unwrap_or_default(),
+                    keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
                     vouched: key.map(|key| client.vouches(&key)).unwrap_or(false),
                     disavowals: match key {
                         Some(key) => disavowal_lines(&client, key)?,
@@ -366,6 +367,53 @@ async fn add_contact(
     let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
     let client = client(&app, &managed).await?;
     Ok(client.add_contact(&record, petname.filter(|name| !name.trim().is_empty()))?)
+}
+
+/// The person-detail screen's three belief layers for one contact (U4,
+/// ui-facelift.md §4), all read-time (no network): my lens (petname + the
+/// keys I've grouped), their self-claim (`self_name`), and the friends' lens
+/// (vouched names — a friend's label reaches me only via their explicit
+/// vouch, who-is-this.md §6). Keyed by petname; the cluster's first key is
+/// the handle for avatar/vouch/repudiate.
+#[tauri::command]
+async fn person_detail(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    petname: String,
+) -> Result<PersonDetail, String> {
+    let client = client(&app, &managed).await?;
+    let (petname, record) = client
+        .contacts()?
+        .into_iter()
+        .find(|(name, _)| *name == petname)
+        .ok_or_else(|| "no such contact".to_string())?;
+    let primary = record.keys.first().copied();
+    // Friends' lens: only names a friend *vouched* (endorsed_by) — never a
+    // held-only self-claim (that's provenance, not the friend's own label).
+    let friends = match primary {
+        Some(key) => client
+            .learned_candidates(key)?
+            .into_iter()
+            .filter(|(name, _)| !name.endorsed_by.is_empty())
+            .map(|(name, _)| FriendLabel {
+                name: name.name,
+                vouched_by: name.endorsed_by,
+            })
+            .collect(),
+        None => vec![],
+    };
+    Ok(PersonDetail {
+        avatar_key: primary.map(|key| hex::encode(&key.0)).unwrap_or_default(),
+        keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
+        vouched: primary.map(|key| client.vouches(&key)).unwrap_or(false),
+        self_name: record.self_claimed_name().map(str::to_string),
+        disavowals: match primary {
+            Some(key) => disavowal_lines(&client, key)?,
+            None => vec![],
+        },
+        friends,
+        petname,
+    })
 }
 
 /// The conversation list, rendered from the stored DAG (not from a recv).
@@ -871,6 +919,7 @@ pub fn run() {
             app_state,
             set_profile,
             add_contact,
+            person_detail,
             conversations,
             messages,
             send_message,

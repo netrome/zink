@@ -12,8 +12,8 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use wasm_bindgen::prelude::wasm_bindgen;
 use zink_app_dto::{
-    AppState, Conversation, Message, OutgoingImage, QrPayload, RecordPreview, UnknownMember,
-    WhoIsReport,
+    AppState, Conversation, Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview,
+    UnknownMember, WhoIsReport,
 };
 
 #[wasm_bindgen(start)]
@@ -28,6 +28,7 @@ enum View {
     Chats,
     Chat { id: String, label: String },
     People,
+    Person { petname: String },
     Me,
 }
 
@@ -113,6 +114,7 @@ fn App() -> impl IntoView {
         load_messages(id.clone());
         view.set(View::Chat { id, label });
     };
+    let open_person = move |petname: String| view.set(View::Person { petname });
 
     view! {
         <div
@@ -145,7 +147,23 @@ fn App() -> impl IntoView {
             }
             .into_any(),
             View::People => view! {
-                <PeopleView state=state reload=load_state ok=ok err=err />
+                <PeopleView
+                    state=state
+                    reload=load_state
+                    open_person=open_person
+                    ok=ok
+                    err=err
+                />
+            }
+            .into_any(),
+            View::Person { petname } => view! {
+                <PersonView
+                    petname=petname
+                    reload=load_state
+                    back=move || view.set(View::People)
+                    ok=ok
+                    err=err
+                />
             }
             .into_any(),
             View::Me => view! {
@@ -164,7 +182,7 @@ fn App() -> impl IntoView {
                 "Chats"
             </button>
             <button
-                class:active=move || view.get() == View::People
+                class:active=move || matches!(view.get(), View::People | View::Person { .. })
                 on:click=move |_| {
                     load_state();
                     view.set(View::People);
@@ -1392,18 +1410,22 @@ fn MeView(
     }
 }
 
-/// "People" — your contacts: adding one (scan / paste) and the list with its
-/// identity actions (who-is freshness pull, vouch, repudiate). The C2/D1/D4
-/// flows, unchanged — the U2 screen split homes them here. Its scan always
-/// adds a contact; the device-pairing scan lives in `MeView`.
+/// "People" — your contacts. The list is a plain, tappable list (a row opens
+/// the person-detail lens, U4); adding a contact (scan / paste) hides behind a
+/// "+" so the list stays clean, and the per-contact trust actions moved onto
+/// the detail screen. Its scan always adds a contact; the device-pairing scan
+/// lives in `MeView`.
 #[component]
 fn PeopleView(
     state: RwSignal<Option<AppState>>,
     reload: impl Fn() + Copy + Send + 'static,
+    open_person: impl Fn(String) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let paste = RwSignal::new(String::new());
+    // Whether the add-contact form is open (vs the plain list).
+    let adding = RwSignal::new(false);
 
     let add = move |payload: String| {
         spawn_local(async move {
@@ -1419,6 +1441,7 @@ fn PeopleView(
             match invoke::invoke::<String>("add_contact", &args).await {
                 Ok(petname) => {
                     paste.set(String::new());
+                    adding.set(false);
                     reload();
                     ok(&format!("added {petname}"));
                 }
@@ -1449,79 +1472,6 @@ fn PeopleView(
             });
         }
     });
-
-    // Freshness pull (D1c, who-is-this.md §7): re-ask the network about a
-    // contact. Fresh answers land in the learned store and sharpen relay
-    // resolution on their own — nothing to apply, nothing overwritten.
-    let refresh_contact = move |subject: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                subject: &'a str,
-            }
-            let args = Args { subject: &subject };
-            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
-                Ok(report) => {
-                    ok(&format!(
-                        "{} answer(s) (asked {}, {} unreachable) — fresh records apply automatically",
-                        report.answers, report.asked, report.unreachable
-                    ));
-                    // A fresh answer can carry a new avatar claim (De3):
-                    // re-fetch past any recorded miss.
-                    if let Ok(Some(url)) = avatar_data_url(&subject).await {
-                        contact_avatars.update(|avatars| {
-                            avatars.insert(subject, url);
-                        });
-                    }
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
-
-    // D4c: vouching and repudiation. Repudiation is armed-then-confirmed
-    // (two taps) — it publishes.
-    let toggle_vouch = move |petname: String, vouched: bool| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                petname: &'a str,
-            }
-            let args = Args { petname: &petname };
-            let command = if vouched { "unvouch" } else { "vouch" };
-            match invoke::invoke::<serde::de::IgnoredAny>(command, &args).await {
-                Ok(_) => {
-                    reload();
-                    ok(if vouched {
-                        "no longer vouching for them"
-                    } else {
-                        "vouching — shares the name you call them with anyone \
-                         who asks you about them"
-                    });
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
-    let armed = RwSignal::new(None::<String>);
-    let repudiate = move |key: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                key: &'a str,
-            }
-            let args = Args { key: &key };
-            match invoke::invoke::<serde::de::IgnoredAny>("repudiate_key", &args).await {
-                Ok(_) => {
-                    armed.set(None);
-                    reload();
-                    ok("repudiated — published in your record; contacts learn \
-                        it from their next pull");
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
 
     // Scanning state drives the cancel overlay AND page transparency (see the
     // note in `MeView`). This scan always adds a contact.
@@ -1577,92 +1527,83 @@ fn PeopleView(
 
     view! {
         <main>
-            <h3>"add contact"</h3>
-            <button on:click=scan>"scan QR"</button>
-            <textarea
-                rows="2"
-                placeholder="…or paste a ZINK: payload"
-                prop:value=move || paste.get()
-                on:input=move |ev| paste.set(event_target_value(&ev))
-            />
-            <button class="secondary" on:click=move |_| add(paste.get_untracked())>
-                "add from pasted text"
-            </button>
-            <h3>"contacts"</h3>
             {move || {
-                state
-                    .get()
-                    .map(|state| state.contacts)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|contact| {
-                        let subject = contact.key.clone();
-                        let avatar_key = contact.key.clone();
-                        let vouch_name = contact.petname.clone();
-                        let vouched = contact.vouched;
-                        let arm_key = contact.key.clone();
-                        let label_key = contact.key.clone();
-                        let warnings = contact
-                            .disavowals
-                            .iter()
-                            .map(|line| {
+                if adding.get() {
+                    // Add-contact composer (scan / paste), off the "+".
+                    view! {
+                        <h3>"add contact"</h3>
+                        <button on:click=scan>"scan QR"</button>
+                        <textarea
+                            rows="2"
+                            placeholder="…or paste a ZINK: payload"
+                            prop:value=move || paste.get()
+                            on:input=move |ev| paste.set(event_target_value(&ev))
+                        />
+                        <button class="secondary" on:click=move |_| add(paste.get_untracked())>
+                            "add from pasted text"
+                        </button>
+                        <button
+                            class="secondary"
+                            on:click=move |_| {
+                                adding.set(false);
+                                paste.set(String::new());
+                            }
+                        >
+                            "cancel"
+                        </button>
+                    }
+                        .into_any()
+                } else {
+                    // The plain list + the deliberate "+" to add a contact.
+                    view! {
+                        <button on:click=move |_| adding.set(true)>"+ add contact"</button>
+                        {move || {
+                            let contacts = state
+                                .get()
+                                .map(|state| state.contacts)
+                                .unwrap_or_default();
+                            if contacts.is_empty() {
                                 view! {
-                                    <div class="row">
-                                        <span class="dim">{line.clone()}</span>
+                                    <div class="dim">
+                                        "no contacts yet — tap + add contact to scan or paste a code"
                                     </div>
                                 }
-                            })
-                            .collect::<Vec<_>>();
-                        view! {
-                            <div class="row">
-                                {move || {
-                                    contact_avatars
-                                        .with(|avatars| {
-                                            avatars
-                                                .get(&avatar_key)
-                                                .filter(|url| !url.is_empty())
-                                                .cloned()
-                                        })
-                                        .map(|url| view! { <img class="avatar" src=url /> })
-                                }}
-                                <b>{contact.petname}</b>
-                                <button
-                                    class="secondary"
-                                    on:click=move |_| refresh_contact(subject.clone())
-                                >
-                                    "who is?"
-                                </button>
-                                <button
-                                    class="secondary"
-                                    on:click=move |_| toggle_vouch(vouch_name.clone(), vouched)
-                                >
-                                    {if vouched { "withdraw vouch" } else { "vouch" }}
-                                </button>
-                                <button
-                                    class="secondary"
-                                    on:click=move |_| {
-                                        if armed.get_untracked().as_deref()
-                                            == Some(arm_key.as_str())
-                                        {
-                                            repudiate(arm_key.clone());
-                                        } else {
-                                            armed.set(Some(arm_key.clone()));
+                                    .into_any()
+                            } else {
+                                contacts
+                                    .into_iter()
+                                    .map(|contact| {
+                                        let petname = contact.petname.clone();
+                                        let avatar_key = contact.key.clone();
+                                        let has_warning = !contact.disavowals.is_empty();
+                                        view! {
+                                            <div
+                                                class="row"
+                                                on:click=move |_| open_person(petname.clone())
+                                            >
+                                                {move || {
+                                                    contact_avatars
+                                                        .with(|avatars| {
+                                                            avatars
+                                                                .get(&avatar_key)
+                                                                .filter(|url| !url.is_empty())
+                                                                .cloned()
+                                                        })
+                                                        .map(|url| view! { <img class="avatar" src=url /> })
+                                                }}
+                                                <b>{contact.petname}</b>
+                                                {has_warning
+                                                    .then(|| view! { <span class="dim">"⚠"</span> })}
+                                            </div>
                                         }
-                                    }
-                                >
-                                    {move || {
-                                        if armed.get().as_deref() == Some(label_key.as_str()) {
-                                            "⚠ confirm repudiation"
-                                        } else {
-                                            "repudiate"
-                                        }
-                                    }}
-                                </button>
-                            </div>
-                            {warnings}
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into_any()
+                            }
+                        }}
+                    }
+                        .into_any()
+                }
             }}
             {move || {
                 scanning
@@ -1676,6 +1617,250 @@ fn PeopleView(
                                 </button>
                             </div>
                         }
+                    })
+            }}
+        </main>
+    }
+}
+
+/// The person-detail lens (U4, ui-facelift.md §4): one contact rendered as
+/// three separated belief layers — my lens (petname + avatar + the keys I've
+/// grouped), their self-claim, and my friends' lens (vouched names only,
+/// never a friend's private petname). Trust actions (vouch / repudiate) and a
+/// who-is freshness pull live here, in context. All read-time; nothing here
+/// assumes one key per person.
+#[component]
+fn PersonView(
+    petname: String,
+    reload: impl Fn() + Copy + Send + 'static,
+    back: impl Fn() + Copy + Send + 'static,
+    ok: impl Fn(&str) + Copy + Send + 'static,
+    err: impl Fn(String) + Copy + Send + 'static,
+) -> impl IntoView {
+    let petname = StoredValue::new(petname);
+    let detail = RwSignal::new(None::<PersonDetail>);
+    let avatar = RwSignal::new(None::<String>);
+    // Repudiation is armed-then-confirmed (two taps) — it publishes.
+    let armed = RwSignal::new(false);
+
+    let load_detail = move || {
+        let name = petname.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                petname: &'a str,
+            }
+            let args = Args { petname: &name };
+            match invoke::invoke::<PersonDetail>("person_detail", &args).await {
+                Ok(loaded) => {
+                    let key = loaded.avatar_key.clone();
+                    detail.set(Some(loaded));
+                    if !key.is_empty()
+                        && let Ok(url) = avatar_data_url(&key).await
+                    {
+                        avatar.set(url);
+                    }
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    load_detail();
+
+    let toggle_vouch = move || {
+        let Some(current) = detail.get_untracked() else {
+            return;
+        };
+        let (name, vouched) = (current.petname, current.vouched);
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                petname: &'a str,
+            }
+            let args = Args { petname: &name };
+            let command = if vouched { "unvouch" } else { "vouch" };
+            match invoke::invoke::<serde::de::IgnoredAny>(command, &args).await {
+                Ok(_) => {
+                    reload();
+                    load_detail();
+                    ok(if vouched {
+                        "no longer vouching for them"
+                    } else {
+                        "vouching — shares the name you call them with anyone \
+                         who asks you about them"
+                    });
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Re-ask the network (D1c): fresh answers land in the learned store and
+    // sharpen resolution on their own — reload the detail to show them.
+    let refresh = move || {
+        let Some(subject) = detail.get_untracked().map(|person| person.avatar_key) else {
+            return;
+        };
+        if subject.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &subject };
+            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
+                Ok(report) => {
+                    ok(&format!(
+                        "{} answer(s) (asked {}, {} unreachable) — fresh records apply automatically",
+                        report.answers, report.asked, report.unreachable
+                    ));
+                    load_detail();
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    let repudiate = move || {
+        let Some(key) = detail.get_untracked().map(|person| person.avatar_key) else {
+            return;
+        };
+        if key.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("repudiate_key", &args).await {
+                Ok(_) => {
+                    armed.set(false);
+                    reload();
+                    load_detail();
+                    ok("repudiated — published in your record; contacts learn \
+                        it from their next pull");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    view! {
+        <main>
+            <button class="secondary" on:click=move |_| back()>
+                "‹ people"
+            </button>
+            {move || {
+                detail
+                    .get()
+                    .map(|person| {
+                        let friends = person.friends.clone();
+                        let keys = person.keys.clone();
+                        let disavowals = person.disavowals.clone();
+                        let has_key = !person.avatar_key.is_empty();
+                        view! {
+                            // My lens: avatar + the petname I call them.
+                            <div class="pending">
+                                {move || {
+                                    avatar
+                                        .get()
+                                        .map(|url| view! { <img class="avatar avatar-lg" src=url /> })
+                                }}
+                                <h3>{person.petname.clone()}</h3>
+                            </div>
+                            // Disavowal warnings — context at the moment of decision.
+                            {disavowals
+                                .into_iter()
+                                .map(|line| {
+                                    view! {
+                                        <div class="row">
+                                            <span class="dim">{line}</span>
+                                        </div>
+                                    }
+                                })
+                                .collect::<Vec<_>>()}
+                            // Their self-claim.
+                            <div class="dim">"they call themselves"</div>
+                            <div class="row">
+                                <b>{person.self_name.clone().unwrap_or_else(|| "—".to_string())}</b>
+                            </div>
+                            // Friends' lens: vouched names only — never a
+                            // friend's private petname (who-is-this.md §6).
+                            <div class="dim">"how your friends see them"</div>
+                            {if friends.is_empty() {
+                                view! {
+                                    <div class="row">
+                                        <span class="dim">"no friend has vouched a name for them yet"</span>
+                                    </div>
+                                }
+                                    .into_any()
+                            } else {
+                                friends
+                                    .into_iter()
+                                    .map(|friend| {
+                                        view! {
+                                            <div class="row">
+                                                <b>{friend.name}</b>
+                                                <span class="dim">
+                                                    {format!("vouched by {}", friend.vouched_by.join(", "))}
+                                                </span>
+                                            </div>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into_any()
+                            }}
+                            // My grouping: the keys clustered as this person.
+                            <div class="dim">
+                                {format!("{} key(s) you've grouped as this person", keys.len())}
+                            </div>
+                            {keys
+                                .into_iter()
+                                .map(|key| {
+                                    let short = key.chars().take(16).collect::<String>();
+                                    view! {
+                                        <div class="dim" id="record-text">
+                                            {format!("{short}…")}
+                                        </div>
+                                    }
+                                })
+                                .collect::<Vec<_>>()}
+                            // Actions, in context.
+                            <button on:click=move |_| toggle_vouch()>
+                                {if person.vouched { "withdraw vouch" } else { "vouch for them" }}
+                            </button>
+                            <button class="secondary" on:click=move |_| refresh()>
+                                "refresh — who is this?"
+                            </button>
+                            {has_key
+                                .then(|| {
+                                    view! {
+                                        <button
+                                            class="danger"
+                                            on:click=move |_| {
+                                                if armed.get_untracked() {
+                                                    repudiate();
+                                                } else {
+                                                    armed.set(true);
+                                                }
+                                            }
+                                        >
+                                            {move || {
+                                                if armed.get() {
+                                                    "⚠ confirm — this key isn't them"
+                                                } else {
+                                                    "this key isn't them anymore"
+                                                }
+                                            }}
+                                        </button>
+                                    }
+                                })}
+                        }
+                            .into_any()
                     })
             }}
         </main>
