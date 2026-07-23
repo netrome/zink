@@ -247,7 +247,7 @@ the change is visible on device where relevant · this doc updated.
   devices + relays) and **People** (list + add/pair), no redesign of the
   internals yet — just move them to the right homes. *Done when:* all existing
   functionality is reachable under the three tabs; nothing regressed.
-- [ ] **U3 · Chats list + compose flow.** The list becomes a clean list; a **+**
+- [x] **U3 · Chats list + compose flow.** The list becomes a clean list; a **+**
   opens "start a chat" (pick one or more people → chat opens). Remove the
   permanent multi-select form and the refresh button. *Done when:* starting a
   new chat is a deliberate + action and the list shows only conversations.
