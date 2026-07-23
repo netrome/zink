@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 pub struct AppState {
     pub my_key: String,
     pub name: Option<String>,
-    pub relay: Option<String>,
+    /// All home relays as full dial specs (`dial[#relay-url]`, U5 multi-relay)
+    /// — "where your messages wait when you're offline". Round-trips back
+    /// through `set_profile`; a bare dial string would drop the relay URL.
+    pub relays: Vec<String>,
     pub contacts: Vec<ContactRow>,
     pub record: Option<QrPayload>,
     /// Recognized own devices (D3e) — the me-view's device list, and what

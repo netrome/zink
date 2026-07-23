@@ -1033,7 +1033,10 @@ fn MeView(
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let name = RwSignal::new(String::new());
-    let relay = RwSignal::new(String::new());
+    // The home-relay set (U5 multi-relay), edited locally and persisted on
+    // save; `new_relay` is the add field.
+    let relays = RwSignal::new(Vec::<String>::new());
+    let new_relay = RwSignal::new(String::new());
     // Pairing paste buffer (a device record to recognize).
     let paste = RwSignal::new(String::new());
 
@@ -1043,23 +1046,37 @@ fn MeView(
             if let Some(profile_name) = state.name {
                 name.set(profile_name);
             }
-            if let Some(home_relay) = state.relay {
-                relay.set(home_relay);
-            }
+            relays.set(state.relays);
         }
     });
 
+    let add_relay = move |_| {
+        let value = new_relay.get_untracked().trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        relays.update(|list| {
+            if !list.contains(&value) {
+                list.push(value);
+            }
+        });
+        new_relay.set(String::new());
+    };
+    let remove_relay = move |value: String| {
+        relays.update(|list| list.retain(|relay| relay != &value));
+    };
+
     let save = move |_| {
-        let (name, relay) = (name.get_untracked(), relay.get_untracked());
+        let (name, relays) = (name.get_untracked(), relays.get_untracked());
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
                 name: &'a str,
-                relay: &'a str,
+                relays: &'a [String],
             }
             let args = Args {
                 name: &name,
-                relay: &relay,
+                relays: &relays,
             };
             match invoke::invoke::<QrPayload>("set_profile", &args).await {
                 Ok(_) => {
@@ -1261,11 +1278,45 @@ fn MeView(
                 prop:value=move || name.get()
                 on:input=move |ev| name.set(event_target_value(&ev))
             />
+            <h3>"your relays"</h3>
+            <div class="dim">
+                "where your messages wait when you're offline — add one you run, or one a friend shares"
+            </div>
+            {move || {
+                let list = relays.get();
+                if list.is_empty() {
+                    view! {
+                        <div class="dim">"no relay yet — add one below, or friends can't reach you"</div>
+                    }
+                        .into_any()
+                } else {
+                    list.into_iter()
+                        .map(|relay| {
+                            let value = relay.clone();
+                            view! {
+                                <div class="row">
+                                    <span class="dim" id="record-text">{relay}</span>
+                                    <button
+                                        class="secondary"
+                                        on:click=move |_| remove_relay(value.clone())
+                                    >
+                                        "remove"
+                                    </button>
+                                </div>
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .into_any()
+                }
+            }}
             <input
-                placeholder="endpoint-id@ip:port"
-                prop:value=move || relay.get()
-                on:input=move |ev| relay.set(event_target_value(&ev))
+                placeholder="endpoint-id@ip:port#http://ip:port"
+                prop:value=move || new_relay.get()
+                on:input=move |ev| new_relay.set(event_target_value(&ev))
             />
+            <button class="secondary" on:click=add_relay>
+                "add relay"
+            </button>
             <button on:click=save>"save profile & show QR"</button>
             {move || {
                 state
@@ -1292,6 +1343,10 @@ fn MeView(
                     })
             }}
             <h3>"my devices"</h3>
+            <div class="dim">
+                "other devices you recognize as also you. recognition is one-way — \
+                 recognize this device from each of them too, so both sides agree"
+            </div>
             {move || {
                 let devices = state.get().map(|state| state.devices).unwrap_or_default();
                 if devices.is_empty() {

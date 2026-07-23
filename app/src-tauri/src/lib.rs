@@ -158,10 +158,11 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
     Ok(AppState {
         my_key: hex::encode(&client.public_key().0),
         name: client.profile_name(),
-        // The full spec (`dial[#relay-url]`): this value round-trips through
-        // the profile form back into set_profile — the bare dial string
-        // would silently drop the relay URL on a re-save (D0b).
-        relay: client.home_relay_specs().into_iter().next(),
+        // The full specs (`dial[#relay-url]`): these round-trip through the
+        // profile form back into set_profile — a bare dial string would
+        // silently drop the relay URL on a re-save (D0b). All of them now
+        // (U5 multi-relay), not just the first.
+        relays: client.home_relay_specs(),
         contacts: {
             let mut rows = Vec::new();
             for (petname, record) in client.contacts()? {
@@ -340,16 +341,17 @@ async fn introduce_devices(
     Ok(())
 }
 
-/// Save name + home relay, register the mailbox there, return the QR.
+/// Save name + home relays (U5 multi-relay: the full set replaces the old),
+/// register the mailboxes there, return the QR.
 #[tauri::command]
 async fn set_profile(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
     name: String,
-    relay: String,
+    relays: Vec<String>,
 ) -> Result<QrPayload, String> {
     let client = client(&app, &managed).await?;
-    client.set_profile(&name, &[relay]).await?;
+    client.set_profile(&name, &relays).await?;
     client.register_at_home_relays().await?;
     // The relay may be new — give it its live-delivery task right away.
     spawn_subscriptions(&app, &managed, &client);
