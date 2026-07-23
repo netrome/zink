@@ -263,7 +263,7 @@ the change is visible on device where relevant · this doc updated.
   key-set + layers. *Done when:* the detail screen shows all three belief layers
   cluster-first, every D1–D4 action lives there, and nothing assumes
   one-key-per-person.
-- [ ] **U5 · Me: profile, devices, relays.** The identity screen: name, avatar,
+- [x] **U5 · Me: profile, devices, relays.** The identity screen: name, avatar,
   QR/"your code", your **linked devices shown with directional recognition** (§4
   — "this device recognizes X; scan back to confirm both ways"), and the
   **multi-relay list** framed per §7 (add/remove, "where your messages wait").
