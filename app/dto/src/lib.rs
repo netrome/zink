@@ -76,6 +76,9 @@ pub struct PersonDetail {
     pub vouched: bool,
     /// Their own verified self-claimed name, if any (their self-claim layer).
     pub self_name: Option<String>,
+    /// Whether I've set a local photo for them (U6) — drives the "use their
+    /// photo instead" affordance.
+    pub has_local_avatar: bool,
     /// How mutual friends label them — vouched names only, never a friend's
     /// private petname (the friends' lens; who-is-this.md §6).
     pub friends: Vec<FriendLabel>,

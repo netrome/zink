@@ -118,9 +118,15 @@ detail screen):
   say so," shown with **directionality** ("this device recognizes it; scan back to
   confirm both ways" — matches the existing pair copy). Never implies symmetry.
 - **Your local grouping** (no claim, fuzzy — the "someone in my football team"
-  case): "you've grouped these," visibly *your* choice, arbitrary keys allowed. The
-  `Vec<PublicKey>` shape already permits it; it needs a manual "group with…"
-  gesture (U6), not a new data model.
+  case): "you've grouped these," visibly *your* choice, arbitrary keys allowed.
+  **Correction (found at U6, 2026-07-24):** the current storage does *not* already
+  permit this. A contact is one signed `ContactRecord`; `contact_from` sets
+  `Contact.keys = record.keys.clone()`, so a contact's cluster is the person's own
+  declared devices, not an arbitrary local bag — and `add_contact` actively rejects
+  cross-contact key overlap. Arbitrary local grouping needs a **new local
+  same-person store** (local-only, never published) plus decisions about
+  send-by-name/membership/reply interaction. Genuine unresolved design → its own
+  slice (U6b) with a design note, not "free."
 - **Never a third-party device link** — a friend can vouch a *name*, never link
   someone else's devices (web-of-trust.md §6). Structurally impossible; we don't
   offer it.
@@ -269,13 +275,24 @@ the change is visible on device where relevant · this doc updated.
   **multi-relay list** framed per §7 (add/remove, "where your messages wait").
   *Done when:* a user can manage name, avatar, devices, and ≥1 relay from one
   calm screen, with recognition directionality honest.
-- [ ] **U6 · My-lens extras: local avatar + grouping.** Let your lens carry a
-  photo *you* chose for a contact (client-side override of the resolved avatar;
-  reuses the U5 canvas path) and a manual "group with…" gesture that clusters
-  keys under one local person (the football-team case — `Contact.keys` already
-  holds a set). Both are local, no protocol, no broadcast. *Done when:* you can
-  set a private photo for a contact and group two keys as one person, and
-  neither ever leaves the device.
+- [ ] **U6a · Local avatar override.** Let your lens carry a photo *you* chose
+  for a contact — a client-side override of the resolved self-claim, stored
+  plaintext on-device only, never published (reuses the U5 canvas path). Wins in
+  `Client::avatar` everywhere their avatar shows; a "use their photo instead"
+  clears it. *Done when:* you can set a private photo for a contact from their
+  detail screen and it never leaves the device. *(Code complete 2026-07-24:
+  `state` local-avatar store + `Client::set_local_avatar`/`clear_local_avatar`/
+  `has_local_avatar`, `avatar` prefers the override; `set_local_avatar`/
+  `clear_local_avatar` commands; `PersonDetail.has_local_avatar`; picker +
+  "use their photo instead" in the person detail.)*
+- [ ] **U6b · Local grouping ("group with…").** 🎯 Cluster keys under one local
+  person (the football-team case). **Needs design** (see §4 correction): the
+  current model has no arbitrary local grouping — a contact's cluster is its
+  signed record's keys, and `add_contact` rejects overlap. Requires a new
+  local-only same-person store and decisions on how a fuzzy group interacts with
+  send-by-name, `reply_contacts`, the conversation index, and membership. Write a
+  short `docs/design/local-grouping.md` when scheduled. *Done when:* you can group
+  two keys as one local person, and it degrades sanely in send/reply.
 - [ ] **U7 · First-run onboarding.** The §6 sequence (name/avatar → relay →
   your code), replacing the "dumped into the mega-screen" first run. Reuses U5
   widgets. *Done when:* a fresh install walks a new user to a shareable code

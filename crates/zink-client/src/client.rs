@@ -1578,6 +1578,27 @@ impl Client {
         pushed
     }
 
+    /// Set a local avatar override for a contact (U6, my lens): a photo *I*
+    /// chose, stored plaintext on this device only — never published, never a
+    /// claim. Wins over the resolved self-claim in `avatar`.
+    pub fn set_local_avatar(&self, key: PublicKey, image: Vec<u8>) -> Result<(), Error> {
+        if image.len() > 512 * 1024 {
+            return Err(Error::InvalidInput("image too large (max 512 KiB)".into()));
+        }
+        self.state.save_local_avatar(&key, &image)
+    }
+
+    /// Drop the local avatar override — `avatar` falls back to the self-claim.
+    pub fn clear_local_avatar(&self, key: PublicKey) {
+        self.state.remove_local_avatar(&key);
+    }
+
+    /// Whether a local avatar override is set for a key (drives the "remove
+    /// your photo" affordance).
+    pub fn has_local_avatar(&self, key: &PublicKey) -> bool {
+        self.state.local_avatar(key).is_some()
+    }
+
     /// The best-believed avatar for a key (D1d): the highest-revision
     /// verified self-issued `Avatar` claim across the stored record and
     /// every learned record; ciphertext from the local cache, else fetched
@@ -1586,6 +1607,11 @@ impl Client {
     /// AEAD) and cached. `Ok(None)` for no claim *and* for a claim whose
     /// blob is currently unfetchable — display data is best-effort.
     pub async fn avatar(&self, subject: PublicKey) -> Result<Option<Vec<u8>>, Error> {
+        // A local override (U6, my lens) wins over any claim — a photo I
+        // chose for them, stored on this device only, never fetched.
+        if let Some(bytes) = self.state.local_avatar(&subject) {
+            return Ok(Some(bytes));
+        }
         if subject == self.device.public() {
             let Some((hash, key, _)) = self.state.avatar_meta() else {
                 return Ok(None);

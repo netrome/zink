@@ -1851,6 +1851,59 @@ fn PersonView(
         });
     };
 
+    // A local photo for them (U6, my lens): a photo *I* chose, stored on
+    // this device only — never published. Overrides their self-claim
+    // everywhere their avatar shows.
+    let set_photo = move |ev: leptos::ev::Event, key: String| {
+        let input = event_target::<web_sys::HtmlInputElement>(&ev);
+        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        spawn_local(async move {
+            let (b64, preview) = match image::prepare_avatar(&file).await {
+                Ok(prepared) => prepared,
+                Err(e) => return err(e),
+            };
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+                image: &'a str,
+            }
+            let args = Args {
+                key: &key,
+                image: &b64,
+            };
+            match invoke::invoke::<serde::de::IgnoredAny>("set_local_avatar", &args).await {
+                Ok(_) => {
+                    avatar.set(Some(preview));
+                    reload();
+                    load_detail();
+                    ok("photo set — only you see it");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    let clear_photo = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            match invoke::invoke::<serde::de::IgnoredAny>("clear_local_avatar", &args).await {
+                Ok(_) => {
+                    // Fall back to their self-claimed avatar (or none).
+                    avatar.set(avatar_data_url(&key).await.ok().flatten());
+                    reload();
+                    load_detail();
+                    ok("using their photo again");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     view! {
         <main>
             <button class="secondary" on:click=move |_| back()>
@@ -1864,6 +1917,8 @@ fn PersonView(
                         let keys = person.keys.clone();
                         let disavowals = person.disavowals.clone();
                         let has_key = !person.avatar_key.is_empty();
+                        let photo_key = person.avatar_key.clone();
+                        let has_local = person.has_local_avatar;
                         view! {
                             // My lens: avatar + the petname I call them.
                             <div class="pending">
@@ -1883,6 +1938,33 @@ fn PersonView(
                             <button class="secondary" on:click=move |_| do_rename()>
                                 "rename"
                             </button>
+                            // A local photo for them (U6) — only you see it.
+                            {(!photo_key.is_empty())
+                                .then(|| {
+                                    let pick_key = photo_key.clone();
+                                    let clear_key = photo_key.clone();
+                                    view! {
+                                        <label class="dim">
+                                            "your photo for them: "
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                on:change=move |ev| set_photo(ev, pick_key.clone())
+                                            />
+                                        </label>
+                                        {has_local
+                                            .then(|| {
+                                                view! {
+                                                    <button
+                                                        class="secondary"
+                                                        on:click=move |_| clear_photo(clear_key.clone())
+                                                    >
+                                                        "use their photo instead"
+                                                    </button>
+                                                }
+                                            })}
+                                    }
+                                })}
                             // Disavowal warnings — context at the moment of decision.
                             {disavowals
                                 .into_iter()

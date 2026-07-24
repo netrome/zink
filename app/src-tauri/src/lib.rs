@@ -385,6 +385,39 @@ async fn rename_contact(
     Ok(())
 }
 
+/// Set a local photo for a contact (U6, my lens): a webview-downscaled
+/// image, stored plaintext on this device only — never published, never a
+/// claim. It overrides the resolved self-claim everywhere `avatar` is shown.
+#[tauri::command]
+async fn set_local_avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+    image: String,
+) -> Result<(), String> {
+    let image = BASE64
+        .decode(image.as_bytes())
+        .map_err(|e| format!("decode avatar: {e}"))?;
+    if !looks_like_image(&image) {
+        return Err("that file does not look like an image".into());
+    }
+    let client = client(&app, &managed).await?;
+    client.set_local_avatar(PublicKey(hex::parse32(&key)?), image)?;
+    Ok(())
+}
+
+/// Drop the local photo for a contact — their self-claimed avatar shows again.
+#[tauri::command]
+async fn clear_local_avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.clear_local_avatar(PublicKey(hex::parse32(&key)?));
+    Ok(())
+}
+
 /// The person-detail screen's three belief layers for one contact (U4,
 /// ui-facelift.md §4), all read-time (no network): my lens (petname + the
 /// keys I've grouped), their self-claim (`self_name`), and the friends' lens
@@ -422,6 +455,9 @@ async fn person_detail(
         avatar_key: primary.map(|key| hex::encode(&key.0)).unwrap_or_default(),
         keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
         vouched: primary.map(|key| client.vouches(&key)).unwrap_or(false),
+        has_local_avatar: primary
+            .map(|key| client.has_local_avatar(&key))
+            .unwrap_or(false),
         self_name: record.self_claimed_name().map(str::to_string),
         disavowals: match primary {
             Some(key) => disavowal_lines(&client, key)?,
@@ -936,6 +972,8 @@ pub fn run() {
             set_profile,
             add_contact,
             rename_contact,
+            set_local_avatar,
+            clear_local_avatar,
             person_detail,
             conversations,
             messages,

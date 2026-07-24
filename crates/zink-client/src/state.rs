@@ -392,6 +392,25 @@ impl ClientState {
             .map_err(|e| Error::Storage(format!("write petname: {e}")))
     }
 
+    /// A local avatar override for a key (U6, my lens): a photo *I* chose for
+    /// a contact, stored plaintext on this device only — never sent, never a
+    /// claim. `Client::avatar` prefers it over the resolved self-claim.
+    pub fn save_local_avatar(&self, key: &PublicKey, bytes: &[u8]) -> Result<(), Error> {
+        let path = self.root.join("local-avatars").join(hex(&key.0));
+        create_parent(&path)?;
+        write_atomic(&path, bytes).map_err(|e| Error::Storage(format!("write local avatar: {e}")))
+    }
+
+    /// The local avatar override for a key, if one is set.
+    pub fn local_avatar(&self, key: &PublicKey) -> Option<Vec<u8>> {
+        std::fs::read(self.root.join("local-avatars").join(hex(&key.0))).ok()
+    }
+
+    /// Drop a local avatar override — `avatar` falls back to the self-claim.
+    pub fn remove_local_avatar(&self, key: &PublicKey) {
+        let _ = std::fs::remove_file(self.root.join("local-avatars").join(hex(&key.0)));
+    }
+
     /// Store a recognized own device (multi-device.md §3): its record plus
     /// the link vouch this device signed over it. Written only by the
     /// recognize act — serving decisions read this store, never the wire.
