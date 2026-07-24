@@ -126,7 +126,10 @@ client.flush_outbox() -> FlushReport          // idempotent re-deposit + re-push
 client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
 // direct delivery (D5, direct-delivery.md): every send first tries to hand the
 // envelope to each recipient device peer-to-peer on SYNC_ALPN (concurrent dials,
-// deadline min(connect_timeout, 3s)); a durable `Stored` ack means that device's
+// budget per `direct_budget`: 3s with recent reachability evidence — a delivery
+// taken/declined, or an inbound connection the router noted — 600ms when nothing
+// is known, and NO dial for 60s after a failure, so an offline recipient never
+// taxes a send); a durable `Stored` ack means that device's
 // mailbox is skipped — a relay's deposit is skipped only when EVERY recipient it
 // hosts acked and the message carries no blobs (SendReceipt.direct_recipients /
 // .skipped_relays). Any failure = today's deposit. Receiving: the serving router

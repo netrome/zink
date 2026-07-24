@@ -1191,6 +1191,39 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   other cold. What D5 buys is "the relay is not on the message path", not "the
   relay can be off before you start". Docs: SPEC §5.1/§5.3, sync-primitives.md
   §3, live-delivery.md §3, client-core.md.)*
+  *(2026-07-24, **latency fix after field + suite regression** — verified live
+  by Mårten (phone ↔ laptop kept chatting with the relay off) but two costs
+  showed up: messages rendered slowly on device, and the CLI e2e suite went
+  13 s → 38 s on `groups`. Both from the same thing: a **speculative
+  relay-path dial on every send**, whose deadline is paid in full when the
+  peer isn't reachable (no fast failure) — plus, per *process*, a ~3 s
+  `Endpoint::close()` drain after a failed dial, which one-shot CLI commands
+  pay and the long-lived app does not. Measurements in direct-delivery.md §5.
+  Fixed by (a) `direct_budget` — a pure, unit-tested policy: full 3 s only
+  with recent evidence the peer is reachable (it took/declined a delivery, or
+  **connected to us** — the router notes inbound peers in a shared
+  `sync::Reach` map), one 600 ms probe when nothing is known, and **no dial
+  at all** for 60 s after a failure, so an offline recipient costs a send
+  nothing however often you send; (b) `ClientConfig::close_deadline` bounding
+  `Client::close()` — default 5 s (graceful, quiet), with the e2e harness
+  setting `ZINK_CLOSE_DEADLINE_MS=200` and accepting iroh's abort line, since
+  graceful shutdown is a courtesy to the log rather than correctness. Results:
+  app send to an offline recipient 3 s-every-send → 0.6 s-once-a-minute;
+  online send unchanged at 86 ms; `groups` 38.7 s → **10.3 s** (pre-D5:
+  13.2 s), `multi_device` 16.6 s → 5.5 s, `who_is` 11.8 s → 3.6 s — the close
+  bound also removed a **pre-existing** tax on every `recv`/`who-is` that
+  dialed by key, so the suite now beats its pre-D5 time. An interactive CLI
+  send to an offline peer still costs ~3.7 s (600 ms dial + the quiet
+  graceful close) — a dev-tool cost; persisting the cooldown would remove it.
+  199 tests. Known
+  consequence: a conversation quiet longer than the 5-min evidence TTL gets
+  one 600 ms probe, and if that's too slow (cold cross-NAT holepunch) the
+  message takes the mailbox and the next one goes direct — the pair converges
+  once any traffic flows. **Separately noticed, pre-existing (not D5):** an
+  unreachable relay still costs a send the full 10 s `connect_timeout` for its
+  deposit attempt, since C4a stopped retrying but kept the deadline — the
+  cheap lever is a shorter *in-send* deposit deadline (the outbox exists so a
+  send needn't wait), left unscheduled as a C4a tuning call.)*
 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.

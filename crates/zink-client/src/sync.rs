@@ -32,6 +32,29 @@ use crate::state::ClientState;
 pub(crate) type DirectSink =
     std::sync::Arc<std::sync::OnceLock<Box<dyn Fn(Vec<Received>) + Send + Sync>>>;
 
+/// What the send side knows about reaching a peer directly (D5). Shared with
+/// the router because an **inbound** connection is the cheapest evidence
+/// there is that a path exists — and evidence is what licenses a send to
+/// spend real time on a direct dial instead of just using the mailbox.
+///
+/// In memory on purpose (like `Client::queried`): reachability is a fact
+/// about *now*, so a fresh process starts from "don't know" rather than from
+/// a stale opinion.
+pub(crate) type ReachMap =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Reach>>>;
+
+/// Wall-clock ms (0 = never). Copy-small; the map is rewritten in place.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct Reach {
+    /// Last evidence the peer is reachable: a delivery it took, a push it
+    /// declined (declining still proves we reached it), or a connection it
+    /// opened to us.
+    pub seen_ms: u64,
+    /// Last dial that got nowhere — suppresses re-dialing for a cooldown, so
+    /// a recipient that is simply offline costs a send nothing.
+    pub failed_ms: u64,
+}
+
 /// Serves history a peer asks for. Backed by a clone of the client's store —
 /// reads only; a served peer is trusted no more than a relay. **Serving gate
 /// (D0c): contacts-only.** Serving is discretionary (SPEC §5.2) and this is
@@ -47,6 +70,8 @@ struct SyncHandler {
     device: DeviceKey,
     /// Where an accepted `Deliver` is announced (D5).
     sink: DirectSink,
+    /// Peers that reached us are reachable (D5) — the send side reads this.
+    reach: ReachMap,
 }
 
 /// Hand-written because `DeviceKey` is secret material — deliberately
@@ -204,6 +229,11 @@ impl ProtocolHandler for SyncHandler {
         let serves = self.serves(caller);
         if !serves {
             tracing::debug!("sync request from a non-contact; serving nothing");
+        } else if let Ok(mut reach) = self.reach.lock() {
+            // A peer that reached us can be reached (D5): our next send to it
+            // is worth a real dial budget rather than a token probe. Only for
+            // peers we serve — a stranger's connection is not our business.
+            reach.entry(caller.0).or_default().seen_ms = crate::client::now_ms();
         }
         // One request per bi-stream; serve until the peer closes.
         loop {
@@ -260,6 +290,7 @@ pub(crate) fn spawn_sync_router(
     state: ClientState,
     device: DeviceKey,
     sink: DirectSink,
+    reach: ReachMap,
 ) -> Router {
     Router::builder(endpoint)
         .accept(
@@ -268,6 +299,7 @@ pub(crate) fn spawn_sync_router(
                 state,
                 device,
                 sink,
+                reach,
             },
         )
         .spawn()

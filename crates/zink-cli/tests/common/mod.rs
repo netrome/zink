@@ -20,6 +20,11 @@ pub fn cli(args: &[&str]) -> Output {
         // 10 s connect deadline. In-process relays answer in single-digit ms,
         // so 500 ms has plenty of headroom for loaded CI.
         .env("ZINK_CONNECT_TIMEOUT_MS", "500")
+        // Don't wait out iroh's ~3 s post-failed-dial drain on every one-shot
+        // command (D5): ~30 invocations per test made that the suite's
+        // dominant cost. The price is iroh's ungraceful-abort line on stderr,
+        // which these tests ignore.
+        .env("ZINK_CLOSE_DEADLINE_MS", "200")
         .output()
         .expect("run zink-cli")
 }

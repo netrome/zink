@@ -209,14 +209,64 @@ dial timeout never serially delays the fallback; and/or reuse an already-open
 direct connection when the conversation is active. Keep it simple first — a
 short dial timeout with mailbox fallback is correct if unoptimized.
 
-**As built:** kept simple, as recommended. Recipients are dialed **concurrently**
-(`n0_future::join_all`, the De3 shape — one offline recipient never serializes the
-rest) with the deadline capped at `min(connect_timeout, 3 s)`: a speculative dial
-must not inherit a send's full patience, because the mailbox behind it is fast
-and reliable. The remaining cost is honest and known: a send to an offline
-recipient pays up to that cap before falling back. Worth revisiting if it's felt
-in the field — reusing a live connection for an active conversation is the next
-lever, and iroh already caches the path, so a warm peer is cheap.
+**As built:** recipients are dialed **concurrently** (`n0_future::join_all`, the
+De3 shape — one offline recipient never serializes the rest).
+
+**Measured, then fixed (2026-07-24).** The first cut dialed blindly on every
+send with a flat `min(connect_timeout, 3 s)` cap, and the cost was worse than
+"unoptimized":
+
+| | pre-D5 | blind dial | fixed |
+|---|---|---|---|
+| send, recipient online | n/a | 86 ms | 86 ms |
+| send, recipient offline — app (long-lived) | ~0 | 3 s **every send** | 0.6 s once per minute |
+| send, recipient offline — CLI (one-shot) | 90 ms | 6.0 s | 3.7 s (0.6 s dial + graceful close) |
+| `groups` e2e | 13.2 s | 38.7 s | 10.3 s |
+| `multi_device` / `who_is` e2e | — | 16.6 / 11.8 s | 5.5 / 3.6 s |
+
+Two separate costs, one cause — a *speculative relay-path dial on every send*:
+
+1. **The dial itself**, paid in full whenever the peer isn't reachable (the
+   deadline is the whole cost; there is no fast failure). On the send's critical
+   path, and the app renders the composed message only after `send` returns.
+2. **A ~3 s drain at `Endpoint::close()`**, per process, after a *failed*
+   dial — iroh settling the relay-path machinery the dial started. Invisible to
+   the app (one long-lived client), but the CLI closes per command, which is
+   what made the e2e suite explode. It also turns out to have been paying this
+   for every pre-D5 `recv`/`who-is` that dialed by key.
+
+The fix, in two parts:
+
+- **Spend time only where evidence says it will land** (`direct_budget`, pure and
+  unit-tested). A peer we've recently reached — it took or declined a delivery,
+  or it *connected to us* (the router notes that: `sync::Reach`) — gets the full
+  3 s. A peer we know nothing about gets one 600 ms probe: enough for an
+  already-warm path or a LAN, too little to delay a message over. A peer whose
+  dial just failed gets **no dial at all** for 60 s. Evidence is in-memory and
+  TTL'd (5 min): reachability is a fact about *now*, so a fresh process starts
+  from "don't know" rather than a stale opinion.
+- **Bound `Client::close()`** by `ClientConfig::close_deadline` (default 5 s —
+  generous enough to stay graceful). Cutting it short is *correct* but makes
+  iroh log an ungraceful-abort error, so only an edge that prefers speed to a
+  clean log shortens it: the e2e harness sets `ZINK_CLOSE_DEADLINE_MS=200`,
+  which is what brought the suite below its pre-D5 time (the close drain was
+  also taxing every pre-existing `recv`/`who-is` that dialed by key).
+  Interactive CLI keeps the quiet default, so a one-shot send to an offline
+  peer costs ~3.7 s there — a dev-tool cost, not a product one; the app never
+  closes. Persisting the failure cooldown would remove it, if it ever annoys.
+
+A decline (`NotHeld`) marks the peer *reachable* but never triggers the
+cooldown: decline reasons are indistinguishable on the wire (SPEC §5.2) and some
+are per-message, so treating one as "stop pushing to this peer" would lose
+directness for the next message. Reaching a live peer is cheap; only
+unreachability is worth remembering.
+
+Consequence worth stating: a conversation that has been quiet longer than the
+evidence TTL gets one 600 ms probe on its next send. If that probe is too slow
+(a cold cross-NAT holepunch on cellular can be), the message takes the mailbox
+and the *following* one goes direct — the pair converges as soon as any traffic
+flows in either direction. Reusing a live connection for an active conversation
+is still the next lever if this is ever felt.
 
 ---
 

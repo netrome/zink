@@ -28,12 +28,21 @@ pub struct ClientConfig {
     /// Deadline for reaching a relay. Long enough for a phone on flaky
     /// cellular; tests exercising down-relay paths shrink it.
     pub connect_timeout: Duration,
+    /// How long `close` waits for the endpoint to shut down gracefully.
+    /// After a direct dial that got nowhere (D5), iroh spends ~3 s settling
+    /// the relay-path machinery that dial started; a one-shot edge pays that
+    /// per command. The default is generous enough to stay graceful — cutting
+    /// it short is *correct* but makes iroh log an ungraceful-abort error, so
+    /// only an edge that prefers speed to a clean log (the e2e harness)
+    /// shortens it.
+    pub close_deadline: Duration,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             connect_timeout: Duration::from_secs(10),
+            close_deadline: Duration::from_secs(5),
         }
     }
 }
@@ -54,6 +63,9 @@ pub struct Client {
     /// The edge's sink for directly-delivered messages (D5), shared with the
     /// router's handler. Registered after open via `on_direct_delivery`.
     direct_sink: crate::sync::DirectSink,
+    /// Per-peer direct reachability (D5), shared with the router so an
+    /// inbound connection counts as evidence. See `deliver_direct`.
+    reach: crate::sync::ReachMap,
 }
 
 impl Client {
@@ -100,11 +112,13 @@ impl Client {
         // rebuilt from the seed, since `DeviceKey` is deliberately not
         // `Clone`.
         let direct_sink = crate::sync::DirectSink::default();
+        let reach = crate::sync::ReachMap::default();
         let sync_router = crate::sync::spawn_sync_router(
             endpoint.clone(),
             state.clone(),
             DeviceKey::from_seed(device.seed()),
             direct_sink.clone(),
+            reach.clone(),
         );
         Ok(Self {
             device,
@@ -114,6 +128,7 @@ impl Client {
             queried: std::sync::Mutex::default(),
             _sync_router: sync_router,
             direct_sink,
+            reach,
         })
     }
 
@@ -153,9 +168,21 @@ impl Client {
     /// homes to a relay (D0b) it holds a live transport, and dropping that
     /// without closing makes iroh log an ungraceful-abort error on every
     /// one-shot command. Long-lived edges (the app) never call this.
+    ///
+    /// **Bounded** by `ClientConfig::close_deadline` (D5): after a direct dial
+    /// that got nowhere, iroh spends ~3 s draining the relay-path machinery
+    /// that dial started, and a one-shot edge pays that per command. Graceful
+    /// is a courtesy to the log, not a correctness requirement — past the
+    /// deadline the endpoint is dropped and iroh's abort warning accepted.
     pub async fn close(self) {
-        let _ = self._sync_router.shutdown().await;
-        self.endpoint.close().await;
+        let deadline = self.config.close_deadline;
+        let shutdown = async {
+            let _ = self._sync_router.shutdown().await;
+            self.endpoint.close().await;
+        };
+        if n0_future::time::timeout(deadline, shutdown).await.is_err() {
+            tracing::debug!("close: endpoint still draining at the deadline; dropping it");
+        }
     }
 
     /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
@@ -491,38 +518,53 @@ impl Client {
     /// recipient falls back to its mailbox.
     ///
     /// Concurrent, so one offline recipient never serializes the rest, and
-    /// bounded well below `connect_timeout`: an unreachable peer must cost a
-    /// send a moment, not its whole patience — the mailbox behind it is fast
-    /// and reliable. Recipients with no dialable route (mailbox-only
-    /// knowledge, no relay URL) are skipped without a dial.
+    /// **budgeted per recipient by what we know about reaching it** — the
+    /// speculation has to stay off the send's critical path:
+    ///
+    /// - *Recently reached* (it took or declined a delivery, or it connected
+    ///   to us — `sync::Reach`): a real budget, `min(connect_timeout, 3 s)`.
+    ///   Evidence says the dial will land, so waiting for it is what earns
+    ///   the metadata win.
+    /// - *Nothing known*: one short exploratory dial. A path that is already
+    ///   warm answers in tens of ms; anything slower is not worth delaying a
+    ///   message for, because the mailbox behind it is fast and reliable.
+    /// - *Failed within the cooldown*: **no dial at all**. A recipient that is
+    ///   simply offline must cost a send nothing, however often we send to it.
+    ///
+    /// Recipients with no dialable route (mailbox-only knowledge, no relay
+    /// URL) are skipped without a dial. Reachability is still the only
+    /// presence signal (§2) — this just stops us re-asking a question we
+    /// already know the answer to.
     async fn deliver_direct(
         &self,
         envelope: &MessageEnvelope,
         recipients: &[PublicKey],
     ) -> BTreeSet<PublicKey> {
-        /// Reachability *is* the presence signal (§2), so this is how long a
-        /// send speculates on it before taking the reliable path.
-        const DIRECT_DIAL_CAP: Duration = Duration::from_secs(3);
-
-        let timeout = self.config.connect_timeout.min(DIRECT_DIAL_CAP);
+        let now = now_ms();
         let me = self.device.public();
         let mut targets = Vec::new();
         for &key in recipients {
             if key == me {
                 continue;
             }
+            let Some(budget) = direct_budget(self.reach_of(&key), now, self.config.connect_timeout)
+            else {
+                tracing::debug!("direct: recently unreachable; mailbox only");
+                continue;
+            };
             let stored = self.trusted_record_for(&key);
             match self.peer_addr_for(key, stored.as_ref()) {
-                Ok(addr) => targets.push((key, addr)),
+                Ok(addr) => targets.push((key, addr, budget)),
                 Err(_) => tracing::debug!("direct: no dialable route; mailbox only"),
             }
         }
-        let pushes = targets.into_iter().map(|(key, addr)| async move {
+        let pushes = targets.into_iter().map(|(key, addr, timeout)| async move {
             let connection = match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout).await
             {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::debug!(%error, "direct: recipient unreachable");
+                    self.note_reach(&key, |reach| reach.failed_ms = now);
                     return None;
                 }
             };
@@ -532,17 +574,32 @@ impl Client {
             match net::sync_request(&connection, op).await {
                 // The ack that licenses skipping the mailbox: stored, not
                 // merely received.
-                Ok(SyncResult::Stored) => Some(key),
+                Ok(SyncResult::Stored) => {
+                    self.note_reach(&key, |reach| {
+                        reach.seen_ms = now;
+                        reach.failed_ms = 0;
+                    });
+                    Some(key)
+                }
                 Ok(SyncResult::NotHeld) => {
                     tracing::debug!("direct: recipient declined; falling back to its mailbox");
+                    // Reachable — it answered — so no cooldown: the reasons a
+                    // peer declines are indistinguishable on the wire
+                    // (SPEC §5.2) and some are *per message* (an envelope it
+                    // can't open), so a decline must not suppress the next
+                    // message. Reaching a live peer is cheap; only
+                    // unreachability is worth remembering.
+                    self.note_reach(&key, |reach| reach.seen_ms = now);
                     None
                 }
                 Ok(other) => {
                     tracing::warn!(?other, "direct: unexpected response");
+                    self.note_reach(&key, |reach| reach.failed_ms = now);
                     None
                 }
                 Err(error) => {
                     tracing::debug!(%error, "direct: delivery failed");
+                    self.note_reach(&key, |reach| reach.failed_ms = now);
                     None
                 }
             }
@@ -552,6 +609,23 @@ impl Client {
             .into_iter()
             .flatten()
             .collect()
+    }
+
+    /// What we currently know about reaching `key` directly (D5).
+    fn reach_of(&self, key: &PublicKey) -> crate::sync::Reach {
+        self.reach
+            .lock()
+            .ok()
+            .and_then(|reach| reach.get(&key.0).copied())
+            .unwrap_or_default()
+    }
+
+    /// Record what a dial just taught us. A poisoned lock is not worth
+    /// failing a send over — the cost of losing a note is one extra dial.
+    fn note_reach(&self, key: &PublicKey, note: impl FnOnce(&mut crate::sync::Reach)) {
+        if let Ok(mut reach) = self.reach.lock() {
+            note(reach.entry(key.0).or_default());
+        }
     }
 
     /// One relay's full delivery: deposit (idempotent retry inside), then
@@ -2451,6 +2525,38 @@ impl Client {
     }
 }
 
+/// How long to spend dialing one recipient directly (D5) — `None` = don't
+/// dial at all. Pure, so the policy is pinned by tests rather than by timing.
+///
+/// The rule that matters: **a recipient that is simply offline must not cost a
+/// send anything, however often we send to it.** A blind dial per send put
+/// seconds on the send path (measured: ~3 s per unreachable recipient, plus a
+/// per-process drain cost at close), which the edge pays before it can render
+/// the message. So we spend real time only where evidence says it will land.
+pub(crate) fn direct_budget(
+    reach: crate::sync::Reach,
+    now: u64,
+    connect_timeout: Duration,
+) -> Option<Duration> {
+    /// Budget for a peer we have recent evidence about — a live conversation.
+    const CAP_KNOWN: Duration = Duration::from_secs(3);
+    /// Budget for a peer we know nothing about: enough for an already-warm
+    /// path or a LAN, too little to delay a message over.
+    const CAP_UNKNOWN: Duration = Duration::from_millis(600);
+    /// How long evidence of reachability stays worth acting on.
+    const EVIDENCE_TTL_MS: u64 = 5 * 60 * 1000;
+    /// How long a failed dial suppresses the next one. Short enough that a
+    /// peer coming back online is noticed within a minute — until then its
+    /// messages simply take the mailbox, which is what it is for.
+    const FAIL_COOLDOWN_MS: u64 = 60 * 1000;
+
+    if now.saturating_sub(reach.failed_ms) < FAIL_COOLDOWN_MS {
+        return None;
+    }
+    let known = now.saturating_sub(reach.seen_ms) < EVIDENCE_TTL_MS;
+    Some(connect_timeout.min(if known { CAP_KNOWN } else { CAP_UNKNOWN }))
+}
+
 /// `Client::remember` over bare state — the serving router (D5 `Deliver`)
 /// stores exactly what a drain stores, and holds state but no `Client`.
 pub(crate) fn remember(state: &ClientState, envelope: &MessageEnvelope) -> Result<(), Error> {
@@ -2768,7 +2874,7 @@ fn membership_delta(
     )
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before 1970")
@@ -2988,6 +3094,7 @@ mod tests {
             &key_path,
             ClientConfig {
                 connect_timeout: Duration::from_millis(300),
+                ..Default::default()
             },
         )
         .await
@@ -3151,9 +3258,15 @@ mod tests {
             )
             .expect("save profile");
         keystore::load_or_create(&key_path).expect("device key");
-        Client::open_with(&key_path, ClientConfig { connect_timeout })
-            .await
-            .expect("open client")
+        Client::open_with(
+            &key_path,
+            ClientConfig {
+                connect_timeout,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("open client")
     }
 
     #[tokio::test]
@@ -3278,6 +3391,51 @@ mod tests {
         assert!(live[0].relay.is_none(), "no relay was on the path");
 
         let _ = std::fs::remove_dir_all(temp_root("direct"));
+    }
+
+    #[test]
+    fn direct_budget__should_spend_time_only_where_evidence_says_it_lands() {
+        // Given
+        let now = 10 * 60 * 1000;
+        let production = Duration::from_secs(10);
+        let never = crate::sync::Reach::default();
+        let reached = crate::sync::Reach {
+            seen_ms: now - 1000,
+            failed_ms: 0,
+        };
+        let stale = crate::sync::Reach {
+            seen_ms: now - 6 * 60 * 1000, // past the evidence TTL
+            failed_ms: 0,
+        };
+        let just_failed = crate::sync::Reach {
+            seen_ms: now - 1000,
+            failed_ms: now - 5000,
+        };
+
+        // When / Then: an unreachable recipient costs a send nothing…
+        assert_eq!(direct_budget(just_failed, now, production), None);
+        // …a live conversation gets a real budget…
+        assert_eq!(
+            direct_budget(reached, now, production),
+            Some(Duration::from_secs(3))
+        );
+        // …an unknown or stale peer gets one cheap probe…
+        assert_eq!(
+            direct_budget(never, now, production),
+            Some(Duration::from_millis(600))
+        );
+        assert_eq!(
+            direct_budget(stale, now, production),
+            Some(Duration::from_millis(600))
+        );
+        // …and an edge that tightened `connect_timeout` still wins.
+        assert_eq!(
+            direct_budget(reached, now, Duration::from_millis(200)),
+            Some(Duration::from_millis(200))
+        );
+        // A cooled-down failure is retried again afterwards.
+        let recovered = now + 61 * 1000;
+        assert!(direct_budget(just_failed, recovered, production).is_some());
     }
 
     #[tokio::test]
@@ -4322,6 +4480,7 @@ mod tests {
             &key,
             ClientConfig {
                 connect_timeout: Duration::from_millis(300),
+                ..Default::default()
             },
         )
         .await
@@ -4564,6 +4723,7 @@ mod tests {
                 &key,
                 ClientConfig {
                     connect_timeout: Duration::from_millis(300),
+                    ..Default::default()
                 },
             )
             .await
@@ -5121,6 +5281,7 @@ mod tests {
             &key_path,
             ClientConfig {
                 connect_timeout: Duration::from_secs(1),
+                ..Default::default()
             },
         )
         .await

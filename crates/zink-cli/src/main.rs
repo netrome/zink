@@ -886,7 +886,10 @@ fn blob_drafts(flags: &[(String, String)]) -> Result<Vec<BlobDraft>, String> {
 /// environment — the config edge the lib deliberately doesn't have:
 /// `ZINK_CONNECT_TIMEOUT_MS` shrinks the relay-connect deadline (the e2e
 /// suite sets it so down-relay tests fail in milliseconds, not the
-/// production 10 s).
+/// production 10 s). `ZINK_CLOSE_DEADLINE_MS` shortens the graceful-shutdown
+/// wait: after a direct dial that got nowhere (D5), iroh takes ~3 s to settle,
+/// which a one-shot command pays per invocation — the e2e suite trades that
+/// for iroh's ungraceful-abort warning, interactive use keeps the clean log.
 async fn open_client(flags: &[(String, String)]) -> Result<Client, String> {
     let mut config = ClientConfig::default();
     if let Ok(ms) = std::env::var("ZINK_CONNECT_TIMEOUT_MS") {
@@ -894,6 +897,12 @@ async fn open_client(flags: &[(String, String)]) -> Result<Client, String> {
             .parse()
             .map_err(|e| format!("ZINK_CONNECT_TIMEOUT_MS: {e}"))?;
         config.connect_timeout = std::time::Duration::from_millis(ms);
+    }
+    if let Ok(ms) = std::env::var("ZINK_CLOSE_DEADLINE_MS") {
+        let ms: u64 = ms
+            .parse()
+            .map_err(|e| format!("ZINK_CLOSE_DEADLINE_MS: {e}"))?;
+        config.close_deadline = std::time::Duration::from_millis(ms);
     }
     Ok(Client::open_with(&single(flags, "--key")?, config).await?)
 }
