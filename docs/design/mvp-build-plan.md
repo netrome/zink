@@ -258,7 +258,7 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   + rendezvous doc + client-core.md updated. Note: with multiple home
   relays, `on_new` can repeat a message another loop already delivered —
   storage dedups; C4c's notification path dedups by id.)*
-- [ ] **C4c · 🚩 Foreground service + notifications.** The Doze risk spike,
+- [x] **C4c · 🚩 Foreground service + notifications.** The Doze risk spike,
   then the plumbing: minimal Kotlin FGS shell (`specialUse` type +
   battery-optimization exemption) whose only job is keeping the process — and
   the Rust subscription loop in it — alive while backgrounded; petname + text
