@@ -290,7 +290,7 @@ the change is visible on device where relevant · this doc updated.
   your code), replacing the "dumped into the mega-screen" first run. Reuses U5
   widgets. *Done when:* a fresh install walks a new user to a shareable code
   without ever showing a raw dial string cold.
-- [ ] **U8 · Language + metadata legibility.** Apply the §7 vocabulary across
+- [x] **U8 · Language + metadata legibility.** Apply the §7 vocabulary across
   the UI; make message metadata scannable (states as small pills/icons with
   meaning, not a symbol run-on); hide `crossed`/`merged` behind an optional
   "show concurrency" toggle. *Done when:* no protocol jargon is user-facing by

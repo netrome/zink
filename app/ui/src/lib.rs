@@ -619,10 +619,14 @@ fn ChatView(
 ) -> impl IntoView {
     let draft = RwSignal::new(String::new());
     let attachment = RwSignal::new(None::<(OutgoingImage, String)>);
-    /// hash → data URL; present-but-empty marks an in-flight fetch.
+    // hash → data URL; present-but-empty marks an in-flight fetch.
     let thumbs = RwSignal::new(HashMap::<String, String>::new());
-    /// Full-res overlay: `Some("")` = loading, `Some(url)` = showing.
+    // Full-res overlay: `Some("")` = loading, `Some(url)` = showing.
     let viewer = RwSignal::new(None::<String>);
+    // Optional "show concurrency" affordance (U8): the causal-DAG cues
+    // (crossed / merged, tenet 7) are advanced honesty data — hidden by
+    // default, revealed on demand.
+    let show_concurrency = RwSignal::new(false);
     let conversation = StoredValue::new(id);
 
     // Fetch (cache-backed) every visible thumbnail not yet loaded.
@@ -888,6 +892,20 @@ fn ChatView(
     view! {
         <main>
             <h3>{label}</h3>
+            <div class="picks">
+                <button
+                    class="secondary"
+                    on:click=move |_| show_concurrency.update(|on| *on = !*on)
+                >
+                    {move || {
+                        if show_concurrency.get() {
+                            "hide when messages crossed"
+                        } else {
+                            "show when messages crossed"
+                        }
+                    }}
+                </button>
+            </div>
             {move || {
                 let list = unknowns.get();
                 (!list.is_empty())
@@ -1112,20 +1130,22 @@ fn ChatView(
                                     }
                                 })
                                 .collect::<Vec<_>>();
-                            let delivery = message
-                                .pending
-                                .then_some(" · ⏳ not delivered yet")
-                                .unwrap_or_default();
-                            // Concurrency markers (D4d): real data, shown —
-                            // the rendered order stays the linear default.
-                            let crossed = message
-                                .crossed
-                                .then_some(" · ⇄ crossed in flight")
-                                .unwrap_or_default();
-                            let merged = message
-                                .merged
-                                .then_some(" · ⋈ merged branches")
-                                .unwrap_or_default();
+                            let pending = if message.pending { " · sending…" } else { "" };
+                            // Concurrency cues (D4d, tenet 7): real causal
+                            // data, but advanced — shown only when the reader
+                            // opts in via the header toggle.
+                            let concurrency = if show_concurrency.get() {
+                                let mut cues = String::new();
+                                if message.crossed {
+                                    cues.push_str(" · ⇄ crossed in flight");
+                                }
+                                if message.merged {
+                                    cues.push_str(" · ⋈ merged branches");
+                                }
+                                cues
+                            } else {
+                                String::new()
+                            };
                             let avatar_key = (!message.mine).then(|| message.sender_key.clone());
                             let deltas: Vec<String> = message
                                 .joined
@@ -1149,13 +1169,14 @@ fn ChatView(
                                         })}
                                     <span class="dim">
                                         {message.sender} " · " {time_of(message.timestamp_ms)}
-                                        {delivery} {crossed} {merged}
+                                        {pending} {concurrency}
                                     </span>
                                     {(!deltas.is_empty())
                                         .then(|| view! { <div class="dim">{deltas.join(" · ")}</div> })}
                                     {images}
                                     {body.map(|text| view! { <div>{text}</div> })}
-                                    {unopenable.then(|| view! { <div class="dim">"<unopenable>"</div> })}
+                                    {unopenable
+                                        .then(|| view! { <div class="dim">"🔒 can't read this yet"</div> })}
                                 </div>
                             }
                         })
@@ -1300,7 +1321,7 @@ fn MeView(
             match invoke::invoke::<QrPayload>("set_profile", &args).await {
                 Ok(_) => {
                     reload();
-                    ok("profile saved — let a friend scan your QR");
+                    ok("profile saved — let a friend scan your code");
                 }
                 Err(e) => err(e),
             }
@@ -1378,8 +1399,8 @@ fn MeView(
                     paste.set(String::new());
                     reload();
                     ok(&format!(
-                        "recognized {name} as your device — scan back from it \
-                         to pair both ways"
+                        "linked {name} as your device — link back from it too, \
+                         so both sides agree"
                     ));
                 }
                 Err(e) => err(e),
@@ -1396,7 +1417,7 @@ fn MeView(
             match invoke::invoke::<serde::de::IgnoredAny>("unrecognize_device", &args).await {
                 Ok(_) => {
                     reload();
-                    ok("un-recognized — local only, nothing published");
+                    ok("unlinked — local only, nothing published");
                 }
                 Err(e) => err(e),
             }
@@ -1416,8 +1437,8 @@ fn MeView(
                 Ok(_) => {
                     armed.set(None);
                     reload();
-                    ok("repudiated — published in your record; contacts learn \
-                        it from their next pull");
+                    ok("marked compromised — published in your record; contacts \
+                        learn it from their next pull");
                 }
                 Err(e) => err(e),
             }
@@ -1536,7 +1557,7 @@ fn MeView(
             <button class="secondary" on:click=add_relay>
                 "add relay"
             </button>
-            <button on:click=save>"save profile & show QR"</button>
+            <button on:click=save>"save & show my code"</button>
             {move || {
                 state
                     .get()
@@ -1556,22 +1577,22 @@ fn MeView(
                     .map(|state| {
                         view! {
                             <div class="dim" id="record-text">
-                                {format!("this device's key: {}", state.my_key)}
+                                {format!("this device's fingerprint: {}", state.my_key)}
                             </div>
                         }
                     })
             }}
             <h3>"my devices"</h3>
             <div class="dim">
-                "other devices you recognize as also you. recognition is one-way — \
-                 recognize this device from each of them too, so both sides agree"
+                "your other devices. linking is one-way — link this device from each \
+                 of them too, so both sides agree"
             </div>
             {move || {
                 let devices = state.get().map(|state| state.devices).unwrap_or_default();
                 if devices.is_empty() {
                     view! {
                         <div class="dim">
-                            "none recognized — pair by scanning the other device's QR"
+                            "none linked yet — link one by scanning its QR"
                         </div>
                     }
                         .into_any()
@@ -1593,7 +1614,7 @@ fn MeView(
                                         class="secondary"
                                         on:click=move |_| unrecognize(unrec_key.clone())
                                     >
-                                        "un-recognize"
+                                        "unlink"
                                     </button>
                                     <button
                                         class="secondary"
@@ -1609,9 +1630,9 @@ fn MeView(
                                     >
                                         {move || {
                                             if armed.get().as_deref() == Some(label_key.as_str()) {
-                                                "⚠ confirm repudiation"
+                                                "⚠ confirm — mark compromised"
                                             } else {
-                                                "repudiate"
+                                                "mark compromised"
                                             }
                                         }}
                                     </button>
@@ -1622,15 +1643,15 @@ fn MeView(
                         .into_any()
                 }
             }}
-            <button on:click=scan>"pair: scan a device's QR"</button>
+            <button on:click=scan>"link a device: scan its QR"</button>
             <textarea
                 rows="2"
-                placeholder="…or paste a ZINK: payload to pair"
+                placeholder="…or paste their code to link"
                 prop:value=move || paste.get()
                 on:input=move |ev| paste.set(event_target_value(&ev))
             />
             <button class="secondary" on:click=move |_| preview(paste.get_untracked())>
-                "pair from pasted text"
+                "link from pasted code"
             </button>
             {move || {
                 pair_preview
@@ -1640,7 +1661,7 @@ fn MeView(
                         view! {
                             <div class="wild">
                                 <div class="row">
-                                    <b>"recognize this device as me?"</b>
+                                    <b>"link this as your device?"</b>
                                 </div>
                                 <div class="row">
                                     <b>{decoded.name.clone().unwrap_or_else(|| "(unnamed)".to_string())}</b>
@@ -1649,11 +1670,11 @@ fn MeView(
                                 // compare against the key shown on the
                                 // other device before signing anything.
                                 <div class="dim" id="record-text">
-                                    {format!("key: {}", decoded.key)}
+                                    {format!("fingerprint: {}", decoded.key)}
                                 </div>
                                 <div class="row">
                                     <button on:click=move |_| recognize(confirm_payload.clone())>
-                                        "recognize as my device"
+                                        "yes, this is my device"
                                     </button>
                                     <button
                                         class="secondary"
@@ -1820,7 +1841,7 @@ fn PeopleView(
                         <button on:click=scan>"scan QR"</button>
                         <textarea
                             rows="2"
-                            placeholder="…or paste a ZINK: payload"
+                            placeholder="…or paste their code"
                             prop:value=move || paste.get()
                             on:input=move |ev| paste.set(event_target_value(&ev))
                         />
@@ -2062,8 +2083,8 @@ fn PersonView(
                     armed.set(false);
                     reload();
                     load_detail();
-                    ok("repudiated — published in your record; contacts learn \
-                        it from their next pull");
+                    ok("marked compromised — published in your record; contacts \
+                        learn it from their next pull");
                 }
                 Err(e) => err(e),
             }
