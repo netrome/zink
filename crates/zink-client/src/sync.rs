@@ -5,17 +5,32 @@
 //! `docs/design/who-is-this.md`). This is the first place the client is a
 //! server, not just a dialer. The fetching side (`Client::backfill`) lives
 //! in `client`.
+//!
+//! Since D5 it also *accepts* messages: `Deliver` makes this device its own
+//! mailbox while it is online (`docs/design/direct-delivery.md`).
 
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use rand_core::OsRng;
 use zink_protocol::{
-    ContactRecord, DeviceKey, MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES, MessageId, PublicKey,
-    SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest, SyncResponse, SyncResult,
+    ContactRecord, DeviceKey, FORMAT_VERSION, MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES,
+    MessageEnvelope, MessageId, PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest,
+    SyncResponse, SyncResult,
 };
 
+use crate::client::Received;
 use crate::state::ClientState;
+
+/// Where a directly-delivered message goes after it is stored (D5): the
+/// edge's live-delivery sink, registered once via
+/// `Client::on_direct_delivery`. `OnceLock` because the serving router is
+/// spawned during `open` — before any edge could hand over a callback — and
+/// because a second registration would silently shadow the first. Absent
+/// (never registered), a direct arrival is still stored; only the live
+/// notification is missed, and the next drain surfaces it.
+pub(crate) type DirectSink =
+    std::sync::Arc<std::sync::OnceLock<Box<dyn Fn(Vec<Received>) + Send + Sync>>>;
 
 /// Serves history a peer asks for. Backed by a clone of the client's store —
 /// reads only; a served peer is trusted no more than a relay. **Serving gate
@@ -30,6 +45,8 @@ struct SyncHandler {
     /// allowance) and signs the fresh self-record served for a `WhoIs`
     /// about our own key (D1a).
     device: DeviceKey,
+    /// Where an accepted `Deliver` is announced (D5).
+    sink: DirectSink,
 }
 
 /// Hand-written because `DeviceKey` is secret material — deliberately
@@ -120,6 +137,65 @@ impl SyncHandler {
             .collect();
         SyncResult::Wraps { wraps }
     }
+
+    /// Accept a directly-delivered envelope (D5, direct-delivery.md §3–4).
+    ///
+    /// **No new trust.** A dialer is trusted no more than a relay: the
+    /// envelope must carry the version this client speaks, hash-and-signature
+    /// verify, and actually be addressed to us — otherwise a contact could
+    /// push arbitrary history into our store, which not even our own relay
+    /// can do (it indexes deposits per recipient key). The body must open
+    /// too, mirroring the mailbox drain: an envelope we can't read is either
+    /// a wrap bug or hostile, and storing it either way is a spam sink.
+    ///
+    /// **`Stored` means durably stored.** The sender skips its mailbox
+    /// deposit on this ack (§3), so returning it before the write lands
+    /// would lose the message with no fallback copy. Every decline is a bare
+    /// `NotHeld` — the sender only needs "not stored", and a peer's reasons
+    /// are nobody else's business (SPEC §5.2).
+    fn accept_delivery(&self, serves: bool, envelope: MessageEnvelope) -> SyncResult {
+        if !serves {
+            // Gate as for history (D0c): a stranger's push falls back to
+            // their mailbox deposit, where the relay's caps (C0) and the
+            // parked quarantine view are the policy for unknown senders.
+            tracing::debug!("declining a direct delivery from a non-contact");
+            return SyncResult::NotHeld;
+        }
+        if envelope.version != FORMAT_VERSION || envelope.core.version != FORMAT_VERSION {
+            tracing::warn!("declining a direct delivery with an unsupported version");
+            return SyncResult::NotHeld;
+        }
+        if envelope.verify().is_err() {
+            tracing::warn!("declining an unverifiable direct delivery");
+            return SyncResult::NotHeld;
+        }
+        if !envelope.core.recipients.contains(&self.device.public()) {
+            tracing::warn!("declining a direct delivery not addressed to us");
+            return SyncResult::NotHeld;
+        }
+        let body = envelope.open(&self.device);
+        if body.is_err() {
+            tracing::warn!("declining a direct delivery this device cannot open");
+            return SyncResult::NotHeld;
+        }
+        // Idempotent: a re-delivery of something already held rewrites the
+        // same bytes and acks again, exactly like a repeated deposit.
+        if let Err(error) = crate::client::remember(&self.state, &envelope) {
+            tracing::warn!(%error, "direct delivery failed to store; declining");
+            return SyncResult::NotHeld;
+        }
+        tracing::info!("stored a direct delivery");
+        if let Some(sink) = self.sink.get() {
+            sink(vec![Received {
+                envelope,
+                // No relay was involved — blobs resolve through our own
+                // home relays' caches, where the sender pushed them.
+                relay: None,
+                body,
+            }]);
+        }
+        SyncResult::Stored
+    }
 }
 
 impl ProtocolHandler for SyncHandler {
@@ -163,6 +239,7 @@ impl ProtocolHandler for SyncHandler {
                     None => SyncResult::NotHeld,
                 },
                 Some(SyncOp::GetKeys { ids }) => self.get_keys(caller, &ids),
+                Some(SyncOp::Deliver { envelope }) => self.accept_delivery(serves, *envelope),
                 None => SyncResult::Error {
                     code: SyncErrorCode::Malformed,
                 },
@@ -182,8 +259,16 @@ pub(crate) fn spawn_sync_router(
     endpoint: Endpoint,
     state: ClientState,
     device: DeviceKey,
+    sink: DirectSink,
 ) -> Router {
     Router::builder(endpoint)
-        .accept(SYNC_ALPN, SyncHandler { state, device })
+        .accept(
+            SYNC_ALPN,
+            SyncHandler {
+                state,
+                device,
+                sink,
+            },
+        )
         .spawn()
 }

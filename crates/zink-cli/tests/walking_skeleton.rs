@@ -26,7 +26,7 @@ async fn walking_skeleton__should_deliver_text_from_a_to_b_through_the_relay() {
     let text = "hello from the walking skeleton";
     let to_b = format!("{pubkey_b}@{dial}");
     let sent = stdout_of(&cli(&["send", "--key", &key_a, "--to", &to_b, text]));
-    assert!(sent.starts_with("deposited "), "got: {sent}");
+    assert!(sent.starts_with("sent "), "got: {sent}");
 
     // Then: B fetches, decrypts, prints
     let received = stdout_of(&cli(&["recv", "--key", &key_b, "--relay", &dial]));

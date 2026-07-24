@@ -283,7 +283,13 @@ relayed (still end-to-end encrypted QUIC) through a party's relay when it doesn'
 and always relay-routed for browsers — in two shapes:
 
 - **Fan-out (push):** deliver a message/blob to the recipient keys you chose —
-  reliable, acked, parked in the recipient's mailbox if offline.
+  reliable, acked, parked in the recipient's mailbox if offline. **Per recipient
+  device, direct when reachable, mailbox when not:** the sender pushes the
+  envelope peer-to-peer and skips that device's mailbox entirely once the
+  recipient acks a durable store, so an online conversation leaves the relay
+  nothing to see; any failure falls back to the deposit (D5,
+  `docs/design/direct-delivery.md`). Blob bytes still go to the recipient's
+  relay cache. Reachability *is* the presence signal — no presence protocol.
 - **Request/response (pull):** content-addressed `get` / `get-successors` for history
   and blobs, and the `who-is-this` identity query (§3.5) — each served at the
   answering peer's discretion.
@@ -321,8 +327,11 @@ visible.
 
 ### 5.3 Offline delivery & notifications (foundational, not a late feature)
 
-- **Mailbox:** when a recipient key is offline, its envelope is parked in a
-  relay-hosted mailbox until the device reconnects. Untrusted for content.
+- **Mailbox:** when a recipient key is offline *or unreachable*, its envelope is
+  parked in a relay-hosted mailbox until the device reconnects. Untrusted for
+  content. A recipient that took the message directly (§5.1) is never deposited
+  to at all — the mailbox is the fallback the tenets say it should be, not the
+  common path.
 - **Mailbox auth (protocol) vs. retention (policy).** Mailbox ops run over an
   **authenticated iroh connection**, so the relay already knows the connected peer's
   key: reading/deleting your mailbox just requires the connection key to match the

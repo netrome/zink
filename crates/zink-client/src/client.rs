@@ -48,8 +48,12 @@ pub struct Client {
     /// interest in a key. In-memory on purpose; the manual trigger re-asks.
     queried: std::sync::Mutex<BTreeSet<([u8; 32], [u8; 32])>>,
     /// The client is also a server: this router serves `SYNC_ALPN` (peer
-    /// history sync, D0) for as long as the client lives. Held, not called.
+    /// history sync, D0; direct delivery, D5) for as long as the client
+    /// lives. Held, not called.
     _sync_router: iroh::protocol::Router,
+    /// The edge's sink for directly-delivered messages (D5), shared with the
+    /// router's handler. Registered after open via `on_direct_delivery`.
+    direct_sink: crate::sync::DirectSink,
 }
 
 impl Client {
@@ -95,10 +99,12 @@ impl Client {
         // `who-is-this` (D1a), so it needs signing — its own key instance,
         // rebuilt from the seed, since `DeviceKey` is deliberately not
         // `Clone`.
+        let direct_sink = crate::sync::DirectSink::default();
         let sync_router = crate::sync::spawn_sync_router(
             endpoint.clone(),
             state.clone(),
             DeviceKey::from_seed(device.seed()),
+            direct_sink.clone(),
         );
         Ok(Self {
             device,
@@ -107,7 +113,40 @@ impl Client {
             config,
             queried: std::sync::Mutex::default(),
             _sync_router: sync_router,
+            direct_sink,
         })
+    }
+
+    /// Register the edge's sink for **directly delivered** messages (D5):
+    /// messages a peer handed us over the sync ALPN, with no mailbox and so
+    /// no nudge to drain. It is the direct-path sibling of `subscribe`'s
+    /// `on_new` — notify, re-render — and fires on the router's task, so it
+    /// must not block; edges that need async work (see `after_direct`)
+    /// spawn it. First registration wins; later ones are ignored.
+    ///
+    /// Without a sink, direct arrivals are still stored and verified — only
+    /// the *live* surfacing is missed, and the next drain/render shows them.
+    pub fn on_direct_delivery(&self, sink: impl Fn(Vec<Received>) + Send + Sync + 'static) {
+        if self.direct_sink.set(Box::new(sink)).is_err() {
+            tracing::warn!("direct-delivery sink already registered; ignoring");
+        }
+    }
+
+    /// The post-arrival seam for a direct delivery (D5): the same healing
+    /// `recv`/`subscribe` run after a drain — auto-sync the DAG, scoped
+    /// who-is for unknown members, re-wrap for paired devices. The edge
+    /// calls this from its `on_direct_delivery` sink, because the serving
+    /// router holds no `Client` (and the lib spawns no tasks of its own —
+    /// I/O and runtimes stay at the edges).
+    ///
+    /// Skipping it costs correctness only in the healing sense: a directly
+    /// delivered message whose ancestors we lack stays an honest orphan
+    /// until some later drain heals it — and with the relay unreachable
+    /// there may be no later drain.
+    pub async fn after_direct(&self, received: &[Received]) {
+        self.auto_sync(received).await;
+        self.auto_who_is(received).await;
+        self.auto_rewrap(received).await;
     }
 
     /// Graceful shutdown for short-lived edges (the CLI): since the endpoint
@@ -359,10 +398,61 @@ impl Client {
             self.state.add_outbox(id, relay, conversation, now)?;
         }
 
+        // Direct delivery (D5): hand the envelope to the recipients
+        // themselves first. A `Stored` ack is a durable store, so the
+        // mailbox is not needed for that device.
+        let direct = self
+            .deliver_direct(&sealed.envelope, &sealed.envelope.core.recipients)
+            .await;
+
+        // Which relays direct delivery discharges entirely (direct-delivery
+        // .md §3): every recipient the relay hosts acked. The outbox ledger
+        // is per (message, relay), and one relay can host several recipients
+        // — a deposit fans out to all of them — so this must be *all*, not
+        // *any*, or a group send silently loses the un-acked members.
+        //
+        // Blobs keep their relays on the path regardless: a recipient fetches
+        // blob bytes from its own relay's cache (C3a), so an image message
+        // still needs the push, and pushing while skipping the deposit buys
+        // little (the relay sees the sender either way). Peer blob transfer
+        // would close that gap — a later slice.
+        let hosted: Vec<(PublicKey, Vec<String>)> = contacts
+            .iter()
+            .chain(device_contacts.iter())
+            .flat_map(|contact| {
+                contact
+                    .keys
+                    .iter()
+                    .map(|&key| (key, contact.relays.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let discharged = |relay: &String| {
+            let here: Vec<&PublicKey> = hosted
+                .iter()
+                .filter(|(_, relays)| relays.contains(relay))
+                .map(|(key, _)| key)
+                .collect();
+            // A relay hosting no recipient at all is never "discharged" —
+            // `all` over nothing is vacuously true, which would be wrong.
+            sealed.blobs.is_empty()
+                && !here.is_empty()
+                && here.iter().all(|key| direct.contains(*key))
+        };
+
         let staging = blobs::stage(&sealed.blobs).await?;
         let mut pending_relays = 0;
+        let mut skipped_relays = 0;
         let mut last_error = String::new();
         for relay in &relays {
+            if discharged(relay) {
+                // The philosophy win (§1): for this message the relay learns
+                // nothing at all — not that it exists, not who it was for.
+                tracing::info!(relay, "delivered directly; skipping the deposit");
+                self.state.clear_outbox(id, relay);
+                skipped_relays += 1;
+                continue;
+            }
             match self
                 .deliver_to_relay(relay, &sealed.envelope, &sealed.blobs, &staging)
                 .await
@@ -375,7 +465,11 @@ impl Client {
                 }
             }
         }
-        if pending_relays == relays.len() && !relays.is_empty() {
+        // "Nothing took it" now includes the direct path: a send whose every
+        // relay failed is still delivered if the peers themselves accepted it
+        // — that is the whole point of D5 (and what makes a conversation
+        // survive the relay going down mid-flight).
+        if pending_relays == relays.len() && !relays.is_empty() && direct.is_empty() {
             return Err(Error::AllRelaysPending(last_error));
         }
         Ok(SendReceipt {
@@ -385,7 +479,79 @@ impl Client {
             blob_count: sealed.blobs.len(),
             relay_count: relays.len(),
             pending_relays,
+            direct_recipients: direct.len(),
+            skipped_relays,
         })
+    }
+
+    /// Try to hand `envelope` straight to each recipient device (D5,
+    /// direct-delivery.md §3): dial by key on the sync ALPN (D0b
+    /// connectivity — holepunched direct, relay-routed as fallback) and count
+    /// only a durable `Stored` ack. Returns the keys that acked; every other
+    /// recipient falls back to its mailbox.
+    ///
+    /// Concurrent, so one offline recipient never serializes the rest, and
+    /// bounded well below `connect_timeout`: an unreachable peer must cost a
+    /// send a moment, not its whole patience — the mailbox behind it is fast
+    /// and reliable. Recipients with no dialable route (mailbox-only
+    /// knowledge, no relay URL) are skipped without a dial.
+    async fn deliver_direct(
+        &self,
+        envelope: &MessageEnvelope,
+        recipients: &[PublicKey],
+    ) -> BTreeSet<PublicKey> {
+        /// Reachability *is* the presence signal (§2), so this is how long a
+        /// send speculates on it before taking the reliable path.
+        const DIRECT_DIAL_CAP: Duration = Duration::from_secs(3);
+
+        let timeout = self.config.connect_timeout.min(DIRECT_DIAL_CAP);
+        let me = self.device.public();
+        let mut targets = Vec::new();
+        for &key in recipients {
+            if key == me {
+                continue;
+            }
+            let stored = self.trusted_record_for(&key);
+            match self.peer_addr_for(key, stored.as_ref()) {
+                Ok(addr) => targets.push((key, addr)),
+                Err(_) => tracing::debug!("direct: no dialable route; mailbox only"),
+            }
+        }
+        let pushes = targets.into_iter().map(|(key, addr)| async move {
+            let connection = match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout).await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::debug!(%error, "direct: recipient unreachable");
+                    return None;
+                }
+            };
+            let op = SyncOp::Deliver {
+                envelope: Box::new(envelope.clone()),
+            };
+            match net::sync_request(&connection, op).await {
+                // The ack that licenses skipping the mailbox: stored, not
+                // merely received.
+                Ok(SyncResult::Stored) => Some(key),
+                Ok(SyncResult::NotHeld) => {
+                    tracing::debug!("direct: recipient declined; falling back to its mailbox");
+                    None
+                }
+                Ok(other) => {
+                    tracing::warn!(?other, "direct: unexpected response");
+                    None
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "direct: delivery failed");
+                    None
+                }
+            }
+        });
+        n0_future::join_all(pushes)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// One relay's full delivery: deposit (idempotent retry inside), then
@@ -659,7 +825,7 @@ impl Client {
                 }
                 received.push(Received {
                     envelope: item.envelope,
-                    relay: relay.to_string(),
+                    relay: Some(relay.to_string()),
                     body,
                 });
             }
@@ -671,14 +837,17 @@ impl Client {
 
     /// Fetch + verify + decrypt one blob referenced by a received message:
     /// the local cache first, then the relay it arrived through (caching
-    /// the ciphertext for the next time).
+    /// the ciphertext for the next time). A **direct** arrival (D5) has no
+    /// relay on its path, so its blobs resolve through our own home relays —
+    /// the same source `fetch_stored_blob` uses, and where the sender pushed
+    /// them.
     pub async fn fetch_blob(&self, received: &Received, hash: &BlobHash) -> Result<Vec<u8>, Error> {
-        self.open_cached_or_fetch(
-            &received.envelope,
-            hash,
-            std::slice::from_ref(&received.relay),
-        )
-        .await
+        let relays = match &received.relay {
+            Some(relay) => std::slice::from_ref(relay).to_vec(),
+            None => self.state.home_relays(),
+        };
+        self.open_cached_or_fetch(&received.envelope, hash, &relays)
+            .await
     }
 
     /// Fetch + verify + decrypt a blob referenced by a *stored* message:
@@ -2278,17 +2447,23 @@ impl Client {
     /// Persist a verified envelope and its participant→conversation mapping,
     /// so a later `send` to the same people threads into this conversation.
     fn remember(&self, envelope: &MessageEnvelope) -> Result<(), Error> {
-        let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
-        self.state.store_envelope(conversation, envelope)?;
-        let participants: BTreeSet<PublicKey> = envelope
-            .core
-            .recipients
-            .iter()
-            .copied()
-            .chain([envelope.core.sender])
-            .collect();
-        self.state.record_conversation(&participants, conversation)
+        remember(&self.state, envelope)
     }
+}
+
+/// `Client::remember` over bare state — the serving router (D5 `Deliver`)
+/// stores exactly what a drain stores, and holds state but no `Client`.
+pub(crate) fn remember(state: &ClientState, envelope: &MessageEnvelope) -> Result<(), Error> {
+    let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
+    state.store_envelope(conversation, envelope)?;
+    let participants: BTreeSet<PublicKey> = envelope
+        .core
+        .recipients
+        .iter()
+        .copied()
+        .chain([envelope.core.sender])
+        .collect();
+    state.record_conversation(&participants, conversation)
 }
 
 /// The self-record — key, self-attested name, home relays — or `None`
@@ -2369,6 +2544,13 @@ pub struct SendReceipt {
     /// Relays that did not take the delivery — queued in the outbox for a
     /// later flush. `0` = fully delivered.
     pub pending_relays: usize,
+    /// Recipient devices that took the message **directly** (D5): peer-to-peer
+    /// over the sync ALPN, with a durable ack, no mailbox involved.
+    pub direct_recipients: usize,
+    /// Relays skipped entirely because direct delivery discharged them —
+    /// the metadata-minimization win: for these, the relay never learned the
+    /// message existed.
+    pub skipped_relays: usize,
 }
 
 /// What one outbox flush accomplished.
@@ -2385,7 +2567,10 @@ pub struct FlushReport {
 pub struct Received {
     pub envelope: MessageEnvelope,
     /// The relay it arrived through — where its blobs can be fetched.
-    pub relay: String,
+    /// `None` for a **direct** arrival (D5): no relay was on the path, so
+    /// blobs resolve through this device's own home-relay caches, which is
+    /// where senders push them anyway (C3a).
+    pub relay: Option<String>,
     pub body: Result<Vec<u8>, OpenError>,
 }
 
@@ -2937,6 +3122,24 @@ mod tests {
     /// restart-to-apply semantics; the mailbox dial string is never used
     /// here). Returns the homed client.
     async fn open_homed(test: &str, name: &str, relay_url: &str) -> Client {
+        open_homed_with(
+            test,
+            name,
+            relay_url,
+            ClientConfig::default().connect_timeout,
+        )
+        .await
+    }
+
+    /// `open_homed` with a tightened relay deadline — for tests that make a
+    /// mailbox deliberately unreachable and shouldn't wait out production
+    /// patience for it.
+    async fn open_homed_with(
+        test: &str,
+        name: &str,
+        relay_url: &str,
+        connect_timeout: Duration,
+    ) -> Client {
         let key_path = temp_key(test, name);
         ClientState::open(&key_path)
             .save_profile(
@@ -2947,7 +3150,8 @@ mod tests {
                 }],
             )
             .expect("save profile");
-        Client::open_or_create(&key_path)
+        keystore::load_or_create(&key_path).expect("device key");
+        Client::open_with(&key_path, ClientConfig { connect_timeout })
             .await
             .expect("open client")
     }
@@ -2974,6 +3178,319 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("qad"));
+    }
+
+    /// A record naming a peer's live relay URL for rendezvous and a
+    /// deliberately **dead** mailbox: dial-by-key works, a deposit cannot.
+    /// That's the D5 acceptance shape — the mailbox is unreachable, so
+    /// anything that arrives arrived directly.
+    /// A genesis envelope really sealed to `recipient` — a push must be
+    /// openable to be stored (the handler mirrors the mailbox drain), so the
+    /// direct-delivery tests can't use bare unsealed cores.
+    fn sealed_for(sender: &DeviceKey, recipient: PublicKey, text: &[u8]) -> MessageEnvelope {
+        MessageEnvelope::seal(
+            MessageDraft {
+                conversation: None,
+                parents: vec![],
+                recipients: vec![recipient],
+                seq: 0,
+                logical: 0,
+                timestamp_ms: 0,
+                plaintext: text.to_vec(),
+                blobs: vec![],
+            },
+            sender,
+            &mut OsRng,
+        )
+        .expect("seal")
+        .envelope
+    }
+
+    fn record_with_dead_mailbox(key: PublicKey, relay_url: &str) -> ContactRecord {
+        ContactRecord::new(
+            vec![key],
+            vec![],
+            vec![RelayEntry {
+                mailbox: format!("{}@203.0.113.9:1", hex::encode(&key.0)),
+                relay_url: Some(relay_url.to_string()),
+            }],
+        )
+    }
+
+    #[tokio::test]
+    async fn send__should_deliver_directly_when_the_mailbox_is_unreachable() {
+        // Given: A and B homed to *different* relays, each holding the
+        // other's record. B's mailbox dial string is dead — the only way a
+        // message can reach B is peer-to-peer (D5).
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed("direct", "a", &url_a).await;
+        let b = open_homed("direct", "b", &url_b).await;
+        // The serving gate (D0c) covers `Deliver` too: B accepts a push
+        // only from a contact.
+        b.add_contact(
+            &record_with_dead_mailbox(a.public_key(), &url_a),
+            Some("a".to_string()),
+        )
+        .expect("B adds A");
+        a.add_contact(
+            &record_with_dead_mailbox(b.public_key(), &url_b),
+            Some("b".to_string()),
+        )
+        .expect("A adds B");
+        b.endpoint.online().await; // homed before A rendezvouses via its relay
+        // The live sink is the *only* signal for a direct arrival: no
+        // mailbox means no nudge to drain.
+        let live: std::sync::Arc<std::sync::Mutex<Vec<Received>>> = Default::default();
+        let sink = live.clone();
+        b.on_direct_delivery(move |messages| {
+            sink.lock().expect("live lock").extend(messages);
+        });
+
+        // When
+        let receipt = a
+            .send(
+                &[a.resolve_contact("b").expect("resolve")],
+                b"straight to you".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("send");
+
+        // Then: delivered peer-to-peer, and the relay never heard about it
+        assert_eq!(receipt.direct_recipients, 1);
+        assert_eq!(receipt.skipped_relays, 1, "the deposit was skipped");
+        assert_eq!(receipt.pending_relays, 0, "nothing owed");
+        assert!(
+            a.state.outbox().is_empty(),
+            "a discharged ledger leaves no entry"
+        );
+
+        // …and B has it, readable, live
+        let history = b.history(receipt.conversation).expect("B history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].body.as_deref(),
+            Ok(b"straight to you".as_slice())
+        );
+        let live = live.lock().expect("live lock");
+        assert_eq!(live.len(), 1, "the sink fired");
+        assert!(live[0].relay.is_none(), "no relay was on the path");
+
+        let _ = std::fs::remove_dir_all(temp_root("direct"));
+    }
+
+    #[tokio::test]
+    async fn send__should_keep_delivering_after_the_relays_disappear() {
+        // Given: A and B, each homed to its own relay, already talking —
+        // the first send rendezvouses through B's relay and establishes a
+        // peer path.
+        let (relay_a, url_a) = spawn_test_relay().await;
+        let (relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed_with("survive", "a", &url_a, Duration::from_millis(300)).await;
+        let b = open_homed("survive", "b", &url_b).await;
+        b.add_contact(
+            &record_with_dead_mailbox(a.public_key(), &url_a),
+            Some("a".to_string()),
+        )
+        .expect("B adds A");
+        a.add_contact(
+            &record_with_dead_mailbox(b.public_key(), &url_b),
+            Some("b".to_string()),
+        )
+        .expect("A adds B");
+        b.endpoint.online().await;
+        let first = a
+            .send(
+                &[a.resolve_contact("b").expect("resolve")],
+                b"before".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("first send");
+        assert_eq!(first.direct_recipients, 1, "the peer path is established");
+
+        // When: both relay services go away completely — no rendezvous, no
+        // mailbox, nothing. This is "restart the relay mid-conversation".
+        relay_a.shutdown().await.expect("shut down A's relay");
+        relay_b.shutdown().await.expect("shut down B's relay");
+
+        // Then: the conversation carries on over the established path
+        let second = a
+            .send_in(
+                first.conversation,
+                &[a.resolve_contact("b").expect("resolve")],
+                b"after".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("second send");
+        assert_eq!(second.direct_recipients, 1, "still delivered peer-to-peer");
+        assert_eq!(second.skipped_relays, 1);
+        let history = b.history(first.conversation).expect("B history");
+        assert_eq!(history.len(), 2, "both messages landed at B");
+        assert_eq!(history[1].body.as_deref(), Ok(b"after".as_slice()));
+
+        let _ = std::fs::remove_dir_all(temp_root("survive"));
+    }
+
+    #[tokio::test]
+    async fn send__should_fall_back_to_the_mailbox_when_the_peer_is_offline() {
+        // Given: B's record is known (relay URL + dead mailbox) but B is not
+        // running at all — the ordinary case, and the one that must not
+        // regress: a direct attempt that fails costs a bounded moment and
+        // then behaves exactly like pre-D5.
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let a = open_homed_with("offline", "a", &url_a, Duration::from_millis(300)).await;
+        let absent = DeviceKey::from_seed([41; 32]).public();
+        a.add_contact(
+            &record_with_dead_mailbox(absent, &url_a),
+            Some("ghost".to_string()),
+        )
+        .expect("A adds the absent peer");
+
+        // When: every path fails — no peer to dial, no mailbox to deposit in
+        let result = a
+            .send(
+                &[a.resolve_contact("ghost").expect("resolve")],
+                b"are you there".to_vec(),
+                vec![],
+            )
+            .await;
+
+        // Then: "queued", not "lost" — the C4a semantics, unchanged by D5
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        assert_eq!(a.state.outbox().len(), 1, "the mailbox is still owed");
+
+        let _ = std::fs::remove_dir_all(temp_root("offline"));
+    }
+
+    #[tokio::test]
+    async fn send__should_not_skip_a_relay_hosting_a_recipient_that_did_not_ack() {
+        // Given: two recipients whose mailboxes live on the SAME relay — B
+        // online, C not. The outbox ledger is per (message, relay) and one
+        // deposit fans out to every recipient the relay hosts, so skipping on
+        // "any recipient acked" would silently lose C's copy. This is the
+        // regression test for that hazard.
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed_with("shared", "a", &url_a, Duration::from_millis(300)).await;
+        let b = open_homed("shared", "b", &url_b).await;
+        b.add_contact(
+            &record_with_dead_mailbox(a.public_key(), &url_a),
+            Some("a".to_string()),
+        )
+        .expect("B adds A");
+        b.endpoint.online().await;
+        let carol = DeviceKey::from_seed([42; 32]).public();
+        // One shared mailbox string for both — what a shared relay looks like.
+        let mailbox = format!("{}@203.0.113.9:1", hex::encode(&b.public_key().0));
+        let shared = |key: PublicKey, url: &str| {
+            ContactRecord::new(
+                vec![key],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: mailbox.clone(),
+                    relay_url: Some(url.to_string()),
+                }],
+            )
+        };
+        a.add_contact(&shared(b.public_key(), &url_b), Some("b".to_string()))
+            .expect("A adds B");
+        a.add_contact(&shared(carol, &url_a), Some("c".to_string()))
+            .expect("A adds C");
+
+        // When
+        let result = a
+            .send(
+                &[
+                    a.resolve_contact("b").expect("resolve b"),
+                    a.resolve_contact("c").expect("resolve c"),
+                ],
+                b"hello both".to_vec(),
+                vec![],
+            )
+            .await;
+
+        // Then: B took it directly, but the shared relay is still owed —
+        // C has no other way to ever see this message
+        let receipt = result.expect("B's direct ack means the send landed somewhere");
+        assert_eq!(receipt.direct_recipients, 1, "B acked");
+        assert_eq!(receipt.skipped_relays, 0, "C's copy still needs the relay");
+        assert_eq!(receipt.pending_relays, 1, "and it is owed, not forgotten");
+        assert_eq!(a.state.outbox().len(), 1);
+
+        let _ = std::fs::remove_dir_all(temp_root("shared"));
+    }
+
+    #[tokio::test]
+    async fn deliver__should_decline_a_push_from_a_stranger() {
+        // Given: A can reach B by key, but B has not added A — the D0c gate
+        // applies to pushes exactly as to history reads, so an unknown
+        // sender's first message goes through the mailbox (where the relay's
+        // caps and the quarantine view are the policy), never straight to
+        // our disk.
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed_with("gate", "a", &url_a, Duration::from_millis(600)).await;
+        let b = open_homed("gate", "b", &url_b).await;
+        a.add_contact(
+            &record_with_dead_mailbox(b.public_key(), &url_b),
+            Some("b".to_string()),
+        )
+        .expect("A adds B");
+        b.endpoint.online().await;
+        let for_b = sealed_for(&a.device, b.public_key(), b"psst");
+
+        // When
+        let acked = a.deliver_direct(&for_b, &[b.public_key()]).await;
+
+        // Then: declined, and nothing stored
+        assert!(acked.is_empty(), "a stranger's push is declined");
+        assert!(b.state.find_envelope(for_b.id()).is_none());
+
+        let _ = std::fs::remove_dir_all(temp_root("gate"));
+    }
+
+    #[tokio::test]
+    async fn deliver__should_decline_an_envelope_not_addressed_to_us() {
+        // Given: A and B are contacts, so the connection-level gate is open.
+        // Being *allowed to push* must still not mean being allowed to write
+        // arbitrary history into our store — not even our own relay can do
+        // that (it indexes deposits per recipient key).
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed_with("addressed", "a", &url_a, Duration::from_millis(600)).await;
+        let b = open_homed("addressed", "b", &url_b).await;
+        a.add_contact(
+            &record_with_dead_mailbox(b.public_key(), &url_b),
+            Some("b".to_string()),
+        )
+        .expect("A adds B");
+        b.add_contact(
+            &record_with_dead_mailbox(a.public_key(), &url_a),
+            Some("a".to_string()),
+        )
+        .expect("B adds A");
+        b.endpoint.online().await;
+        let elsewhere = DeviceKey::from_seed([43; 32]).public();
+        let for_carol = sealed_for(&a.device, elsewhere, b"not for you");
+
+        // When
+        let acked = a.deliver_direct(&for_carol, &[b.public_key()]).await;
+
+        // Then: declined and unstored…
+        assert!(acked.is_empty(), "not addressed to B");
+        assert!(b.state.find_envelope(for_carol.id()).is_none());
+
+        // …while a push addressed to B, over that same open connection, is
+        // accepted: the per-request check is independent of the gate.
+        let for_b = sealed_for(&a.device, b.public_key(), b"psst");
+        let acked = a.deliver_direct(&for_b, &[b.public_key()]).await;
+        assert_eq!(acked.len(), 1, "a contact's push for B is stored");
+        assert!(b.state.find_envelope(for_b.id()).is_some());
+
+        let _ = std::fs::remove_dir_all(temp_root("addressed"));
     }
 
     #[tokio::test]
@@ -3163,7 +3680,7 @@ mod tests {
         let healed = b
             .auto_sync(&[Received {
                 envelope: latest.clone(),
-                relay: String::new(),
+                relay: None,
                 body: Ok(vec![]),
             }])
             .await;
@@ -4755,7 +5272,7 @@ mod tests {
             .expect("store");
         let received = [Received {
             envelope: genesis.clone(),
-            relay: String::new(),
+            relay: None,
             body: Ok(vec![]),
         }];
 
@@ -4806,7 +5323,7 @@ mod tests {
         // When
         a.auto_who_is(&[Received {
             envelope: genesis.clone(),
-            relay: String::new(),
+            relay: None,
             body: Ok(vec![]),
         }])
         .await;

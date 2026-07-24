@@ -90,6 +90,14 @@ trigger delivers → recipient fetches, sender's pending flag clears.
 
 ## 3. Forward-now: nudge-and-fetch, not envelope push
 
+> Since **D5** ([direct-delivery.md](./direct-delivery.md)) this is the
+> *mailbox-path* live signal. When the sender can reach the recipient device
+> directly it pushes the envelope peer-to-peer and never deposits, so there is
+> no nudge — the recipient's own serving router is the live path, and the
+> arrival reaches the edge through `Client::on_direct_delivery` instead of
+> `subscribe`'s `on_new`. Both paths then run the same healing seam and the
+> same notification code.
+
 The rendezvous doc's diagram says "forward now over live conn". Two shapes:
 
 **(a) Envelope push** — relay writes the full envelope down a relay→client

@@ -290,6 +290,11 @@ the change is visible on device where relevant · this doc updated.
   your code), replacing the "dumped into the mega-screen" first run. Reuses U5
   widgets. *Done when:* a fresh install walks a new user to a shareable code
   without ever showing a raw dial string cold.
+  *(2026-07-24: **code complete, awaiting the fresh-install check** — commit
+  `3ac8afb`, `app/ui/src/lib.rs`: an `OnboardingView` takeover shown while no
+  profile exists (no tab bar), stepping Identity → Relay → Code with back
+  navigation, then landing on Chats. The tick waits on one run from a wiped
+  data dir — that's the only thing the criterion actually asserts.)*
 - [x] **U8 · Language + metadata legibility.** Apply the §7 vocabulary across
   the UI; make message metadata scannable (states as small pills/icons with
   meaning, not a symbol run-on); hide `crossed`/`merged` behind an optional

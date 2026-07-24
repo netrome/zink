@@ -52,7 +52,7 @@ async fn contacts__should_enable_messaging_by_name_after_a_record_exchange() {
 
     // … and A messages B *by name*, no keys or relay flags anywhere
     let sent = stdout_of(&cli(&["send", "--key", &key_a, "--to", "Bob", "hi Bob!"]));
-    assert!(sent.contains("to 1 relay(s)"), "got: {sent}");
+    assert!(sent.contains("via 1 relay(s)"), "got: {sent}");
     let received = stdout_of(&cli(&["recv", "--key", &key_b]));
     assert!(received.contains("hi Bob!"), "got: {received}");
 

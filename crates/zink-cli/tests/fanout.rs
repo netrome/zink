@@ -26,7 +26,7 @@ async fn fanout__should_deliver_one_send_to_every_recipient() {
     let sent = stdout_of(&cli(&[
         "send", "--key", &key_a, "--to", &to_b, "--to", &to_c, text,
     ]));
-    assert!(sent.ends_with("to 1 relay(s)"), "got: {sent}");
+    assert!(sent.ends_with("via 1 relay(s)"), "got: {sent}");
 
     // Then: both recipients decrypt the same message
     for key in [&key_b, &key_c] {
@@ -56,7 +56,7 @@ async fn fanout__should_dedup_by_id_when_deposited_to_two_relays() {
     let text = "sent twice, seen once";
     let to_b = format!("{pubkey_b}@{dial_1},{dial_2}");
     let sent = stdout_of(&cli(&["send", "--key", &key_a, "--to", &to_b, text]));
-    assert!(sent.ends_with("to 2 relay(s)"), "got: {sent}");
+    assert!(sent.ends_with("via 2 relay(s)"), "got: {sent}");
 
     // Then: draining both relays prints the message exactly once
     let received = stdout_of(&cli(&[

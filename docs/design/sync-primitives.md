@@ -87,6 +87,14 @@ SyncResult   = Envelope { envelope }    // Get hit
              | Error { code }            // malformed, unsupported version
 ```
 
+Later slices appended ops to this family (BORSH variant tags stay stable, so
+old speakers keep parsing what they knew): `WhoIs { key }` → `Known { record,
+endorsements }` (D1a/D4a), `GetKeys { ids }` → `Wraps { wraps }` (D3d), and
+`Deliver { envelope }` → `Stored` (D5, [direct-delivery.md](./direct-delivery.md))
+— the one **push** on an otherwise pull-only ALPN, which is why
+`MAX_SYNC_REQUEST_BYTES` now matches the mailbox's deposit headroom (1 MiB)
+instead of the kilobyte the pull ops need.
+
 `Get` returns the full `MessageEnvelope`, not a bare core. **Why the envelope,
 resolved:** the sender's signature is over `core.id()` and lives in the
 envelope, so serving the envelope lets the requester verify *authorship*

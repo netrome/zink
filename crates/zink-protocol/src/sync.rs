@@ -19,8 +19,12 @@ pub const SYNC_ALPN: &[u8] = b"zink-sync/1";
 
 /// One request per bi-stream; caps enforced via `read_to_end` limits. A `Get`
 /// returns a single envelope, so the response cap mirrors the mailbox's
-/// per-envelope headroom rather than a full-mailbox page.
-pub const MAX_SYNC_REQUEST_BYTES: usize = 1 << 10;
+/// per-envelope headroom rather than a full-mailbox page. The *request* cap
+/// matches the mailbox's (`MAX_REQUEST_BYTES`) because `Deliver` (D5) carries
+/// a full envelope in the request direction, exactly like a deposit — the
+/// pull ops stay tiny, and the cap a peer exposes to a caller it serves is
+/// the same one the relay already exposes to anyone.
+pub const MAX_SYNC_REQUEST_BYTES: usize = 1 << 20;
 pub const MAX_SYNC_RESPONSE_BYTES: usize = 16 << 20;
 
 /// The `GetKeys` batch bound (D3d): both sides enforce it — the requester
@@ -70,6 +74,14 @@ pub enum SyncOp {
     /// devices only at D3 — anyone else gets `NotHeld` (multi-device.md
     /// §6). (Appended — tags stable.)
     GetKeys { ids: Vec<MessageId> },
+    /// Direct delivery (D5, direct-delivery.md §3): "here is a message for
+    /// you." The one **push** on an otherwise pull-only ALPN — a client
+    /// accepting an envelope addressed to it, so two reachable peers need no
+    /// mailbox at all (SPEC §5.1's "over direct iroh connections", closing
+    /// the intent/implementation gap). Answered `Stored` only after a
+    /// durable store; anything else means the sender must fall back to the
+    /// recipient's mailbox. (Appended — tags stable.)
+    Deliver { envelope: Box<MessageEnvelope> },
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
@@ -103,6 +115,9 @@ pub enum SyncResult {
     },
     /// `Get` miss, or the peer declined to serve this id. Also the `WhoIs`
     /// miss: not-knowing and declining are indistinguishable (SPEC §5.2).
+    /// And a declined `Deliver` (D5) — a peer may refuse a push for any
+    /// reason (not a contact, not addressed to it, unverifiable); the sender
+    /// learns only "not stored", and falls back to the mailbox.
     NotHeld,
     /// `GetSuccessors` — known children (possibly empty).
     Successors {
@@ -130,6 +145,13 @@ pub enum SyncResult {
     Wraps {
         wraps: Vec<(MessageId, KeyWrap)>,
     },
+    /// `Deliver` accepted **and durably stored** (D5) — the ack the sender
+    /// needs before it skips the mailbox deposit for this recipient.
+    /// Transport success is not delivery: acking before the store lands
+    /// would be a silent delivery hole (direct-delivery.md §3), the exact
+    /// failure the outbox exists to prevent. Idempotent: re-delivering a
+    /// message already held acks again. (Appended — tags stable.)
+    Stored,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -207,6 +229,9 @@ mod tests {
             SyncOp::GetKeys {
                 ids: vec![sample_envelope().id(), MessageId([7; 32])],
             },
+            SyncOp::Deliver {
+                envelope: Box::new(sample_envelope()),
+            },
         ];
 
         for op in ops {
@@ -262,6 +287,7 @@ mod tests {
                     },
                 )],
             },
+            SyncResult::Stored,
         ];
 
         for result in results {

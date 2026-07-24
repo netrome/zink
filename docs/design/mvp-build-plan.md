@@ -211,9 +211,12 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   (page transparent behind, `barcode-scanner:allow-cancel` was already
   granted). Known nit for later: a thumbnail whose fetch fails sticks on
   "loading…" — tap-to-retry is a cheap C4-adjacent polish.)*
-- [ ] **C4 · 🎯🚩 Live delivery & notifications.** Split into three runnable
+- [x] **C4 · 🎯🚩 Live delivery & notifications.** Split into three runnable
   sub-slices below. *Done when:* a backgrounded app on a real phone shows a
-  notification for an incoming message. *(Design:
+  notification for an incoming message.
+  ✅ *(2026-07-24 — met: a backgrounded phone, untouched for hours, showed the
+  notification for an incoming message. See C4c for what remains measured vs
+  assumed.)* *(Design:
   [live-delivery.md](./live-delivery.md) — nudge-and-fetch, outbox, foreground
   service; decisions resolved 2026-07-12. Risk spike: background delivery vs
   Android Doze/battery optimization — the successor to the retired Web Push
@@ -314,9 +317,26 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
   overnight — exemption verified, screen off, unplugged, test messages
   at intervals — then read heartbeat gaps + subscription events against
   send times; the branch picks the C4c-ii fix.)*
+  ✅ *(2026-07-24 — **field-verified; box ticked**: a message to a
+  backgrounded phone, untouched for hours, notified. That answers the
+  C4c-i suspect list for the ordinary case — the FGS keeps the process
+  and its subscription loops alive through Doze — and the earlier "only
+  notifies when the app is next opened" symptom did not reproduce
+  (several things changed under it meanwhile, including D0b's homed
+  transport and De5's always-bound relay transport). **Deliberately
+  still unmeasured:** the overnight run and the single-digit battery
+  drain from the original criterion — the qualitative half is proven,
+  the quantitative half is a measurement to take, cheap to take later.
+  **Known, expected limitation:** swiping the app out of recents kills
+  the process, so nothing arrives until it is opened again — Android's
+  contract for a user-removed task, not a bug to chase. A killed process
+  has no listener; the mailbox holds the messages meanwhile, and D5's
+  direct path (which likewise needs a live process) falls back to the
+  same mailbox.)*
 
-**🎉 MVP-usable milestone: end of Stage C** — text + images between friends on Android
-(+ Linux desktop), online and offline, with notifications.
+**🎉 MVP-usable milestone: end of Stage C — reached** (2026-07-24, with C4
+field-verified) — text + images between friends on Android (+ Linux desktop),
+online and offline, with notifications.
 
 ### Hardening pass (2026-07-11, post-C2 independent review)
 
@@ -1115,7 +1135,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     deliberately off-path, and the parked pre-deployment items
     (quarantine view, per-type versions) plus C4c's notification
     diagnostic are what remain before the MVP is called done.** 🎉)*
-- [ ] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
+- [x] **D5 · Direct delivery (both-online fast/private path).** 🎯 When a recipient
   device is online and reachable (via D0b connectivity — holepunched direct, or
   relay-routed as fallback), deliver the envelope peer-to-peer over the D0a peer ALPN
   (a `Deliver` op + durable-store ack) instead of the relay mailbox; fall back to the
@@ -1128,6 +1148,55 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   always-deposit — resolve after first on-device test). *Done when:* two CLI clients
   online with the relay unreachable exchange a message directly; killing the receiver
   falls back to a mailbox deposit fetched on its return.
+  ✅ *(2026-07-24: `SyncOp::Deliver { envelope }` → `SyncResult::Stored`
+  appended (tags stable); `MAX_SYNC_REQUEST_BYTES` raised 1 KiB → 1 MiB (the
+  one op that carries an envelope in the request direction, mirroring the
+  mailbox's deposit headroom). **Open decision resolved as recommended**:
+  skip-on-direct-success — the ack is sent only after the recipient's durable
+  store returns, so it carries a mailbox `Deposited`'s weight; always-deposit
+  stays a one-line fallback. **Granularity trap found at implementation**
+  (direct-delivery.md §3): outbox entries are per (message, relay) while acks
+  are per recipient *device*, and one deposit fans out to every recipient a
+  relay hosts — so a relay is skipped only when **every** recipient it hosts
+  acked (*all*, not *any*); "any" would silently drop the un-acked members'
+  only copy in a group send. Pinned by a regression test. **Blobs keep their
+  relay**: recipients fetch blob bytes from their own relay's cache (C3a), so
+  a message with blobs takes the pre-D5 path exactly (direct still attempted,
+  no deposit skipped) — closing that needs peer blob transfer, a later slice.
+  Receiver: gated like history (D0c — a stranger's push declines to `NotHeld`
+  and falls back to their mailbox, where the C0 caps and the parked quarantine
+  view are the policy), then version + `verify()` + **addressed-to-us** +
+  body-opens before storing; the recipients check is the one the pull ops
+  don't need (a contact we serve history to must not be able to write
+  arbitrary conversations into our store — not even our own relay can).
+  Sender: concurrent dials capped at `min(connect_timeout, 3 s)` — a
+  speculative dial must not inherit a send's patience; the known cost is that
+  a send to an offline recipient pays that cap. Edges: `on_direct_delivery`
+  sink (the router holds no `Client`) + `after_direct` for the healing seam —
+  load-bearing here, since a direct arrival produces no nudge and, with the
+  relay down, no later drain may come; CLI `listen` marks arrivals `(direct)`,
+  the app emits `new-messages` + notifies exactly as on a nudge.
+  `Received.relay` became `Option<String>` (None = no relay was on the path).
+  **e2e in-process, not via CLI subprocesses** (the De4 lesson — the flows are
+  fast, the harness isn't): mailbox-unreachable direct delivery; **both relays
+  shut down mid-conversation and the next send still lands directly**; the
+  offline fallback keeping C4a's "queued, not lost"; the shared-relay
+  all-not-any rule; stranger + not-addressed-to-us declines. 198 tests.
+  **Manual CLI run verified** against a real relay, checked at the disk level:
+  a direct send leaves the recipient's mailbox with **0 items**, the same send
+  with the recipient offline leaves exactly 1, and it drains on return.
+  Honest scope (direct-delivery.md §6.1): **rendezvous still needs a relay** —
+  dial-by-key is key + their relay URL, so a conversation already up survives
+  the relay going away, but two peers who never connected can't find each
+  other cold. What D5 buys is "the relay is not on the message path", not "the
+  relay can be off before you start". Docs: SPEC §5.1/§5.3, sync-primitives.md
+  §3, live-delivery.md §3, client-core.md.)*
+
+**🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
+identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
+What remains before the MVP is called done: the two **parked** items below, the
+**De4** harness cleanup, **U7**'s live check ([ui-facelift.md](./ui-facelift.md)),
+and C4c's unmeasured overnight/battery numbers.
 
 ---
 

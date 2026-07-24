@@ -6,7 +6,7 @@ mod common;
 
 use common::{cli, key_path, spawn_relay, stdout_of, temp_dir};
 
-/// `deposited <id> (conv <hex8>, seq <n>) ...` → (conv, seq)
+/// `sent <id> (conv <hex8>, seq <n>) ...` → (conv, seq)
 fn conv_and_seq(sent: &str) -> (String, u64) {
     let conv = sent
         .split_once("(conv ")

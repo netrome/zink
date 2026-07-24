@@ -23,7 +23,9 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use zink_client::{Client, ClientConfig, Contact, Received, ResolvedName, hex, keystore};
+use zink_client::{
+    Client, ClientConfig, Contact, Received, ResolvedName, SendReceipt, hex, keystore,
+};
 use zink_protocol::{
     BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey, RelayEntry,
 };
@@ -322,24 +324,35 @@ async fn send(args: &[String]) -> Result<(), String> {
         .send(&contacts, text.clone().into_bytes(), blobs)
         .await?;
     println!(
-        "deposited {} (conv {}, seq {}) ({} blob(s)) to {} relay(s){}",
+        "sent {} (conv {}, seq {}) ({} blob(s)) via {} relay(s){}",
         hex::encode(&receipt.id.0),
         &hex::encode(&receipt.conversation.0)[..8],
         receipt.seq,
         receipt.blob_count,
         receipt.relay_count,
-        pending_note(receipt.pending_relays)
+        delivery_note(&receipt)
     );
     client.close().await;
     Ok(())
 }
 
-/// Suffix for a partially-delivered send (the outbox will retry).
-fn pending_note(pending_relays: usize) -> String {
-    if pending_relays == 0 {
+/// Suffix describing how a send landed: peers reached directly (D5), relays
+/// that therefore saw nothing, and what the outbox still owes.
+fn delivery_note(receipt: &SendReceipt) -> String {
+    let mut parts = Vec::new();
+    if receipt.direct_recipients > 0 {
+        parts.push(format!("{} direct", receipt.direct_recipients));
+    }
+    if receipt.skipped_relays > 0 {
+        parts.push(format!("{} relay(s) skipped", receipt.skipped_relays));
+    }
+    if receipt.pending_relays > 0 {
+        parts.push(format!("{} queued for retry", receipt.pending_relays));
+    }
+    if parts.is_empty() {
         String::new()
     } else {
-        format!(" — {pending_relays} queued for retry")
+        format!(" — {}", parts.join(", "))
     }
 }
 
@@ -536,11 +549,11 @@ async fn reply(args: &[String]) -> Result<(), String> {
         .send_in(conversation, &contacts, text.clone().into_bytes(), vec![])
         .await?;
     println!(
-        "replied in {} (seq {}) to {} relay(s){}",
+        "replied in {} (seq {}) via {} relay(s){}",
         &hex::encode(&receipt.conversation.0)[..8],
         receipt.seq,
         receipt.relay_count,
-        pending_note(receipt.pending_relays)
+        delivery_note(&receipt)
     );
     client.close().await;
     Ok(())
@@ -755,6 +768,18 @@ async fn listen(args: &[String]) -> Result<(), String> {
         // What a peer dials to backfill history from this device (D0 sync).
         println!("peer sync address: {addr}");
     }
+    // Direct arrivals (D5): peers hand these over with no mailbox and so no
+    // nudge — the sink is the only way they surface live. The heal pass runs
+    // off-thread because the sink fires on the router's task.
+    {
+        let (client, contacts) = (client.clone(), contacts.clone());
+        let sink_client = client.clone();
+        client.on_direct_delivery(move |messages| {
+            print_arrivals(&contacts, &messages, true);
+            let client = sink_client.clone();
+            tokio::spawn(async move { client.after_direct(&messages).await });
+        });
+    }
     println!("listening on {} relay(s)…", relays.len());
     let mut loops = Vec::new();
     for relay in relays {
@@ -762,23 +787,7 @@ async fn listen(args: &[String]) -> Result<(), String> {
         loops.push(tokio::spawn(async move {
             client
                 .subscribe(&relay, |messages| {
-                    for message in &messages {
-                        let from = label(&contacts, &message.envelope.core.sender);
-                        match &message.body {
-                            Ok(plaintext) => {
-                                println!("{from}: {}", String::from_utf8_lossy(plaintext))
-                            }
-                            Err(e) => println!("{from}: <unopenable: {e}>"),
-                        }
-                        if !message.envelope.core.blob_refs.is_empty() {
-                            println!(
-                                "  ({} blob(s) attached; fetch via history --blobs-dir)",
-                                message.envelope.core.blob_refs.len()
-                            );
-                        }
-                    }
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush(); // piped stdout buffers
+                    print_arrivals(&contacts, &messages, false)
                 })
                 .await;
         }));
@@ -787,6 +796,27 @@ async fn listen(args: &[String]) -> Result<(), String> {
         let _ = task.await;
     }
     Ok(())
+}
+
+/// Print a live batch — the mailbox path and the direct path (D5) render the
+/// same, with `(direct)` marking the messages no relay ever saw.
+fn print_arrivals(contacts: &[(String, ContactRecord)], messages: &[Received], direct: bool) {
+    let how = if direct { " (direct)" } else { "" };
+    for message in messages {
+        let from = label(contacts, &message.envelope.core.sender);
+        match &message.body {
+            Ok(plaintext) => println!("{from}{how}: {}", String::from_utf8_lossy(plaintext)),
+            Err(e) => println!("{from}{how}: <unopenable: {e}>"),
+        }
+        if !message.envelope.core.blob_refs.is_empty() {
+            println!(
+                "  ({} blob(s) attached; fetch via history --blobs-dir)",
+                message.envelope.core.blob_refs.len()
+            );
+        }
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().flush(); // piped stdout buffers
 }
 
 /// A full conversation id, or any unambiguous hex prefix of one.

@@ -124,6 +124,19 @@ client.flush_outbox() -> FlushReport          // idempotent re-deposit + re-push
 // in the lib); connect → register → flush → drain → drain-per-nudge,
 // reconnecting forever with jittered backoff; `on_new` per non-empty drain
 client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
+// direct delivery (D5, direct-delivery.md): every send first tries to hand the
+// envelope to each recipient device peer-to-peer on SYNC_ALPN (concurrent dials,
+// deadline min(connect_timeout, 3s)); a durable `Stored` ack means that device's
+// mailbox is skipped — a relay's deposit is skipped only when EVERY recipient it
+// hosts acked and the message carries no blobs (SendReceipt.direct_recipients /
+// .skipped_relays). Any failure = today's deposit. Receiving: the serving router
+// accepts `Deliver` from the D0c serve set, verifies + stores + acks, then hands
+// the batch to the edge's sink — a direct arrival produces no nudge, so this is
+// its only live signal. `Received.relay` is None (blobs resolve via own relays).
+client.on_direct_delivery(sink: Fn(Vec<Received>))  // register once, after open
+client.after_direct(&[Received])              // the post-drain healing seam
+                                              // (auto-sync / who-is / re-wrap) the
+                                              // edge runs for a direct arrival
 // peer sync (D0a/D0b, sync-primitives.md): the client also *serves* — an
 // accepting router on SYNC_ALPN answers get/get-successors from local
 // storage for the client's lifetime. The relay transport is ALWAYS bound

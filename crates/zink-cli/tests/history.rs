@@ -135,7 +135,7 @@ async fn reply__should_thread_into_the_conversation_and_skip_unknown_participant
     let output = cli(&["reply", "--key", &key_b, &conversation[..12], "hi all"]);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let replied = stdout_of(&output);
-    assert!(replied.contains("to 1 relay(s)"), "got: {replied}");
+    assert!(replied.contains("via 1 relay(s)"), "got: {replied}");
     assert!(
         stderr.contains(&pubkey_c[..8]) && stderr.contains("no route for participant"),
         "unknown participant not surfaced: {stderr}"

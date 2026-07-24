@@ -46,6 +46,24 @@ async fn client(
                 .await
                 .map(Arc::new)
                 .map_err(String::from)?;
+            // Direct delivery (D5): a peer hands the message straight to
+            // this device, so there is no mailbox and no nudge — this sink
+            // is the only live signal. Treated exactly like a nudge drain:
+            // render + notify at once, then heal (auto-sync/who-is/re-wrap)
+            // and render again, since healing may pull in the ancestors that
+            // make the conversation whole.
+            let sink_app = app.clone();
+            let sink_notified = managed.notified.clone();
+            let sink_client = client.clone();
+            client.on_direct_delivery(move |messages| {
+                let _ = sink_app.emit("new-messages", messages.len());
+                notify_arrivals(&sink_app, &sink_client, &sink_notified, &messages);
+                let (app, client) = (sink_app.clone(), sink_client.clone());
+                tauri::async_runtime::spawn(async move {
+                    client.after_direct(&messages).await;
+                    let _ = app.emit("new-messages", messages.len());
+                });
+            });
             // Re-push the avatar ciphertext once per app run (D1d): relay
             // caches expire (30-day TTL) and the publisher is the only
             // source. Best-effort, off the first command's path.
