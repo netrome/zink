@@ -205,12 +205,41 @@ impl Client {
     /// Seal for all recipients, thread into the participant set's
     /// conversation (or start one), deposit once per distinct relay
     /// (idempotent retry), push blobs to each relay's cache.
+    ///
+    /// Local work first, network second — see `stage_send` for the half an
+    /// edge can render before delivery finishes.
     pub async fn send(
         &self,
         contacts: &[Contact],
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
     ) -> Result<SendReceipt, Error> {
+        let staged = self.stage_send(contacts, plaintext, blob_drafts)?;
+        self.deliver(&staged).await
+    }
+
+    /// `send`'s **local** half: seal, store, index and ledger the message,
+    /// then stop. No network. This is everything an edge needs to *show* the
+    /// message, so it can render at once and run `deliver` off the user's
+    /// path — a send's latency is delivery's, and delivery can be slow for
+    /// honest reasons (an unreachable relay costs its whole deadline).
+    ///
+    /// Safe to hand off: the outbox entry is written before this returns, so
+    /// even if the process dies before `deliver` runs, a later flush finishes
+    /// the job (live-delivery.md §2). Nothing is lost by not waiting.
+    pub fn stage_send(
+        &self,
+        contacts: &[Contact],
+        plaintext: Vec<u8>,
+        blob_drafts: Vec<BlobDraft>,
+    ) -> Result<StagedSend, Error> {
+        let draft = self.send_draft(contacts)?;
+        self.stage(draft, plaintext, blob_drafts, contacts)
+    }
+
+    /// The draft `send` threads: into the participant set's conversation if we
+    /// know one, else a fresh genesis.
+    fn send_draft(&self, contacts: &[Contact]) -> Result<MessageDraft, Error> {
         if contacts.is_empty() {
             return Err(Error::NoRecipients);
         }
@@ -234,9 +263,9 @@ impl Client {
             .state
             .conversation_for(&extended)
             .or_else(|| self.state.conversation_for(&participants));
-        let draft = match existing {
-            Some(conversation) => self.threaded_draft(conversation, recipients)?,
-            None => MessageDraft {
+        match existing {
+            Some(conversation) => self.threaded_draft(conversation, recipients),
+            None => Ok(MessageDraft {
                 conversation: None,
                 parents: vec![],
                 recipients,
@@ -245,10 +274,8 @@ impl Client {
                 timestamp_ms: now_ms(),
                 plaintext: vec![],
                 blobs: vec![],
-            },
-        };
-        self.finish_send(draft, plaintext, blob_drafts, contacts)
-            .await
+            }),
+        }
     }
 
     /// Send *into a known conversation*, whatever its participant set maps
@@ -261,13 +288,24 @@ impl Client {
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
     ) -> Result<SendReceipt, Error> {
+        let staged = self.stage_send_in(conversation, contacts, plaintext, blob_drafts)?;
+        self.deliver(&staged).await
+    }
+
+    /// `send_in`'s local half — see `stage_send`.
+    pub fn stage_send_in(
+        &self,
+        conversation: MessageId,
+        contacts: &[Contact],
+        plaintext: Vec<u8>,
+        blob_drafts: Vec<BlobDraft>,
+    ) -> Result<StagedSend, Error> {
         if contacts.is_empty() {
             return Err(Error::NoRecipients);
         }
         let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
         let draft = self.threaded_draft(conversation, recipients)?;
-        self.finish_send(draft, plaintext, blob_drafts, contacts)
-            .await
+        self.stage(draft, plaintext, blob_drafts, contacts)
     }
 
     /// Whom a reply in this conversation goes to: the current membership
@@ -346,25 +384,16 @@ impl Client {
         })
     }
 
-    /// The shared send tail: seal, persist
-    /// (envelope + own-blob cache + outbox ledger + optionally the
-    /// participant mapping), then deliver per distinct relay. One relay
-    /// failing never aborts the others; what failed stays in the outbox.
-    /// Errors only when *no* relay took the deposit — the message is still
-    /// stored and queued, so the error means "queued", not "lost".
-    async fn finish_send(
+    /// The local half of every send: seal, persist (envelope, own-blob cache,
+    /// outbox ledger, participant mapping), and stop. Everything here is
+    /// filesystem work — no network, nothing that can hang.
+    fn stage(
         &self,
         mut draft: MessageDraft,
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
         contacts: &[Contact],
-    ) -> Result<SendReceipt, Error> {
-        // NOTE: the outbox is NOT flushed here. Flushing on the send path
-        // coupled a new message's latency to the health of the *backlog* —
-        // a slow/stuck queued delivery delayed every fresh send. The backlog
-        // is retried off this path (recv, subscription reconnect, and the
-        // edge's post-send background flush), so a fresh send pays only for
-        // its own delivery.
+    ) -> Result<StagedSend, Error> {
         draft.plaintext = plaintext;
         draft.blobs = blob_drafts;
         // Send-to-self (D3c, multi-device.md §5): recognized own devices
@@ -414,6 +443,7 @@ impl Client {
 
         // Ledger before network (live-delivery.md §2): a crash or failure
         // from here on leaves entries a later flush retries idempotently.
+        // This is also what makes handing delivery off safe (`stage_send`).
         let relays = distinct_relays(
             contacts
                 .iter()
@@ -424,12 +454,60 @@ impl Client {
         for relay in &relays {
             self.state.add_outbox(id, relay, conversation, now)?;
         }
+        Ok(StagedSend {
+            id,
+            conversation,
+            seq,
+            envelope: sealed.envelope,
+            blobs: sealed.blobs,
+            hosted: contacts
+                .iter()
+                .chain(device_contacts.iter())
+                .flat_map(|contact| {
+                    contact
+                        .keys
+                        .iter()
+                        .map(|&key| (key, contact.relays.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            relays,
+        })
+    }
+
+    /// The network half: hand the message to the recipients directly where we
+    /// can, deposit to the mailboxes that still need it, and discharge the
+    /// ledger as each path succeeds. One relay failing never aborts the
+    /// others; what failed stays in the outbox. Errors only when *nothing*
+    /// took it — the message is stored and queued either way, so the error
+    /// means "queued", not "lost".
+    ///
+    /// Idempotent by construction (deposits dedup by id, blob pushes by hash,
+    /// a re-`Deliver` re-acks), so a caller may run it again — or leave it to
+    /// `flush_outbox`.
+    pub async fn deliver(&self, staged: &StagedSend) -> Result<SendReceipt, Error> {
+        // NOTE: the outbox is NOT flushed here. Flushing on the send path
+        // coupled a new message's latency to the health of the *backlog* —
+        // a slow/stuck queued delivery delayed every fresh send. The backlog
+        // is retried off this path (recv, subscription reconnect, and the
+        // edge's post-send background flush), so a fresh send pays only for
+        // its own delivery.
+        let StagedSend {
+            id,
+            conversation,
+            seq,
+            envelope,
+            blobs,
+            hosted,
+            relays,
+        } = staged;
+        let (id, conversation) = (*id, *conversation);
 
         // Direct delivery (D5): hand the envelope to the recipients
         // themselves first. A `Stored` ack is a durable store, so the
         // mailbox is not needed for that device.
         let direct = self
-            .deliver_direct(&sealed.envelope, &sealed.envelope.core.recipients)
+            .deliver_direct(envelope, &envelope.core.recipients)
             .await;
 
         // Which relays direct delivery discharges entirely (direct-delivery
@@ -443,17 +521,6 @@ impl Client {
         // still needs the push, and pushing while skipping the deposit buys
         // little (the relay sees the sender either way). Peer blob transfer
         // would close that gap — a later slice.
-        let hosted: Vec<(PublicKey, Vec<String>)> = contacts
-            .iter()
-            .chain(device_contacts.iter())
-            .flat_map(|contact| {
-                contact
-                    .keys
-                    .iter()
-                    .map(|&key| (key, contact.relays.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
         let discharged = |relay: &String| {
             let here: Vec<&PublicKey> = hosted
                 .iter()
@@ -462,16 +529,14 @@ impl Client {
                 .collect();
             // A relay hosting no recipient at all is never "discharged" —
             // `all` over nothing is vacuously true, which would be wrong.
-            sealed.blobs.is_empty()
-                && !here.is_empty()
-                && here.iter().all(|key| direct.contains(*key))
+            blobs.is_empty() && !here.is_empty() && here.iter().all(|key| direct.contains(*key))
         };
 
-        let staging = blobs::stage(&sealed.blobs).await?;
+        let staging = blobs::stage(blobs).await?;
         let mut pending_relays = 0;
         let mut skipped_relays = 0;
         let mut last_error = String::new();
-        for relay in &relays {
+        for relay in relays {
             if discharged(relay) {
                 // The philosophy win (§1): for this message the relay learns
                 // nothing at all — not that it exists, not who it was for.
@@ -481,7 +546,7 @@ impl Client {
                 continue;
             }
             match self
-                .deliver_to_relay(relay, &sealed.envelope, &sealed.blobs, &staging)
+                .deliver_to_relay(relay, envelope, blobs, &staging)
                 .await
             {
                 Ok(()) => self.state.clear_outbox(id, relay),
@@ -502,8 +567,8 @@ impl Client {
         Ok(SendReceipt {
             id,
             conversation,
-            seq,
-            blob_count: sealed.blobs.len(),
+            seq: *seq,
+            blob_count: blobs.len(),
             relay_count: relays.len(),
             pending_relays,
             direct_recipients: direct.len(),
@@ -2641,6 +2706,27 @@ impl Contact {
     }
 }
 
+/// A message that is sealed, stored and ledgered, but not yet delivered —
+/// `stage_send`'s output and `deliver`'s input.
+///
+/// It exists so an edge can **render before it delivers**: the message is
+/// already in the store (so history shows it, flagged `pending` by its outbox
+/// entries) while the network work happens off the user's path. Nothing is
+/// riding on the handoff succeeding — if the process dies here, the ledger
+/// still owes the delivery and any later flush pays it.
+pub struct StagedSend {
+    pub id: MessageId,
+    pub conversation: MessageId,
+    pub seq: u64,
+    envelope: MessageEnvelope,
+    blobs: Vec<EncryptedBlob>,
+    /// Recipient key → the relays hosting its mailbox: what the
+    /// deposit-skip rule needs (see `deliver`).
+    hosted: Vec<(PublicKey, Vec<String>)>,
+    /// Distinct relay dial strings this message is owed to.
+    relays: Vec<String>,
+}
+
 pub struct SendReceipt {
     pub id: MessageId,
     pub conversation: MessageId,
@@ -3436,6 +3522,52 @@ mod tests {
         // A cooled-down failure is retried again afterwards.
         let recovered = now + 61 * 1000;
         assert!(direct_budget(just_failed, recovered, production).is_some());
+    }
+
+    #[tokio::test]
+    async fn stage_send__should_store_and_ledger_before_any_delivery() {
+        // Given: a recipient whose relay is unreachable — delivery will take
+        // the full deadline, which is exactly what an edge must not wait for
+        // before rendering.
+        let key_path = temp_key("staged", "a");
+        keystore::create(&key_path).expect("key");
+        let a = Client::open_with(
+            &key_path,
+            ClientConfig {
+                connect_timeout: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("open");
+        let absent = DeviceKey::from_seed([61; 32]).public();
+        let contact = Contact {
+            keys: vec![absent],
+            relays: vec![format!("{}@203.0.113.9:1", hex::encode(&absent.0))],
+        };
+
+        // When: only the local half runs
+        let staged = a
+            .stage_send(&[contact], b"render me now".to_vec(), vec![])
+            .expect("stage");
+
+        // Then: it is already readable history, flagged as still owed…
+        let history = a.history(staged.conversation).expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].body.as_deref(), Ok(b"render me now".as_slice()));
+        assert!(history[0].pending, "the ledger owes its delivery");
+        assert_eq!(a.state.outbox().len(), 1);
+
+        // …and delivery is a separate step that a crash can't lose: even
+        // without `deliver`, the flush path owes the same entry.
+        let report = a.flush_outbox().await.expect("flush");
+        assert_eq!(report.pending, 1, "still owed after a failed retry");
+        assert!(
+            a.history(staged.conversation).expect("history")[0].pending,
+            "and still honestly marked pending"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("staged"));
     }
 
     #[tokio::test]

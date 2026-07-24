@@ -90,8 +90,10 @@ fn App() -> impl IntoView {
     load_state();
     load_conversations();
 
-    // Live delivery (C4b): the Rust side's subscription loops emit
-    // `new-messages` per nudged drain; re-render from the store.
+    // Live delivery (C4b): the Rust side emits `new-messages` per nudged
+    // drain, per direct arrival (D5), and when a staged send finishes
+    // delivering — which is what clears a message's "sending…" flag.
+    // Always a re-render from the store; the event carries no content.
     let on_arrival = move || {
         load_conversations();
         if let View::Chat { id, .. } = view.get_untracked() {
@@ -471,7 +473,9 @@ fn ChatsView(
                     text.set(String::new());
                     selected.update(|selected| selected.clear());
                     composing.set(false);
-                    ok("sent");
+                    // The message is stored, not yet delivered — the row's
+                    // own "sending…" marker is the truth from here.
+                    ok("sending…");
                     open_chat(conversation, label);
                 }
                 Err(e) => err(e),

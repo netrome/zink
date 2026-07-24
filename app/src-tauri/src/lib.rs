@@ -641,7 +641,12 @@ async fn send_message(
         None => vec![],
     };
     let client = client(&app, &managed).await?;
-    let receipt = match (conversation, to) {
+    // Stage only: seal, store, ledger — no network. The message is in the
+    // store when this returns, so the view can render it immediately (flagged
+    // "sending…" by its outbox entries) instead of waiting out delivery.
+    // Delivery is honestly slow sometimes — an unreachable relay costs its
+    // whole deadline — and none of that needs to be in front of the user.
+    let staged = match (conversation, to) {
         (Some(conversation), _) => {
             let conversation = parse_id(&conversation)?;
             let resolved = client.reply_contacts(conversation)?;
@@ -656,29 +661,39 @@ async fn send_message(
             if contacts.iter().all(|contact| contact.relays.is_empty()) {
                 return Err("no routable participants — add their contacts first".into());
             }
-            client
-                .send_in(conversation, &contacts, text.into_bytes(), blobs)
-                .await?
+            client.stage_send_in(conversation, &contacts, text.into_bytes(), blobs)?
         }
         (None, Some(petnames)) if !petnames.is_empty() => {
             let contacts: Vec<zink_client::Contact> = petnames
                 .iter()
                 .map(|petname| client.resolve_contact(petname))
                 .collect::<Result<_, _>>()?;
-            client.send(&contacts, text.into_bytes(), blobs).await?
+            client.stage_send(&contacts, text.into_bytes(), blobs)?
         }
         _ => return Err("no conversation or contact given".into()),
     };
-    // A successful send proves the network is up: retry any backlog now, but
-    // off the command's path so this send's latency doesn't wait on it.
-    // (`zink-client` stays runtime-free; the edge owns the spawn.)
-    if receipt.pending_relays == 0 {
-        let client = client.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = client.flush_outbox().await;
-        });
-    }
-    Ok(hex::encode(&receipt.conversation.0))
+    let conversation = hex::encode(&staged.conversation.0);
+    // Deliver off the command's path. Losing this task loses nothing: the
+    // outbox entry is already written, and every flush trigger (recv,
+    // reconnect, the next send) pays it. `new-messages` on completion is what
+    // clears the "sending…" flag — or leaves it honestly in place.
+    let deliver_client = client.clone();
+    let deliver_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let receipt = deliver_client.deliver(&staged).await;
+        let _ = deliver_app.emit("new-messages", 1);
+        match receipt {
+            // A fully delivered send proves the network is up: retry the
+            // backlog too.
+            Ok(receipt) if receipt.pending_relays == 0 => {
+                let _ = deliver_client.flush_outbox().await;
+            }
+            Ok(_) => {}
+            // Not lost — queued, and the message renders as such.
+            Err(error) => tracing::warn!(%error, "send delivery queued for retry"),
+        }
+    });
+    Ok(conversation)
 }
 
 /// Decode a webview-prepared image into the thumbnail + full-res blob pair.

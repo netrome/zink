@@ -140,6 +140,15 @@ client.on_direct_delivery(sink: Fn(Vec<Received>))  // register once, after open
 client.after_direct(&[Received])              // the post-drain healing seam
                                               // (auto-sync / who-is / re-wrap) the
                                               // edge runs for a direct arrival
+// render-before-deliver: `send`/`send_in` = stage + deliver, and an edge that
+// shouldn't wait out delivery (the app) can run the halves itself. Staging is
+// sync + local (seal, store, index, ledger) so the message is renderable the
+// moment it returns — flagged `pending` by its own outbox entries; delivery
+// then runs off the user's path. Dropping the handoff loses nothing: the
+// ledger already owes the delivery and any flush trigger pays it.
+client.stage_send(&[Contact], plaintext, blobs) -> StagedSend
+client.stage_send_in(conversation, &[Contact], plaintext, blobs) -> StagedSend
+client.deliver(&StagedSend) -> SendReceipt     // idempotent; re-runnable
 // peer sync (D0a/D0b, sync-primitives.md): the client also *serves* — an
 // accepting router on SYNC_ALPN answers get/get-successors from local
 // storage for the client's lifetime. The relay transport is ALWAYS bound

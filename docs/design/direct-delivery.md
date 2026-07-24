@@ -261,6 +261,32 @@ are per-message, so treating one as "stop pushing to this peer" would lose
 directness for the next message. Reaching a live peer is cheap; only
 unreachability is worth remembering.
 
+### 5.1 Perceived latency: render before you deliver
+
+A second field report closed the loop: with the relay off, *delivery* was
+instant but the message took ~10 s to appear locally. Measured in-process
+(relays shut down, peer reachable directly): a **text** send took 23 ms, an
+**image** send 10,026 ms. Blobs keep their relay on the path (§3), and an
+unreachable relay costs the full `connect_timeout` — sequentially per relay.
+
+That cost is honest and mostly not removable: the mailbox deposit is what makes
+a message durable for a peer who *isn't* reachable, and shortening its deadline
+trades reliability on flaky cellular for a faster failure. What *was* removable
+is the user waiting for it. Sends are store-first (C4a), so the message is
+already in the store — and already flagged `pending` by its own outbox entry —
+before any network work begins.
+
+So `send` split into halves: `stage_send` (sync, local — seal, store, index,
+ledger) and `deliver` (network). The app runs them separately: stage, return,
+render with the row's own "sending…" marker, deliver in a spawned task, then
+emit `new-messages` so the marker clears. The CLI still calls `send` and stays
+synchronous — a dev tool wants the receipt.
+
+Handing delivery off is safe precisely because of the ledger: if the process
+dies between the two halves, the outbox still owes the delivery and any flush
+trigger pays it. Nothing is riding on the task surviving, which is what makes
+this a rendering change rather than a reliability trade.
+
 Consequence worth stating: a conversation that has been quiet longer than the
 evidence TTL gets one 600 ms probe on its next send. If that probe is too slow
 (a cold cross-NAT holepunch on cellular can be), the message takes the mailbox

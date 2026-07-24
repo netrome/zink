@@ -1215,15 +1215,30 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   dialed by key, so the suite now beats its pre-D5 time. An interactive CLI
   send to an offline peer still costs ~3.7 s (600 ms dial + the quiet
   graceful close) — a dev-tool cost; persisting the cooldown would remove it.
-  199 tests. Known
+  199 tests. **Second field report, same turn — perceived latency with the
+  relay off** (delivery instant, local render ~10 s): measured in-process with
+  the relays shut down, a text send is 23 ms but an **image** send is
+  10,026 ms — blobs keep their relay on the path (§3) and an unreachable relay
+  costs the full `connect_timeout`, sequentially per relay. The deposit's
+  deadline is doing a real job (durability for an unreachable peer), so what
+  changed is that the *user* no longer waits for it: `send` split into
+  `stage_send` (sync, local — seal, store, index, ledger) + `deliver`
+  (network), and the app runs them separately — stage, return, render with the
+  row's existing "sending…" marker, deliver in a spawned task, `new-messages`
+  clears the marker. Safe by the C4a ledger: if the process dies between the
+  halves, the outbox still owes the delivery and any flush pays it — a
+  rendering change, not a reliability trade. CLI keeps synchronous `send` (a
+  dev tool wants the receipt). 200 tests. Known
   consequence: a conversation quiet longer than the 5-min evidence TTL gets
   one 600 ms probe, and if that's too slow (cold cross-NAT holepunch) the
   message takes the mailbox and the next one goes direct — the pair converges
-  once any traffic flows. **Separately noticed, pre-existing (not D5):** an
-  unreachable relay still costs a send the full 10 s `connect_timeout` for its
-  deposit attempt, since C4a stopped retrying but kept the deadline — the
-  cheap lever is a shorter *in-send* deposit deadline (the outbox exists so a
-  send needn't wait), left unscheduled as a C4a tuning call.)*
+  once any traffic flows. **Pre-existing, now off the user's path rather than
+  fixed:** an unreachable relay still costs a *delivery* the full 10 s
+  `connect_timeout` per relay (C4a stopped retrying but kept the deadline).
+  Shortening the in-send deposit deadline is still available as a C4a tuning
+  call, but it trades reliability on flaky cellular for a faster failure, and
+  with the render/deliver split nobody is watching it — so it stays
+  unscheduled.)*
 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
