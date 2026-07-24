@@ -105,31 +105,30 @@ carry it. Cluster-first, never key-first.
 detail screen):
 
 1. **My lens** — authoritative to me: my petname, my avatar for them (a photo I
-   chose, else the resolved one), the keys I've grouped under this person.
+   chose, else the resolved one), and this person's device keys.
 2. **Their self-claim** — verified self-name / self-avatar, plus any self-attested
    `SamePersonAs` links ("this key says it's also …").
 3. **Friends' lens** — the vouched names mutual contacts published: *"Alice calls
    them 'Bobby' · vouched by B, D."* **Privacy invariant, printed in the copy:**
    you only ever see what a friend *chose to share* — never their private petname.
 
-**Three kinds of clustering, each rendered honestly:**
+**How a person's keys cluster, rendered honestly:**
 
 - **Self-attested link** (crypto-backed): "recognized as the same person — they
   say so," shown with **directionality** ("this device recognizes it; scan back to
   confirm both ways" — matches the existing pair copy). Never implies symmetry.
-- **Your local grouping** (no claim, fuzzy — the "someone in my football team"
-  case): "you've grouped these," visibly *your* choice, arbitrary keys allowed.
-  **Correction (found at U6, 2026-07-24):** the current storage does *not* already
-  permit this. A contact is one signed `ContactRecord`; `contact_from` sets
-  `Contact.keys = record.keys.clone()`, so a contact's cluster is the person's own
-  declared devices, not an arbitrary local bag — and `add_contact` actively rejects
-  cross-contact key overlap. Arbitrary local grouping needs a **new local
-  same-person store** (local-only, never published) plus decisions about
-  send-by-name/membership/reply interaction. Genuine unresolved design → its own
-  slice (U6b) with a design note, not "free."
+  A contact's cluster is exactly its signed `ContactRecord`'s keys (`contact_from`
+  sets `Contact.keys = record.keys.clone()`); own devices cluster via
+  `recognize_device`.
 - **Never a third-party device link** — a friend can vouch a *name*, never link
   someone else's devices (web-of-trust.md §6). Structurally impossible; we don't
   offer it.
+
+> *Arbitrary local grouping* — bagging unrelated keys under one label you invent
+> ("someone in my football team") — is a legitimate client-policy idea but is **out
+> of scope**: the storage clusters only via signed records + own-device
+> recognition, so it would need a new local same-person store and send-by-name /
+> membership decisions. Not planned; revisit if a concrete need appears.
 
 **Not free (tracked, not silently absorbed):** a friend's *avatar* for someone (the
 per-attester avatar lens) is deferred in web-of-trust.md §6. The facelift renders
@@ -203,7 +202,7 @@ Three destinations, each answering one question. Bottom tab bar.
   empty composer). No permanent compose form, no refresh button.
 - **People** — *"who do I know?"* Just the contact list + a **+** (scan / paste
   / pair as focused sub-flows). Tapping a person opens a **detail screen** built
-  as the §4 lens: my lens (petname, avatar, grouped keys) · their self-claim ·
+  as the §4 lens: my lens (petname, avatar, their device keys) · their self-claim ·
   **friends' lens** (vouched names). Trust actions (vouch / repudiate) and
   disavowal warnings in context.
 - **Me** — *"who am I, and how do I reach the world?"* Name, avatar, my QR, my
@@ -260,7 +259,7 @@ the change is visible on device where relevant · this doc updated.
   new chat is a deliberate + action and the list shows only conversations.
 - [x] **U4 · People + person detail (lens-first).** Contact rows → tap-through
   detail screen built as the §4 **Person lens**: three separated belief layers —
-  *my lens* (petname, avatar, the keys I've grouped here) · *their self-claim*
+  *my lens* (petname, avatar, their device keys) · *their self-claim*
   (self-name/avatar, self-attested `SamePersonAs` links shown directionally) ·
   *friends' lens* (vouched names — "Alice calls them 'Bobby' · vouched by B, D",
   with the "only what they shared" privacy note). Trust actions (vouch /
@@ -275,7 +274,7 @@ the change is visible on device where relevant · this doc updated.
   **multi-relay list** framed per §7 (add/remove, "where your messages wait").
   *Done when:* a user can manage name, avatar, devices, and ≥1 relay from one
   calm screen, with recognition directionality honest.
-- [ ] **U6a · Local avatar override.** Let your lens carry a photo *you* chose
+- [x] **U6 · Local avatar override.** Let your lens carry a photo *you* chose
   for a contact — a client-side override of the resolved self-claim, stored
   plaintext on-device only, never published (reuses the U5 canvas path). Wins in
   `Client::avatar` everywhere their avatar shows; a "use their photo instead"
@@ -285,14 +284,8 @@ the change is visible on device where relevant · this doc updated.
   `has_local_avatar`, `avatar` prefers the override; `set_local_avatar`/
   `clear_local_avatar` commands; `PersonDetail.has_local_avatar`; picker +
   "use their photo instead" in the person detail.)*
-- [ ] **U6b · Local grouping ("group with…").** 🎯 Cluster keys under one local
-  person (the football-team case). **Needs design** (see §4 correction): the
-  current model has no arbitrary local grouping — a contact's cluster is its
-  signed record's keys, and `add_contact` rejects overlap. Requires a new
-  local-only same-person store and decisions on how a fuzzy group interacts with
-  send-by-name, `reply_contacts`, the conversation index, and membership. Write a
-  short `docs/design/local-grouping.md` when scheduled. *Done when:* you can group
-  two keys as one local person, and it degrades sanely in send/reply.
+  *(Local grouping — the "football-team" case — was descoped 2026-07-24: not
+  thought through, and it needs a new local same-person store; see the §4 note.)*
 - [ ] **U7 · First-run onboarding.** The §6 sequence (name/avatar → relay →
   your code), replacing the "dumped into the mega-screen" first run. Reuses U5
   widgets. *Done when:* a fresh install walks a new user to a shareable code

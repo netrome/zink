@@ -2009,7 +2009,7 @@ fn PersonView(
                             }}
                             // My grouping: the keys clustered as this person.
                             <div class="dim">
-                                {format!("{} key(s) you've grouped as this person", keys.len())}
+                                {format!("{} device key(s) for this person", keys.len())}
                             </div>
                             {keys
                                 .into_iter()
