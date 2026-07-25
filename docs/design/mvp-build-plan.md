@@ -919,57 +919,17 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 - [x] **De7 · Delivery confirmation (the D5 ack, surfaced).** Since D5 a
   direct delivery returns `SyncResult::Stored` **after the recipient's
   durable store returns** — a real delivery confirmation, stronger than
-  anything a relay could offer, and it is currently **thrown away**. The CLI
-  prints it once on the send line (`"… 2 direct, 1 relay(s) skipped"`) and
-  then it is gone; the app's spawned delivery task reads only
-  `pending_relays == 0` to decide whether to flush the backlog and drops the
-  rest. Nothing persists it, so it appears in no `history` and nowhere in the
-  app at all — the D5 directness win is invisible to the person using it.
-  **The relay-side ack already exists** — `MailboxResult::Deposited` is the
-  relay confirming durable storage, and a successful deposit already clears
-  its (message, relay) outbox entry. So the ledger already distinguishes
-  three states and the UI merely collapses two of them; the full ladder comes
-  for the same work:
-  | State | already tracked as | vouched by |
-  |---|---|---|
-  | `sending…` — still owed to ≥1 relay | `pending == true` | us |
-  | `sent` — every relay took it or was discharged | `pending == false` | the **relay** |
-  | `delivered` — the recipient's device stored it | *nothing yet* | the **recipient** |
-  Only the third rung needs new persistence. **The labels must keep the
-  distinction**: `Deposited` is attributable to the *relay's* key and relays
-  are untrusted (tenet 5) — it can claim storage and drop the message, and it
-  implies nothing about the recipient ever draining it (or the 30-day
-  retention not expiring first). `Stored` is attributable to the
-  **recipient's device key** (the sync connection authenticates by endpoint
-  key, as the mailbox does) and is returned only *after* their durable store
-  returns. So "sent" = we did our part and an untrusted party took it;
-  "delivered" stays reserved for the party that actually matters. Do not
-  launder the relay's claim into a delivery guarantee.
-  *This also settles the "sometimes there, sometimes not" worry:* a
-  mailbox-path message reads `sent`, not blank, so every message carries an
-  honest label and only the top rung needs the recipient's word.
-  **Rung 3 is not a pure rendering change** (checked): the ack is transient
-  and cannot be derived after the fact, because a message with no outbox
-  entries is equally "direct-acked" or "deposited to every relay fine". It
-  needs a small ledger. Shape: a sidecar beside the stored envelope,
-  `conversations/<conv>/<msg>.acks`, listing the recipient keys that returned
-  `Stored` — mirrors the outbox ledger's per-(message, x) shape, is scoped to
-  the conversation so it dies with it, and needs no loader change
-  (`load_envelopes` already ignores anything that isn't `.env`). Written by
-  `deliver`; `HistoryMessage` gains the confirmed keys; CLI `history` renders
-  a marker so it is e2e-testable without phones (the C3a pattern), app
-  renders it per message. *(Watch the interaction with the `stage_send` /
-  `deliver` split: the app renders before delivery runs, so the marker must
-  appear on the `new-messages` re-render the delivery task already emits —
-  no new event plumbing needed.)*
-  **The rendering rule is load-bearing** (tenet 7, honesty over false
-  order): **positive-only.** "Confirmed received by X" when an ack is held;
-  absence means *no confirmation*, **never** "not delivered" — the recipient
-  may well have it via the mailbox and simply never said so. No greyed-out
-  ticks, no "undelivered" state. `pending` stays the only negative signal and
-  keeps its existing meaning: "we still owe a relay", not "they don't have
-  it". Per-recipient, so a group can honestly say "2 of 3 confirmed"
-  (labels via `participant_labels`).
+  anything a relay could offer. It was **thrown away**: printed once on the
+  CLI send line, never persisted, invisible in the app. Surfaced as the
+  delivery ledger's third rung: `sending…` (we still owe a relay — our word)
+  → `sent` (a relay took it — an **untrusted** party's word) → `delivered`
+  (the recipient's own device stored it). Only the top rung needed new
+  persistence: the ack is transient and cannot be reconstructed later, since
+  a message with no outbox entries is equally direct-acked or deposited fine.
+  The ladder, the attribution rule that stops "sent" being laundered into
+  "delivered", and the positive-only rendering rule are recorded in
+  [live-delivery.md](./live-delivery.md) §2 — the durable home, since they
+  govern every future change to the ledger.
   *Caveat to write down:* blobs keep their relay on the path (D5 §3), so an
   image can be both direct-acked and deposited — `delivered` then means the
   envelope is on their device while the image bytes are still a lazy fetch
@@ -981,36 +941,24 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   history reads `delivered`; the same send with the recipient offline reads
   `sent` (never a false negative); a send with a relay down reads
   `sending…`/pending as it does today; headless e2e covers all three.
-  ✅ *(2026-07-25: built as designed — `ClientState::add_acks` / `acks_in`
-  writing `conversations/<conv>/<msg>.acks` (raw 32-byte keys), `deliver`
-  persisting `deliver_direct`'s ack set, `HistoryMessage.confirmed`, CLI
-  `[✓ delivered to Bob]`, `Message.confirmed` + a `· ✓ delivered to …` cue
-  in the app. **No protocol change** — De7 records an ack D5 already
-  produced, so no SPEC change and no wire field. Acks are **unioned, never
-  replaced**: `deliver` reruns on a flush, and a later pass that reaches
-  nobody must not erase what an earlier one earned (regression test).
-  Best-effort write — a device that said it stored the message *has* it, so
-  a failed sidecar must cost the confirmation, not the send.
-  **Folded in (the pre-MVP sweep's cheap half):** `history` and
-  `conversations` were reading and BORSH-decoding every envelope **twice**
-  — `load_dag` re-ran `load_envelopes` under callers that had just loaded
-  them — on every `new-messages` render. `ClientState::dag_of(&envelopes,
-  conv)` shares the rebuild; `load_dag` keeps its move path for
-  `threaded_draft`. Behaviour-identical, pinned by the existing DAG tests.
-  Tests: 3 in-process (ack recorded + surviving a reopen + never
-  self-reported; nothing-acked reads as silence not failure; the union
-  rule) and a CLI e2e in `outbox.rs` covering rungs 3 and 2 in one run.
-  204 → **208 tests**. **Manual CLI run against a real relay** — all three
-  rungs on one screen: `me: you up? [✓ delivered to Bob]` (Bob listening,
-  direct), `me: still there?` (Bob killed, relay took it — **unmarked, and
-  Bob drained it fine on return**, which is exactly why the rule is
-  positive-only), `me: and now? [pending]` (relay killed too); on disk, 1
-  `.acks` sidecar and 1 outbox entry. Docs: live-delivery.md §2 (the third
-  rung), direct-delivery.md §3, client-core.md.
-  **Not done here:** the app-side render is compile-verified only
-  (`cargo check/clippy --target aarch64-linux-android` clean; this machine
-  has no webkit2gtk for the desktop target), so it wants one look on
-  device — and the group case ("2 of 3") has only ever run 1:1.)*
+  ✅ *(2026-07-25: `ClientState::add_acks`/`acks_in` over a
+  `conversations/<conv>/<msg>.acks` sidecar written by `deliver`; surfaced as
+  `HistoryMessage.confirmed`, CLI `[✓ delivered to Bob]`, app cue.
+  **No protocol change** — it records an ack D5 already produced. Two rules
+  worth keeping in mind when touching it: acks are **unioned, never
+  replaced** (a flush that reaches nobody must not erase an earlier
+  confirmation — regression test), and the write is **best-effort** (a failed
+  sidecar costs the confirmation, not the send). **Folded in:**
+  `history`/`conversations` were reading and BORSH-decoding every envelope
+  *twice* per render — `load_dag` re-ran `load_envelopes` beneath callers
+  that had just loaded them; `ClientState::dag_of` now shares the rebuild.
+  204 → **208 tests**. **Manual run against a real relay**, all three rungs:
+  `[✓ delivered to Bob]` direct; `still there?` **unmarked, yet drained fine
+  by Bob on his return** — the concrete case the positive-only rule exists
+  for; `[pending]` with the relay down. Docs: live-delivery.md §2,
+  direct-delivery.md §3, client-core.md. **Unverified:** the app render is
+  compile-checked only (no webkit2gtk here; Android target clean), and the
+  group "2 of 3" case has only ever run 1:1.)*
 - [ ] **Client-issued delivery acks — not scheduled, design first.**
   *(Proposed + discussed 2026-07-25.)* An optional, best-effort "I received
   this" a client may choose to send — squarely in the spirit of tenet 2
