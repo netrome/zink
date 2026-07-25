@@ -925,10 +925,33 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   `pending_relays == 0` to decide whether to flush the backlog and drops the
   rest. Nothing persists it, so it appears in no `history` and nowhere in the
   app at all — the D5 directness win is invisible to the person using it.
-  **Not a pure rendering change** (checked): the ack is transient and cannot
-  be derived after the fact, because a message with no outbox entries is
-  equally "direct-acked" or "deposited to every relay fine". It needs a small
-  ledger. Shape: a sidecar beside the stored envelope,
+  **The relay-side ack already exists** — `MailboxResult::Deposited` is the
+  relay confirming durable storage, and a successful deposit already clears
+  its (message, relay) outbox entry. So the ledger already distinguishes
+  three states and the UI merely collapses two of them; the full ladder comes
+  for the same work:
+  | State | already tracked as | vouched by |
+  |---|---|---|
+  | `sending…` — still owed to ≥1 relay | `pending == true` | us |
+  | `sent` — every relay took it or was discharged | `pending == false` | the **relay** |
+  | `delivered` — the recipient's device stored it | *nothing yet* | the **recipient** |
+  Only the third rung needs new persistence. **The labels must keep the
+  distinction**: `Deposited` is attributable to the *relay's* key and relays
+  are untrusted (tenet 5) — it can claim storage and drop the message, and it
+  implies nothing about the recipient ever draining it (or the 30-day
+  retention not expiring first). `Stored` is attributable to the
+  **recipient's device key** (the sync connection authenticates by endpoint
+  key, as the mailbox does) and is returned only *after* their durable store
+  returns. So "sent" = we did our part and an untrusted party took it;
+  "delivered" stays reserved for the party that actually matters. Do not
+  launder the relay's claim into a delivery guarantee.
+  *This also settles the "sometimes there, sometimes not" worry:* a
+  mailbox-path message reads `sent`, not blank, so every message carries an
+  honest label and only the top rung needs the recipient's word.
+  **Rung 3 is not a pure rendering change** (checked): the ack is transient
+  and cannot be derived after the fact, because a message with no outbox
+  entries is equally "direct-acked" or "deposited to every relay fine". It
+  needs a small ledger. Shape: a sidecar beside the stored envelope,
   `conversations/<conv>/<msg>.acks`, listing the recipient keys that returned
   `Stored` — mirrors the outbox ledger's per-(message, x) shape, is scoped to
   the conversation so it dies with it, and needs no loader change
@@ -947,11 +970,17 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   keeps its existing meaning: "we still owe a relay", not "they don't have
   it". Per-recipient, so a group can honestly say "2 of 3 confirmed"
   (labels via `participant_labels`).
+  *Caveat to write down:* blobs keep their relay on the path (D5 §3), so an
+  image can be both direct-acked and deposited — `delivered` then means the
+  envelope is on their device while the image bytes are still a lazy fetch
+  from their relay's cache. Mild, and the same gap exists after any mailbox
+  drain, but state it rather than discover it.
   *Non-goals:* client-issued acks for the mailbox path (below), read
   receipts, relay presence (De6e), and any UI that implies non-delivery.
   *Done when:* two clients exchange a message directly and the sender's
-  history shows it confirmed; a mailbox-path send shows no marker and no
-  false negative; headless e2e covers both.
+  history reads `delivered`; the same send with the recipient offline reads
+  `sent` (never a false negative); a send with a relay down reads
+  `sending…`/pending as it does today; headless e2e covers all three.
 - [ ] **Client-issued delivery acks — not scheduled, design first.**
   *(Proposed + discussed 2026-07-25.)* An optional, best-effort "I received
   this" a client may choose to send — squarely in the spirit of tenet 2
