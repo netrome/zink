@@ -164,7 +164,24 @@ client.deliver(&StagedSend) -> SendReceipt     // idempotent; re-runnable
 // (empty map pre-profile — De5), so peers' relay URLs dial immediately on
 // a fresh install; set_profile (async since De5) homes the RUNNING
 // endpoint via insert_relay/remove_relay — profile changes apply live,
-// no restart. Homing keeps this device reachable by key.
+// no restart. Homing keeps this device reachable by key — and homing takes
+// ~1s, which is why that transition is signalled rather than assumed:
+client.await_reachable(within) -> Reachable     // De6c. ByKey = a home relay
+                                              // connection is up, so peers
+                                              // holding our key + relay url
+                                              // can dial us NOW; NoHomeRelay
+                                              // = no relay url, dial-by-key
+                                              // can never work (still
+                                              // directly dialable); NotYet =
+                                              // not within the deadline.
+                                              // Bounded because iroh's
+                                              // `online()` never resolves at
+                                              // all with no relay configured.
+                                              // Advisory: sending and
+                                              // draining dial the mailbox
+                                              // directly and never wait on
+                                              // this. `zink-cli listen`
+                                              // prints it as `reachability:`.
 // Serving gate (D0c): contacts-only — non-contacts get NotHeld / empty
 // successors, indistinguishable from not-holding; own key always served.
 // Auto-sync (D0d): every drain (recv / catch-up / nudge) heals orphaned

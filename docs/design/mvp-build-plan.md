@@ -803,7 +803,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     a peer that connects to us inside the window doesn't yet re-license a
     dial; the one-line fix would revise a D5 policy its unit test
     deliberately pins (fast-failure.md §6A).)*
-  - [ ] **De6c · Explicit reachability signal.** `listen` prints "listening on
+  - [x] **De6c · Explicit reachability signal.** `listen` prints "listening on
     N relay(s)…" at 78 ms but is not dialable by key until ~991 ms — the
     endpoint must home first, and nothing marks the transition, so four e2e
     tests poll `sleep(250 ms)` against a 15 s deadline with a *fresh CLI
@@ -813,6 +813,39 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     it), print a `reachable by key` line, move the poll loops onto reading it.
     *Done when:* no e2e sleeps on readiness, and the line appears when the
     endpoint is genuinely dialable.
+    ✅ *(2026-07-25: `Client::await_reachable(within) -> Reachable`, **bounded
+    and three-way** — `Endpoint::online()` resolves when *any* home relay
+    connects and **never resolves at all** when none is configured, so
+    awaiting it bare would hang a profile-less client forever;
+    `NoHomeRelay` reports that honestly instead (such a device is still
+    directly dialable, just not by key — the De5 window, now visible).
+    Advisory, never a gate: sending and draining dial the mailbox directly
+    and need no homing. `listen` prints one `reachability:` verdict line
+    **after** spawning its subscription loops, since registering a mailbox
+    needs no homing — verified live: the catch-up drain lands at ~150 ms,
+    the verdict at ~271 ms. Negatives deliberately avoid the phrase
+    "reachable by key" so a substring watcher can't mistake them for
+    success. **Readiness turned out to be two notions, not one** (design
+    correction at implementation): "reachable by key" needs a home relay,
+    "subscribed and nudgeable" needs only registration — `live.rs` uses a
+    mailbox-only relay and is *correctly* never dialable by key, so the
+    helper split into `spawn_listener` (verdict reported, whatever it says)
+    and `spawn_homed_listener` (verdict must be positive, so a missing relay
+    url fails with the reason instead of a mystery timeout downstream).
+    Harness: one `Listener` in `tests/common` (stdout read on a thread,
+    `wait_for(marker)` blocking reactively, killed on drop) replaced four
+    duplicate `KillOnDrop` types, five poll loops, and two throwaway "probe"
+    identities that existed only to poll. `live.rs`'s loop was a *delivery*
+    wait, not readiness — it now blocks on the listener's own arrival lines
+    (printed after storing, so the proof is unchanged) and reads history
+    once at the end. **Zero `thread::sleep` remain in the CLI e2e suite.**
+    Measured: `who_is` 3.60 → **2.92 s**, `multi_device` 5.37 → **4.65 s**,
+    `live` 1.09 → **0.77 s**, `groups` 7.97 → **7.02 s**; 5 consecutive runs
+    of all four clean (the retry loops are gone, so one-shot stability was
+    checked, not assumed). 203 tests. **Not wired: the app surface** — the
+    API exists, but a UI indicator for a client's own first second is its
+    own slice; worth doing when the profile/pairing screens next get
+    attention, since it's the same window De5 chased.)*
   - [ ] **De6d · Parallel per-relay work.** `deliver`, `flush_outbox` and
     `register_at_home_relays` iterate relays serially, so *n* unreachable
     relays cost *n* × deadline; `deliver_direct` (D5) and `who_is` (De3) are

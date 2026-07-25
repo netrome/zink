@@ -206,6 +206,41 @@ impl Client {
         self.device.public()
     }
 
+    /// Wait until other devices can reach us **by key** (De6c), bounded by
+    /// `within`.
+    ///
+    /// Binding an endpoint is not being reachable: dial-by-key routes through
+    /// a home relay (D0b), so until one of ours is connected, a peer holding
+    /// our key and relay URL cannot reach us — who-is, backfill and direct
+    /// delivery against this device all fail, silently, for about a second
+    /// after start (measured ~991 ms; fast-failure.md F4). Nothing used to
+    /// mark that transition, so edges announced themselves ready too early
+    /// and tests papered over the gap by polling.
+    ///
+    /// Bounded and three-way on purpose. `Endpoint::online()` resolves when
+    /// *any* home relay connects and **never resolves at all** when none is
+    /// configured, so awaiting it bare would hang a profile-less client
+    /// forever. `NoHomeRelay` is that case reported honestly rather than
+    /// waited out — such a device is still directly dialable, just not by
+    /// key.
+    ///
+    /// Advisory, not a gate: nothing here blocks sending or draining, both of
+    /// which dial the relay's mailbox directly and need no homing.
+    pub async fn await_reachable(&self, within: Duration) -> Reachable {
+        if self
+            .state
+            .home_relay_entries()
+            .iter()
+            .all(|entry| entry.relay_url.is_none())
+        {
+            return Reachable::NoHomeRelay;
+        }
+        match n0_future::time::timeout(within, self.endpoint.online()).await {
+            Ok(()) => Reachable::ByKey,
+            Err(_) => Reachable::NotYet,
+        }
+    }
+
     /// Seal for all recipients, thread into the participant set's
     /// conversation (or start one), deposit once per distinct relay
     /// (idempotent retry), push blobs to each relay's cache.
@@ -2866,6 +2901,22 @@ pub struct FlushReport {
     pub pending: usize,
     /// Entries past the give-up window: left in place, no longer retried.
     pub expired: usize,
+}
+
+/// Whether other devices can reach this one by key (De6c) — the answer from
+/// `Client::await_reachable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reachable {
+    /// A home relay connection is live: a peer holding our key and relay URL
+    /// can dial us now.
+    ByKey,
+    /// The profile names no relay URL, so there is nothing to wait for —
+    /// dial-by-key cannot work at all. Still directly dialable at an explicit
+    /// address, which is how the dev tooling and same-LAN paths work.
+    NoHomeRelay,
+    /// Still not connected when the deadline passed. Not fatal — homing keeps
+    /// retrying underneath — but honest: right now, we are not reachable.
+    NotYet,
 }
 
 /// What one `recv` pass drained, and from where it got nothing (De6a).

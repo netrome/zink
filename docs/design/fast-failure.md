@@ -172,7 +172,7 @@ field. The rest are the same bet: *n* unreachable relays cost *n* × deadline
 instead of one. direct-delivery.md §5.1 already measured this on the blob path
 (the 10 026 ms image send — "sequentially per relay").
 
-### F4 · No "reachable by key" readiness signal
+### F4 · No "reachable by key" readiness signal ✅ fixed (De6c)
 
 Measured from `listen` start:
 
@@ -195,6 +195,25 @@ is no signal for the transition, so:
   it. iroh exposes `Endpoint::online()`; De2's timing test already uses it.
   `listen` awaiting it and printing an explicit `reachable by key` line makes
   the tests reactive (block on a line) and the state honest.
+
+**Fixed in De6c** (2026-07-25): `Client::await_reachable` — bounded, and
+three-way (`Reachable::{ByKey, NoHomeRelay, NotYet}`), because
+`Endpoint::online()` **never resolves at all** when no relay is configured, so
+awaiting it bare would hang a profile-less client forever. `listen` prints one
+`reachability:` verdict line; the four tests block on it (and `live.rs` on the
+listener's own arrival lines) instead of sleeping. **Zero `sleep`s remain in
+the CLI e2e suite.** `who_is` 3.60 → 2.92 s, `multi_device` 5.37 → 4.65 s,
+`live` 1.09 → 0.77 s, `groups` 7.97 → 7.02 s.
+
+Two things the work surfaced that the diagnosis had merged into one:
+readiness is **two** notions, not one. "Reachable by key" needs a home relay
+connection; "subscribed and nudgeable" needs only a mailbox registration,
+which is a direct dial and needs no homing at all. `live.rs` wants the second
+and is *correctly* never dialable by key (mailbox-only relay) — so demanding
+homing there was wrong, and the helper split into `spawn_listener` (verdict
+reported, whatever it is) and `spawn_homed_listener` (verdict must be
+positive). The ordering in `listen` reflects the same fact: subscriptions are
+spawned first and the mailbox drain lands *before* the reachability verdict.
 
 ### F5 · Local reads pay a full endpoint bind and graceful close
 
@@ -255,10 +274,14 @@ stays a proposal and not a decision:
 Turns *n* × deadline into max(). F2 is a correctness fix that should not wait
 for a latency slice.
 
-**D · Explicit readiness signal** (F4). `listen` awaits `Endpoint::online()`
-and prints `reachable by key`; tests block on that line instead of polling.
-Removes ~1 s and all 250 ms-granularity jitter from four tests, and gives the
-app something honest to show during its own first second.
+**D · Explicit readiness signal** (F4). ✅ **Done in De6c.** `listen` awaits
+`Endpoint::online()` (bounded) and prints a `reachability:` verdict; tests
+block on that line instead of polling. Removed ~1 s and all 250 ms-granularity
+jitter from four tests. The app surface — showing its own first second honestly
+— is **not** wired: `Client::await_reachable` exists for it, but a UI
+indicator is its own slice, and only a multi-relay or fresh-profile user would
+notice. Worth doing when the profile/pairing screens next get attention (it is
+the same window De5 chased).
 
 **E · Lazy endpoint bind** (F5). Open the endpoint on first network use, so
 local-only commands skip it. Contained (`open_client` / `with_device`), but it
@@ -276,7 +299,7 @@ the first ~6 s.
 |---|---|---|
 | Today | 9.8 s | 9.96 s |
 | + A (persisted cooldown; ~6 sends × ~500 ms) | ~7 s | **7.97 s** (De6b) |
-| + D (readiness signal replaces the poll loops) | ~6 s | — |
+| + D (readiness signal replaces the poll loops) | ~6 s | **7.02 s** (De6c) |
 | + C (parallel relay work) | ~5.5 s | — |
 | Floor with the current harness (~30 × 50 ms open + close, ~8 recv × 90 ms) | ~3.5 s | — |
 | + F (De4 in-process) | <1 s | — |

@@ -24,7 +24,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use zink_client::{
-    Client, ClientConfig, Contact, Received, ResolvedName, SendReceipt, hex, keystore,
+    Client, ClientConfig, Contact, Reachable, Received, ResolvedName, SendReceipt, hex, keystore,
 };
 use zink_protocol::{
     BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey, RelayEntry,
@@ -799,6 +799,32 @@ async fn listen(args: &[String]) -> Result<(), String> {
                 .await;
         }));
     }
+    // The explicit reachability signal (De6c). Printed *after* the loops are
+    // spawned, so registering mailboxes (a direct dial, no homing needed)
+    // proceeds while we wait; and printed at all because "listening" is not
+    // "reachable" — dial-by-key needs a home relay connection, which lands
+    // roughly a second later. Anything waiting to reach this device by key
+    // (who-is, backfill, direct delivery — and the e2e suite) can block on
+    // this line instead of polling for it.
+    match client
+        .await_reachable(std::time::Duration::from_secs(15))
+        .await
+    {
+        // One verdict line, always printed, with a stable `reachability:`
+        // prefix — so a watcher can wait for *the answer* and then read
+        // which answer it was. The negatives deliberately avoid the phrase
+        // "reachable by key": matching is by substring, and "not reachable
+        // by key" would satisfy a watcher looking for success.
+        Reachable::ByKey => println!("reachability: reachable by key"),
+        Reachable::NoHomeRelay => println!(
+            "reachability: not dialable by key (no relay url in the profile — mailboxes still work)"
+        ),
+        Reachable::NotYet => {
+            println!("reachability: not dialable by key (no home relay connected yet)")
+        }
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().flush(); // piped stdout buffers
     for task in loops {
         let _ = task.await;
     }

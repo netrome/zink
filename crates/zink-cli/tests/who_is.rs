@@ -5,10 +5,9 @@
 
 mod common;
 
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
-
-use common::{cli, key_path, spawn_iroh_relay, spawn_relay, stdout_of, temp_dir};
+use common::{
+    cli, key_path, spawn_homed_listener, spawn_iroh_relay, spawn_relay, stdout_of, temp_dir,
+};
 
 /// Set a homed profile (mailbox + iroh relay URL — dialable by key) and
 /// return the shareable record payload.
@@ -26,16 +25,6 @@ fn record_payload(key: &str, name: &str, relay_spec: &str) -> String {
     .next()
     .expect("record payload line")
     .to_string()
-}
-
-/// The responder process — killed even when an assertion panics.
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -74,28 +63,11 @@ async fn who_is__should_resolve_a_one_way_add_through_a_mutual_contact() {
     let carol_hex = stdout_of(&cli(&["pubkey", &key_c]));
 
     // When: Bob comes online (a listener serves the sync ALPN) and Alice
-    // asks her contacts about the unknown key — polled, since Bob's
-    // endpoint needs a moment to home to the relay after spawning
-    let _bob = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_zink-cli"))
-            .args(["listen", "--key", &key_b])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn bob"),
-    );
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let answer = loop {
-        let output = stdout_of(&cli(&["who-is", "--key", &key_a, &carol_hex]));
-        if output.contains("Carol") {
-            break output;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no answer from Bob; last: {output}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    };
+    // asks her contacts about the unknown key. `spawn_homed_listener` returns
+    // when Bob says he is reachable by key (De6c) — no polling for the homing
+    // window it used to sleep through.
+    let _bob = spawn_homed_listener(&key_b);
+    let answer = stdout_of(&cli(&["who-is", "--key", &key_a, &carol_hex]));
 
     // Then: Bob's answer names Carol, with provenance and a payload
     assert!(answer.contains("Bob holds a record"), "got: {answer}");

@@ -5,13 +5,120 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
+
+/// How long to wait for a line a listener is expected to print. Generous —
+/// it bounds a hang, it is not a delay anyone pays: the waits are reactive,
+/// so a healthy run returns the moment the line appears.
+const LINE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// A background `zink-cli listen`, killed on drop — even when an assertion
+/// panics. Waits are **reactive** (De6c): its stdout is read on a thread and
+/// tests block on the line they need instead of polling subprocesses.
+pub struct Listener {
+    child: Child,
+    lines: mpsc::Receiver<String>,
+    /// The `reachability:` line this listener reported at startup.
+    verdict: String,
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Listener {
+    /// What this listener said about being reachable by key at startup.
+    pub fn verdict(&self) -> &str {
+        &self.verdict
+    }
+
+    /// Block until a printed line contains `marker`, and return that line.
+    /// Lines seen on the way are reported if the deadline passes, so a
+    /// failure says what the listener *did* say.
+    pub fn wait_for(&self, marker: &str) -> String {
+        let deadline = Instant::now() + LINE_DEADLINE;
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            match self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) if line.contains(marker) => return line,
+                Ok(line) => seen.push(line),
+                Err(_) => panic!("listener never printed {marker:?}; it said: {seen:#?}"),
+            }
+        }
+    }
+}
+
+/// Spawn `listen` for `key` and block until it has reported its **
+/// reachability verdict** (De6c) — a definite point in its startup, whatever
+/// the answer. Enough for a mailbox-only listener, which is never dialable by
+/// key and shouldn't be waited on for it; use `spawn_homed_listener` when the
+/// test needs peers to reach this device.
+///
+/// Binding is not reachability: dial-by-key routes through a home relay, so
+/// for roughly a second after spawning, a homed listener answers nothing.
+/// These tests used to poll `who-is` on a 250 ms sleep against a 15 s
+/// deadline (each probe a fresh CLI process, ~700 ms) to get past that
+/// window; now the listener says where it stands and this returns at once.
+pub fn spawn_listener(key: &str) -> Listener {
+    // Production timeouts on purpose (as before De6c): a listener's
+    // subscription loop wants patience, not the one-shot commands' haste —
+    // a tight connect deadline would make it flap and back off on a loaded
+    // machine. Nothing here waits on a *failure*, so haste buys nothing.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zink-cli"))
+        .args(["listen", "--key", key])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn listener");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return; // the test dropped the listener
+            }
+        }
+    });
+    let mut listener = Listener {
+        child,
+        lines,
+        verdict: String::new(),
+    };
+    listener.verdict = listener.wait_for("reachability:");
+    listener
+}
+
+/// `spawn_listener` for a test that needs peers to **reach this device by
+/// key** — who-is, backfill, direct delivery. Asserts the verdict is the
+/// positive one, so a profile without a relay url fails here with the reason
+/// rather than as a mystery timeout downstream.
+pub fn spawn_homed_listener(key: &str) -> Listener {
+    let listener = spawn_listener(key);
+    let verdict = listener.verdict();
+    assert!(
+        verdict.contains("reachable by key"),
+        "listener is not dialable by key: {verdict}"
+    );
+    listener
+}
 
 pub fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_zink-cli"))

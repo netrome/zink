@@ -7,10 +7,9 @@
 
 mod common;
 
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
-
-use common::{cli, key_path, spawn_iroh_relay, spawn_relay, stdout_of, temp_dir};
+use common::{
+    cli, key_path, spawn_homed_listener, spawn_iroh_relay, spawn_relay, stdout_of, temp_dir,
+};
 
 fn record_payload(key: &str, name: &str, relay_spec: &str) -> String {
     stdout_of(&cli(&[
@@ -26,15 +25,6 @@ fn record_payload(key: &str, name: &str, relay_spec: &str) -> String {
     .next()
     .expect("record payload line")
     .to_string()
-}
-
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 /// The single conversation id in a client's list — asserting the count is
@@ -77,7 +67,6 @@ async fn auto_query__should_learn_an_added_members_record_during_recv() {
     cli(&["contact-add", "--key", &key_b, &record_a]);
     cli(&["contact-add", "--key", &key_b, &record_c]);
     let carol_hex = stdout_of(&cli(&["pubkey", &key_c]));
-    let bob_hex = stdout_of(&cli(&["pubkey", &key_b]));
     stdout_of(&cli(&[
         "send", "--key", &key_b, "--to", "Alice", "hi alice",
     ]));
@@ -92,30 +81,9 @@ async fn auto_query__should_learn_an_added_members_record_during_recv() {
         "welcome carol",
     ]));
 
-    // …bob comes online; a throwaway probe key polls until his endpoint
-    // answers WhoIs connects (0 unreachable — a stranger gets NotHeld,
-    // which still proves reachability)
-    let _bob = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_zink-cli"))
-            .args(["listen", "--key", &key_b])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn bob"),
-    );
-    let key_probe = key_path(&dir, "probe.key");
-    cli(&["keygen", &key_probe]);
-    record_payload(&key_probe, "Probe", &spec);
-    cli(&["contact-add", "--key", &key_probe, &record_b]);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let output = stdout_of(&cli(&["who-is", "--key", &key_probe, &bob_hex]));
-        if output.contains("0 unreachable") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "bob never reachable: {output}");
-        std::thread::sleep(Duration::from_millis(250));
-    }
+    // …bob comes online. He says when he is reachable by key (De6c), which
+    // retires the throwaway probe identity that used to poll for it.
+    let _bob = spawn_homed_listener(&key_b);
 
     // When: alice drains — the scoped auto-query fires inside recv (bob
     // authored, so the conversation is legitimate; carol is an unknown
@@ -230,23 +198,9 @@ async fn groups__should_grow_thread_and_shrink_through_the_dag() {
     // …and bob learns carol's record from alice (who-is; alice listens to
     // serve, then stops before alice runs anything else)
     {
-        let _alice = KillOnDrop(
-            Command::new(env!("CARGO_BIN_EXE_zink-cli"))
-                .args(["listen", "--key", &key_a])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn alice"),
-        );
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let output = stdout_of(&cli(&["who-is", "--key", &key_b, &carol_hex]));
-            if output.contains("Carol") {
-                break;
-            }
-            assert!(Instant::now() < deadline, "no answer; last: {output}");
-            std::thread::sleep(Duration::from_millis(250));
-        }
+        let _alice = spawn_homed_listener(&key_a);
+        let answer = stdout_of(&cli(&["who-is", "--key", &key_b, &carol_hex]));
+        assert!(answer.contains("Carol"), "no answer from alice: {answer}");
     }
     stdout_of(&cli(&[
         "reply",

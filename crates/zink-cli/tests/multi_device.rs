@@ -10,10 +10,9 @@
 
 mod common;
 
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
-
-use common::{cli, key_path, spawn_iroh_relay, spawn_relay, stdout_of, temp_dir};
+use common::{
+    cli, key_path, spawn_homed_listener, spawn_iroh_relay, spawn_relay, stdout_of, temp_dir,
+};
 
 fn record_payload(key: &str, name: &str, relay_spec: &str) -> String {
     stdout_of(&cli(&[
@@ -29,15 +28,6 @@ fn record_payload(key: &str, name: &str, relay_spec: &str) -> String {
     .next()
     .expect("record payload line")
     .to_string()
-}
-
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 fn sole_conversation(key: &str) -> String {
@@ -91,28 +81,9 @@ async fn send_to_self__should_carry_a_paired_device_into_a_conversation() {
     ]));
 
     // …the phone comes online to serve (its sibling and its contact will
-    // both ask it things); a probe polls until it is reachable
-    let _phone = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_zink-cli"))
-            .args(["listen", "--key", &key_p])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn phone"),
-    );
-    let key_probe = key_path(&dir, "probe.key");
-    cli(&["keygen", &key_probe]);
-    record_payload(&key_probe, "Probe", &spec);
-    cli(&["contact-add", "--key", &key_probe, &record_p]);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let output = stdout_of(&cli(&["who-is", "--key", &key_probe, &phone_hex]));
-        if output.contains("0 unreachable") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "phone never reachable: {output}");
-        std::thread::sleep(Duration::from_millis(250));
-    }
+    // both ask it things). It says when it is reachable by key (De6c), so
+    // the throwaway probe identity that used to poll for that is gone.
+    let _phone = spawn_homed_listener(&key_p);
 
     // Then: the fresh laptop receives from its first inclusion onward, and
     // bootstraps alice's record through its sibling (own-device authorship
