@@ -37,9 +37,14 @@ pub(crate) type DirectSink =
 /// there is that a path exists — and evidence is what licenses a send to
 /// spend real time on a direct dial instead of just using the mailbox.
 ///
-/// In memory on purpose (like `Client::queried`): reachability is a fact
-/// about *now*, so a fresh process starts from "don't know" rather than from
-/// a stale opinion.
+/// **Positive** evidence is in memory on purpose (like `Client::queried`):
+/// that a peer was reachable is a fact about *now*, so a fresh process starts
+/// from "don't know" rather than from a stale opinion that a path exists.
+///
+/// **Negative** evidence persists (De6b, `unreachable.keys`): "this dial got
+/// nowhere at time T" is falsifiable on its face — past the cooldown it is
+/// simply ignored — so it cannot rot into a wrong opinion, and re-learning it
+/// costs the full dial deadline every time a process starts.
 pub(crate) type ReachMap =
     std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Reach>>>;
 
@@ -51,7 +56,8 @@ pub(crate) struct Reach {
     /// opened to us.
     pub seen_ms: u64,
     /// Last dial that got nowhere — suppresses re-dialing for a cooldown, so
-    /// a recipient that is simply offline costs a send nothing.
+    /// a recipient that is simply offline costs a send nothing. Persisted
+    /// (De6b), so that holds across process starts too.
     pub failed_ms: u64,
 }
 

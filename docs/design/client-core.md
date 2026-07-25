@@ -136,7 +136,9 @@ client.subscribe(relay, on_new: FnMut(Vec<Received>)) -> never returns
 // budget per `direct_budget`: 3s with recent reachability evidence — a delivery
 // taken/declined, or an inbound connection the router noted — 600ms when nothing
 // is known, and NO dial for 60s after a failure, so an offline recipient never
-// taxes a send); a durable `Stored` ack means that device's
+// taxes a send — that last one PERSISTS (De6b, `unreachable.keys`), so a fresh
+// process inherits it instead of re-paying the deadline; positive evidence
+// deliberately does not); a durable `Stored` ack means that device's
 // mailbox is skipped — a relay's deposit is skipped only when EVERY recipient it
 // hosts acked and the message carries no blobs (SendReceipt.direct_recipients /
 // .skipped_relays). Any failure = today's deposit. Receiving: the serving router

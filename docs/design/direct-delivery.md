@@ -255,6 +255,39 @@ The fix, in two parts:
   peer costs ~3.7 s there — a dev-tool cost, not a product one; the app never
   closes. Persisting the failure cooldown would remove it, if it ever annoys.
 
+**It annoyed — persisted in De6b** (2026-07-25, [fast-failure.md](./fast-failure.md)
+F1). Measured first: three consecutive CLI sends to the same offline peer cost
+802 / 798 / 794 ms, because the cooldown lived only in memory and every
+invocation is a fresh process. That also made it the largest single line item in
+the e2e suite, and the app re-paid it on every start.
+
+Only the **negative** half is persisted (`unreachable.keys`: key + wall-clock
+ms), and the asymmetry is the whole argument. "This peer was reachable" is an
+opinion that rots — a path that existed five minutes ago may not exist now, so
+positive evidence still starts empty each process. "This dial got nowhere at
+time T" is falsifiable on its face: past the cooldown it is ignored, so it
+cannot rot into a wrong opinion, only skip a dial already known to be a
+coin-flip. Written once per fan-out from the live map (so it prunes cooled-down
+and cleared entries as a side effect), and never written at all when nothing
+was dialed — a send to a peer already in cooldown must cost nothing, including
+the write that says so.
+
+| send to an offline recipient | before | after |
+|---|---|---|
+| CLI, production defaults, 1st | 3 674 ms | 3 674 ms |
+| CLI, production defaults, 2nd–4th | 3 665 / — / — ms | **68 / 86 / 83 ms** |
+| e2e `groups` | 9.96 s | **7.97 s** |
+
+Known trade, accepted: a peer that comes back online during the cooldown now
+stays on the mailbox path for the remainder of it across a restart too, where
+before a restart cleared the slate. Delivery is unaffected (that is what the
+mailbox is for) — only the *directness* is delayed, by under a minute, and any
+inbound traffic or successful send clears it. The cooldown is also still
+checked **before** positive evidence, so a peer that connects to us inside the
+window doesn't yet re-license a dial; making `seen_ms` outrank an older
+`failed_ms` is a one-line change but it revises a D5 policy pinned by test, so
+it stays a proposal rather than a side effect (fast-failure.md §6A).
+
 A decline (`NotHeld`) marks the peer *reachable* but never triggers the
 cooldown: decline reasons are indistinguishable on the wire (SPEC §5.2) and some
 are per-message, so treating one as "stop pushing to this peer" would lose

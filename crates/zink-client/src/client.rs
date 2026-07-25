@@ -112,7 +112,11 @@ impl Client {
         // rebuilt from the seed, since `DeviceKey` is deliberately not
         // `Clone`.
         let direct_sink = crate::sync::DirectSink::default();
-        let reach = crate::sync::ReachMap::default();
+        // Negative reach evidence survives the process (De6b): without it a
+        // fresh process re-pays the dial deadline for every peer that is
+        // simply offline, which the app does on every start and the one-shot
+        // CLI on every command.
+        let reach = load_unreachable(&state);
         let sync_router = crate::sync::spawn_sync_router(
             endpoint.clone(),
             state.clone(),
@@ -623,6 +627,7 @@ impl Client {
                 Err(_) => tracing::debug!("direct: no dialable route; mailbox only"),
             }
         }
+        let dialed = !targets.is_empty();
         let pushes = targets.into_iter().map(|(key, addr, timeout)| async move {
             let connection = match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout).await
             {
@@ -669,11 +674,19 @@ impl Client {
                 }
             }
         });
-        n0_future::join_all(pushes)
+        let acked: BTreeSet<PublicKey> = n0_future::join_all(pushes)
             .await
             .into_iter()
             .flatten()
-            .collect()
+            .collect();
+        // One write for the whole fan-out, after every dial has reported
+        // (De6b) — it carries the failures *and* the clears. Skipped when we
+        // dialed nobody: a send to a peer already in cooldown must cost
+        // nothing, and that includes not rewriting the file to say so.
+        if dialed {
+            self.persist_unreachable(now);
+        }
+        acked
     }
 
     /// What we currently know about reaching `key` directly (D5).
@@ -690,6 +703,34 @@ impl Client {
     fn note_reach(&self, key: &PublicKey, note: impl FnOnce(&mut crate::sync::Reach)) {
         if let Ok(mut reach) = self.reach.lock() {
             note(reach.entry(key.0).or_default());
+        }
+    }
+
+    /// Write the *negative* half of the reach map to disk (De6b), so the next
+    /// process doesn't re-pay a dial deadline to learn what this one learned.
+    ///
+    /// Derived from the live map rather than appended per failure: that makes
+    /// one write per send instead of one per failed recipient, and it prunes
+    /// as a side effect — an entry that has cooled down, or that a success
+    /// cleared (`failed_ms = 0`), is simply not written. Positive evidence
+    /// stays in memory by design (direct-delivery.md §5): reachability is a
+    /// fact about *now*, and a fresh process should not inherit an opinion
+    /// that a peer is up.
+    ///
+    /// Best-effort throughout — a failed write costs one extra dial next
+    /// time, which is not worth failing a send over.
+    fn persist_unreachable(&self, now: u64) {
+        let Ok(reach) = self.reach.lock() else { return };
+        let entries: Vec<([u8; 32], u64)> = reach
+            .iter()
+            .filter(|(_, reach)| {
+                reach.failed_ms > 0 && now.saturating_sub(reach.failed_ms) < FAIL_COOLDOWN_MS
+            })
+            .map(|(key, reach)| (*key, reach.failed_ms))
+            .collect();
+        drop(reach);
+        if let Err(error) = self.state.save_unreachable(&entries) {
+            tracing::debug!(%error, "could not persist unreachable peers");
         }
     }
 
@@ -2629,6 +2670,44 @@ impl Client {
     }
 }
 
+/// Seed a fresh reach map with the persisted *negative* evidence (De6b),
+/// dropping entries that have already cooled down — a stale failure must
+/// never be the reason a reachable peer goes undialed.
+///
+/// Only `failed_ms` is restored. `seen_ms` deliberately starts at zero, so a
+/// peer we knew last run gets one cheap probe rather than the full
+/// known-peer budget: a path that existed then may not exist now.
+fn load_unreachable(state: &ClientState) -> crate::sync::ReachMap {
+    let now = now_ms();
+    let map: std::collections::BTreeMap<[u8; 32], crate::sync::Reach> = state
+        .unreachable()
+        .into_iter()
+        .filter(|(_, failed_ms)| now.saturating_sub(*failed_ms) < FAIL_COOLDOWN_MS)
+        .map(|(key, failed_ms)| {
+            (
+                key,
+                crate::sync::Reach {
+                    seen_ms: 0,
+                    failed_ms,
+                },
+            )
+        })
+        .collect();
+    if !map.is_empty() {
+        tracing::debug!(peers = map.len(), "restored recently-unreachable peers");
+    }
+    std::sync::Arc::new(std::sync::Mutex::new(map))
+}
+
+/// How long a failed dial suppresses the next one. Short enough that a peer
+/// coming back online is noticed within a minute — until then its messages
+/// simply take the mailbox, which is what it is for.
+///
+/// Module-level since De6b: the same window decides both whether
+/// `direct_budget` suppresses a dial and which failures are worth persisting,
+/// and two copies of that number could disagree.
+pub(crate) const FAIL_COOLDOWN_MS: u64 = 60 * 1000;
+
 /// How long to spend dialing one recipient directly (D5) — `None` = don't
 /// dial at all. Pure, so the policy is pinned by tests rather than by timing.
 ///
@@ -2649,10 +2728,6 @@ pub(crate) fn direct_budget(
     const CAP_UNKNOWN: Duration = Duration::from_millis(600);
     /// How long evidence of reachability stays worth acting on.
     const EVIDENCE_TTL_MS: u64 = 5 * 60 * 1000;
-    /// How long a failed dial suppresses the next one. Short enough that a
-    /// peer coming back online is noticed within a minute — until then its
-    /// messages simply take the mailbox, which is what it is for.
-    const FAIL_COOLDOWN_MS: u64 = 60 * 1000;
 
     if now.saturating_sub(reach.failed_ms) < FAIL_COOLDOWN_MS {
         return None;
@@ -3718,6 +3793,83 @@ mod tests {
         assert_eq!(a.state.outbox().len(), 1, "the mailbox is still owed");
 
         let _ = std::fs::remove_dir_all(temp_root("offline"));
+    }
+
+    #[tokio::test]
+    async fn unreachable_peer__should_persist_so_the_next_process_skips_the_dial() {
+        // Given: an absent peer with a dialable record. The first send has to
+        // learn it is offline the expensive way — a dial that runs out its
+        // budget. Pre-De6b that lesson died with the process, so the CLI
+        // re-paid it on *every* invocation (measured: 802 / 798 / 794 ms for
+        // three consecutive sends to the same offline peer) and the app on
+        // every start.
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let a = open_homed_with("reachcache", "a", &url_a, Duration::from_millis(300)).await;
+        let absent = DeviceKey::from_seed([57; 32]).public();
+        a.add_contact(
+            &record_with_dead_mailbox(absent, &url_a),
+            Some("ghost".to_string()),
+        )
+        .expect("A adds the absent peer");
+
+        // When: one send tries and fails (mailbox is dead too — "queued")
+        let _ = a
+            .send(
+                &[a.resolve_contact("ghost").expect("resolve")],
+                b"anyone home".to_vec(),
+                vec![],
+            )
+            .await;
+
+        // Then: the failure is on disk…
+        let persisted = a.state.unreachable();
+        assert_eq!(persisted.len(), 1, "one failed peer recorded");
+        assert_eq!(persisted[0].0, absent.0, "…and it is the peer we dialed");
+        // Dropped, not `close()`d: closing after a failed dial waits out
+        // iroh's ~3 s relay-path drain (fast-failure.md F6) and this test
+        // would pay it. The abort line in the log is the accepted price, as
+        // in the CLI harness.
+        drop(a);
+
+        // …and a fresh process inherits it, so it spends no dial budget at all
+        let reopened = open_homed_with("reachcache", "a", &url_a, Duration::from_millis(300)).await;
+        assert_eq!(
+            direct_budget(
+                reopened.reach_of(&absent),
+                now_ms(),
+                ClientConfig::default().connect_timeout
+            ),
+            None,
+            "a known-offline peer must cost a fresh process nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("reachcache"));
+    }
+
+    #[test]
+    fn load_unreachable__should_drop_failures_past_the_cooldown() {
+        // Given: one failure from just now and one from the epoch
+        let key_path = temp_key("reachprune", "a");
+        let state = ClientState::open(&key_path);
+        let fresh = [7u8; 32];
+        let ancient = [8u8; 32];
+        state
+            .save_unreachable(&[(fresh, now_ms()), (ancient, 1)])
+            .expect("save unreachable");
+
+        // When
+        let loaded = load_unreachable(&state);
+        let loaded = loaded.lock().expect("reach lock");
+
+        // Then: the cooled-down one is gone — persisted negative evidence
+        // must never be the reason a *reachable* peer goes undialed
+        assert!(loaded.contains_key(&fresh));
+        assert!(!loaded.contains_key(&ancient));
+        // …and nothing restores positive evidence: last run's reachable peer
+        // gets one cheap probe, not the full known-peer budget.
+        assert_eq!(loaded[&fresh].seen_ms, 0);
+
+        let _ = std::fs::remove_dir_all(temp_root("reachprune"));
     }
 
     #[tokio::test]

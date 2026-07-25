@@ -714,6 +714,39 @@ impl ClientState {
             .collect()
     }
 
+    /// Peers whose last direct dial got nowhere, and when (De6b):
+    /// `<hex key> <wall-clock ms>` per line, replacing the file wholesale.
+    ///
+    /// Dumb storage on purpose — *which* entries are worth keeping is the
+    /// caller's policy (the dial cooldown lives in `client`), so this writes
+    /// exactly what it is given and reads back exactly what is there.
+    /// Wall-clock, like every other persisted timestamp (the B5 lesson:
+    /// `Instant` doesn't serialize).
+    pub fn save_unreachable(&self, entries: &[([u8; 32], u64)]) -> Result<(), Error> {
+        let path = self.root.join("unreachable.keys");
+        create_parent(&path)?;
+        let content: String = entries
+            .iter()
+            .map(|(key, at_ms)| format!("{} {at_ms}\n", hex(key)))
+            .collect();
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write unreachable keys: {e}")))
+    }
+
+    /// Reads back `save_unreachable`. Unparseable lines are skipped rather
+    /// than fatal: this is a cache of negative evidence, and the worst a lost
+    /// entry costs is one extra dial.
+    pub fn unreachable(&self) -> Vec<([u8; 32], u64)> {
+        std::fs::read_to_string(self.root.join("unreachable.keys"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (key, at_ms) = line.trim().split_once(' ')?;
+                Some((crate::hex::parse32(key).ok()?, at_ms.parse().ok()?))
+            })
+            .collect()
+    }
+
     fn contact_stem(&self, key: &PublicKey) -> PathBuf {
         self.root.join("contacts").join(hex(&key.0))
     }

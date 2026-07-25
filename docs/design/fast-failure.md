@@ -97,7 +97,7 @@ has no fast answer for.
 
 ## 5. Findings, ranked
 
-### F1 · Negative evidence does not survive a process (dominant suite cost)
+### F1 · Negative evidence does not survive a process ✅ fixed (De6b)
 
 `direct_budget`'s cooldown — "a peer whose dial just failed gets no dial at all
 for 60 s" — lives in an in-memory `sync::ReachMap`. Every CLI invocation is a
@@ -126,6 +126,13 @@ evidence and wrong about *negative*: a timestamped failure is falsifiable on its
 face — if it is older than the cooldown it is simply ignored. Persisting
 `{key → last_failure_ms}` cannot produce a stale opinion, only skip a dial that
 was already known to be a coin-flip.
+
+**Fixed in De6b** (2026-07-25): `unreachable.keys` in the client state dir,
+loaded into the reach map at open with cooled-down entries dropped, rewritten
+once per fan-out from the live map (which prunes and clears as a side effect).
+Consecutive CLI sends to an offline peer went 3 674 → **68 / 86 / 83 ms**;
+`groups` 9.96 → **7.97 s**. Details and the accepted trade in
+[direct-delivery.md §5](./direct-delivery.md).
 
 ### F2 · `recv` aborts the whole drain on the first unreachable relay ✅ fixed (De6a)
 
@@ -208,13 +215,23 @@ place.
 
 ## 6. Options, and what they imply
 
-**A · Persist negative reach evidence** (F1). `{key → last_failure_ms}` in the
-client state dir, read at `Client::open`, honoured by `direct_budget`; ignore
-entries older than the cooldown. No protocol change, no new dependency, pure
-policy — `direct_budget` is already pure and unit-tested, so this is one more
-input to it. Biggest win per unit of risk. Same trick applies per *relay*
-(cheap version of the deposit cost), but that one interacts with C4a's
-reliability stance and should be argued separately.
+**A · Persist negative reach evidence** (F1). ✅ **Done in De6b.**
+`{key → last_failure_ms}` in the client state dir, read at `Client::open`,
+honoured by `direct_budget`; entries older than the cooldown ignored. No
+protocol change, no new dependency, pure policy — `direct_budget` stayed
+untouched, since seeding its input was enough. Biggest win per unit of risk, as
+predicted. Two threads left hanging deliberately:
+
+- The same trick applies per *relay* (the cheap version of the deposit cost),
+  but that one interacts with C4a's reliability stance and should be argued
+  separately.
+- `direct_budget` checks the cooldown **before** positive evidence, so a peer
+  that connects to us inside the window still doesn't re-license a dial.
+  Persistence makes that slightly more visible (a restart no longer clears the
+  slate). The fix is one line — `reach.failed_ms > reach.seen_ms &&` — but the
+  D5 unit test deliberately pins the current precedence (`just_failed` carries
+  a *newer* `seen_ms` and asserts `None`), so changing it revises a resolved
+  policy rather than implementing this one. Worth a decision, not a drive-by.
 
 **B · Ask instead of guessing** (the true reactive fix). The relay already keeps
 a live-connection map per registered mailbox — C4b built it to route nudges. An
@@ -255,14 +272,20 @@ the first ~6 s.
 
 ## 7. Estimated effect on `groups` (9.84 s)
 
-| Step | Estimate |
-|---|---|
-| Today | 9.8 s |
-| + A (persisted cooldown; ~6 sends × ~500 ms) | ~7 s |
-| + D (readiness signal replaces the poll loops) | ~6 s |
-| + C (parallel relay work) | ~5.5 s |
-| Floor with the current harness (~30 × 50 ms open + close, ~8 recv × 90 ms) | ~3.5 s |
-| + F (De4 in-process) | <1 s |
+| Step | Estimate | Actual |
+|---|---|---|
+| Today | 9.8 s | 9.96 s |
+| + A (persisted cooldown; ~6 sends × ~500 ms) | ~7 s | **7.97 s** (De6b) |
+| + D (readiness signal replaces the poll loops) | ~6 s | — |
+| + C (parallel relay work) | ~5.5 s | — |
+| Floor with the current harness (~30 × 50 ms open + close, ~8 recv × 90 ms) | ~3.5 s | — |
+| + F (De4 in-process) | <1 s | — |
+
+The **suite total is roughly unchanged at ~28 s**, and honestly so: De6b's ~2 s
+off `groups` was offset by De6a's new regression test taking `fanout` 0.49 →
+2.09 s. That test spends most of its time waiting out dead-relay deadlines —
+including two of them *serially* in its both-relays-down phase — so it is a
+customer of De6d rather than a counter-example to it.
 
 Rough, but the ordering is the point: the product fixes are worth more than the
 harness rewrite, and they are worth something to users as well as to CI.

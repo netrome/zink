@@ -761,7 +761,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     tests. Left standing, per F2: `register_at_home_relays` has the same
     abort shape but fails loudly, so a record is never published claiming a
     mailbox that isn't there — different semantics, its own call.)*
-  - [ ] **De6b · Persist negative reach evidence.** `direct_budget`'s 60 s
+  - [x] **De6b · Persist negative reach evidence.** `direct_budget`'s 60 s
     post-failure cooldown lives in an in-memory `sync::ReachMap`, so it never
     survives a process: three consecutive sends to the same offline peer
     measured 802 / 798 / 794 ms — the dial deadline paid in full every time.
@@ -774,6 +774,35 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     into a wrong opinion, only skip a dial already known to be a coin-flip.
     (The positive-evidence TTL stays in memory, as designed.) *Done when:* the
     2nd+ send to an offline peer skips the dial, measured before/after.
+    ✅ *(2026-07-25: `unreachable.keys` in the client state dir (`<hex key>
+    <wall-clock ms>` per line — wall-clock per the B5 lesson), read at open
+    into the reach map with cooled-down entries dropped, so a stale failure
+    can never be why a reachable peer goes undialed. **`direct_budget` itself
+    is unchanged** — seeding its input was the whole fix, and the pure policy
+    stays pinned by its existing tests; `FAIL_COOLDOWN_MS` moved to module
+    scope so the suppression window and the persistence window can't
+    disagree. Written **once per fan-out** from the live map rather than
+    per-failure: that prunes cooled-down entries and success-cleared ones
+    (`failed_ms = 0`) as a side effect, and it's skipped entirely when
+    nothing was dialed — a send to a peer already in cooldown must cost
+    nothing, including the write that says so. Storage stays dumb (verbatim
+    read/write); which entries are worth keeping is client policy.
+    **Measured, production defaults:** consecutive sends to an offline
+    recipient **3 674 → 68 / 86 / 83 ms**; harness env 793 → ~87 ms;
+    `groups` 9.96 → **7.97 s**. Suite total ~unchanged (~28 s) — De6a's new
+    test took `fanout` 0.49 → 2.09 s, offsetting it; that test is a De6d
+    customer (it waits out two dead-relay deadlines serially). Tests:
+    persistence round-trip through a real failed dial + reopen (asserting
+    the fresh process spends **no** budget), and cooldown pruning at load
+    incl. "positive evidence is never restored". 203 tests. **Known trade,
+    documented in direct-delivery.md §5:** a peer that comes back during the
+    cooldown now stays on the mailbox path across a restart too — delivery
+    unaffected, directness delayed under a minute, cleared by any inbound
+    traffic or successful send. **Left as a proposal, not a side effect:**
+    `direct_budget` still checks the cooldown *before* positive evidence, so
+    a peer that connects to us inside the window doesn't yet re-license a
+    dial; the one-line fix would revise a D5 policy its unit test
+    deliberately pins (fast-failure.md §6A).)*
   - [ ] **De6c · Explicit reachability signal.** `listen` prints "listening on
     N relay(s)…" at 78 ms but is not dialable by key until ~991 ms — the
     endpoint must home first, and nothing marks the transition, so four e2e
