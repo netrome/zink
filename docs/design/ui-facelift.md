@@ -286,20 +286,25 @@ the change is visible on device where relevant · this doc updated.
   "use their photo instead" in the person detail.)*
   *(Local grouping — the "football-team" case — was descoped 2026-07-24: not
   thought through, and it needs a new local same-person store; see the §4 note.)*
-- [ ] **U7 · First-run onboarding.** The §6 sequence (name/avatar → relay →
+- [x] **U7 · First-run onboarding.** The §6 sequence (name/avatar → relay →
   your code), replacing the "dumped into the mega-screen" first run. Reuses U5
   widgets. *Done when:* a fresh install walks a new user to a shareable code
   without ever showing a raw dial string cold.
-  *(2026-07-24: **code complete, awaiting the fresh-install check** — commit
-  `3ac8afb`, `app/ui/src/lib.rs`: an `OnboardingView` takeover shown while no
-  profile exists (no tab bar), stepping Identity → Relay → Code with back
-  navigation, then landing on Chats. The tick waits on one run from a wiped
-  data dir — that's the only thing the criterion actually asserts.)*
+  *(2026-07-24: **code complete** — commit `3ac8afb`, `app/ui/src/lib.rs`: an
+  `OnboardingView` takeover shown while no profile exists (no tab bar),
+  stepping Identity → Relay → Code with back navigation, then landing on
+  Chats.)*
+  ✅ *(2026-07-26: **fresh-install run done** by Mårten — a wiped data dir
+  walked to a shareable code, which is the only thing the criterion asserts.)*
 - [x] **U8 · Language + metadata legibility.** Apply the §7 vocabulary across
   the UI; make message metadata scannable (states as small pills/icons with
   meaning, not a symbol run-on); hide `crossed`/`merged` behind an optional
   "show concurrency" toggle. *Done when:* no protocol jargon is user-facing by
   default and the message row reads at a glance.
+
+**🎉 Facelift complete** (2026-07-26) — U1–U8 all landed, U7's fresh-install run
+being the last of them. Nothing in this tracker is outstanding; the follow-ups
+below are deliberately out of scope, not leftovers.
 
 Follow-ups / parked: **vouched avatars (friend-lens photos)** — the per-attester
 avatar lens is deferred in web-of-trust.md §6; when third-party avatar claims

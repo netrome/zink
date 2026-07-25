@@ -28,6 +28,38 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
 
 ---
 
+## What's left
+
+*The live view — every slice below is done, and those entries are kept as the
+decision and field-lesson record, not as work. Update this block when something
+lands, so nobody has to scroll 1,600 lines to find the open things. The parallel
+[ui-facelift.md](./ui-facelift.md) pass (U1–U8) closed 2026-07-26.*
+
+**To call the MVP done — one measurement.** No code is outstanding:
+
+| Item | State | Where |
+|---|---|---|
+| **C4c · battery numbers** | Qualitative half field-verified (a backgrounded phone notifies). The overnight screen-off/unplugged **drain measurement** is untaken — C4's original criterion asked for single-digit drain. | Stage C · C4c |
+
+**Before any build leaves our hands** — neither is started; no external users yet,
+so these are deliberately deferred rather than forgotten:
+
+| Item | Why it blocks a release |
+|---|---|
+| **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change. |
+| **Per-type format versions** | One global `FORMAT_VERSION` forks the whole protocol on any single bump — fine while every install is ours, untenable once two builds coexist. |
+
+**Known, deliberately unscheduled:** De4 (e2e harness latency — re-measure before
+trusting the original estimate) · De6e (relay presence — declined as an op; a
+narrower deposit-response variant is on the table) · client-issued delivery acks
+(a protocol addition, three named problems) · and the De8 sweep's tech-debt list
+(the `Client` god object, the per-render re-decrypt, and the three-way label
+duplication — which already causes a real bug: a send-to-self arrival notifies as
+raw hex instead of the device's name).
+
+
+---
+
 ## Stage A — Foundation & walking skeleton (native)
 
 - [x] **A1 · Workspace scaffold.** Cargo workspace with `zink-protocol`, `zink-relay`,
@@ -1552,13 +1584,14 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
-What remains before the MVP is called done: the two **parked** items below,
-**U7**'s live check ([ui-facelift.md](./ui-facelift.md)), and C4c's unmeasured
-overnight/battery numbers. **De7 landed** 2026-07-25 (the D5 ack, surfaced —
-208 tests). **De6a–d landed** 2026-07-25 (fast failure —
-[fast-failure.md](./fast-failure.md), suite 28.5 → 24.7 s); **De6e** is
-declined as an op with a narrower variant unscheduled, and **De4**'s harness
-cleanup wants re-measuring now rather than assuming its original estimate.
+Landed since: **De6a–d** (fast failure — [fast-failure.md](./fast-failure.md),
+suite 28.5 → 24.7 s), **De7** (the D5 ack, surfaced — 208 tests) and **De8** (the
+SPEC §8 relay-shape correction), all 2026-07-25; the parallel
+[ui-facelift.md](./ui-facelift.md) pass closed 2026-07-26. **De6e** is declined
+as an op with a narrower variant unscheduled, and **De4**'s harness cleanup wants
+re-measuring rather than assuming its original estimate.
+*(Live status: **What's left** at the top of this doc — kept in one place so the
+two don't drift.)*
 
 ---
 
