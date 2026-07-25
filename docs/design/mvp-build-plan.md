@@ -709,6 +709,74 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   in-process in zink-relay's own tests) — so whole flows run as library calls;
   the CLI keeps one or two thin smoke tests for arg-parsing/output. *(Noted
   2026-07-19 at D2b review.)*
+  *(Reframed 2026-07-25 after measuring — see
+  [fast-failure.md](./fast-failure.md). The harness diagnosis holds but is
+  **not the dominant cost**: the suite's time is mostly the product's own
+  unreachable-peer deadlines, which the tests hit constantly because their
+  peers are deliberately offline. Current numbers: groups **9.84 s**,
+  multi_device 5.73 s, who_is 3.58 s, ~28 s total of which ~26 s is
+  `zink-cli`; the pure core is 0.05 s and the in-process client suite 1.47 s.
+  Estimated split: De6a–d take groups to ~5.5 s and the harness floor is
+  ~3.5 s, so De4 buys the last ~3 s. **Do De6 first, then re-measure and
+  decide whether this still earns its keep.**)*
+- [ ] **De6 · Fast failure.** 🎯 The systems-level finding behind De4:
+  **failure is only ever learned by deadline expiry — nothing signals it.**
+  Every reachable path measures ~100 ms (send to an online recipient 134 ms,
+  `recv` 86 ms, who-is 111 ms); every unreachable one costs its full deadline
+  (send to an offline recipient 3.7 s, who-is on an offline subject 8 s,
+  `send`/`recv` with the relay down ~10 s each), and serial per-relay loops
+  make those additive. Diagnosis, measurements and options:
+  [fast-failure.md](./fast-failure.md). Non-goal: shortening the production
+  `connect_timeout` — direct-delivery.md §5.1 argued that trade and parked it;
+  these slices avoid *making* doomed dials rather than giving up on honest
+  ones sooner.
+  - [ ] **De6a · `recv` partial failure.** `recv` does
+    `net::connect(…).await?` inside its per-relay loop, so **one unreachable
+    home relay aborts the whole drain** — a healthy second relay's mail stays
+    invisible until the unrelated one returns, after 10 s of waiting for it.
+    C4a fixed exactly this shape for `send` (`SendReceipt.pending_relays`);
+    `recv` never got it, and multi-relay is a tenet. Reliability, not latency
+    — independent of the rest. *Done when:* a drain across two relays with the
+    first down returns the second's messages and reports the failure.
+  - [ ] **De6b · Persist negative reach evidence.** `direct_budget`'s 60 s
+    post-failure cooldown lives in an in-memory `sync::ReachMap`, so it never
+    survives a process: three consecutive sends to the same offline peer
+    measured 802 / 798 / 794 ms — the dial deadline paid in full every time.
+    direct-delivery.md §5 predicted this ("persisting the failure cooldown
+    would remove it, if it ever annoys") and scoped it as a dev-tool cost; it
+    is also the app's cost on **every start**, and the suite's single largest
+    line item (~6 sends × ~500 ms in `groups`). Persist
+    `{key → last_failure_ms}`, honour it in the already-pure `direct_budget`,
+    ignore entries past the cooldown — a timestamped failure cannot go stale
+    into a wrong opinion, only skip a dial already known to be a coin-flip.
+    (The positive-evidence TTL stays in memory, as designed.) *Done when:* the
+    2nd+ send to an offline peer skips the dial, measured before/after.
+  - [ ] **De6c · Explicit reachability signal.** `listen` prints "listening on
+    N relay(s)…" at 78 ms but is not dialable by key until ~991 ms — the
+    endpoint must home first, and nothing marks the transition, so four e2e
+    tests poll `sleep(250 ms)` against a 15 s deadline with a *fresh CLI
+    process* (~700 ms) per probe. The product has the matching hole: for ~1 s
+    after start, who-is / backfill / direct delivery silently fail against
+    this device. Await `Endpoint::online()` (De2's timing test already uses
+    it), print a `reachable by key` line, move the poll loops onto reading it.
+    *Done when:* no e2e sleeps on readiness, and the line appears when the
+    endpoint is genuinely dialable.
+  - [ ] **De6d · Parallel per-relay work.** `deliver`, `flush_outbox` and
+    `register_at_home_relays` iterate relays serially, so *n* unreachable
+    relays cost *n* × deadline; `deliver_direct` (D5) and `who_is` (De3) are
+    already concurrent, both fixed reactively after being felt in the field.
+    Same `n0_future::join_all` shape, no runtime in the lib. *Done when:* a
+    delivery to two down relays costs one deadline, not two.
+  - [ ] **De6e · 🎯 Relay presence query.** The genuinely *reactive* fix, and
+    the only one that touches the wire: the relay already keeps a
+    live-connection map per registered mailbox (C4b, for nudges), so an
+    additive mailbox op answers "is this key connected here?" in one ~5 ms
+    round-trip where a speculative dial takes 600 ms to fail. **Design
+    decision first** (fast-failure.md §6B): it asks a relay to report on a
+    third party's presence — the relay already knows and the asker can already
+    deposit there, but building a presence API on top of that is a metadata
+    call to make deliberately, not a refactor. Only if De6a–d leave a felt
+    gap; possibly never, which is a fine outcome.
 - [x] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
   on the contacts' side IS the membership-presentation pipeline, so it ships
@@ -1242,9 +1310,11 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
-What remains before the MVP is called done: the two **parked** items below, the
-**De4** harness cleanup, **U7**'s live check ([ui-facelift.md](./ui-facelift.md)),
-and C4c's unmeasured overnight/battery numbers.
+What remains before the MVP is called done: the two **parked** items below,
+**De6**'s fast-failure slices (with **De4**'s harness cleanup re-measured after
+them — [fast-failure.md](./fast-failure.md)), **U7**'s live check
+([ui-facelift.md](./ui-facelift.md)), and C4c's unmeasured overnight/battery
+numbers.
 
 ---
 
@@ -1289,7 +1359,9 @@ Not scheduled into a stage; must land before any build leaves our hands.
   ([who-is-this.md](./who-is-this.md)), D2 groups 📝 ([groups.md](./groups.md)),
   D3 multi-device 📝 ([multi-device.md](./multi-device.md)), D4 web-of-trust 📝
   ([web-of-trust.md](./web-of-trust.md)), D5 direct delivery 📝
-  ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0). The app
+  ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0), De6
+  fast failure 📝 ([fast-failure.md](./fast-failure.md) — a *diagnosis* doc:
+  measurements first, options ranked, one 🎯 wire decision left open). The app
   shell (C3) needed no design doc — it assembled resolved decisions; its
   as-built map lives in `app/README.md`.
 - **Async ports, sync core.** Ports are async traits from A4 onward; the pure
