@@ -49,6 +49,16 @@ client.recv(&[relay]) -> RecvReport           // register → page-fetch → ded
                                               // (first failure verbatim). Pre-De6a a
                                               // `?` let the first dead relay abort
                                               // the pass and hide healthy mail.
+                                              // CONCURRENT per relay (De6d), so n
+                                              // dead relays cost one deadline, not
+                                              // n; the shared dedup set's insert is
+                                              // the exactly-once point, and
+                                              // join_all keeps the batch in relay
+                                              // order. Same for deliver /
+                                              // flush_outbox (chunked at 8, blob
+                                              // bytes are held per in-flight entry)
+                                              // / register_at_home_relays (still
+                                              // all-or-error).
 client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else the relay it
                                               // arrived through; verify + decrypt
 // profile + contacts (C2): set_profile, my_record, add_contact, contacts,

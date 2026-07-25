@@ -22,6 +22,13 @@ use crate::{blobs, hex, keystore, net};
 /// cursors have moved on and the message is socially dead.
 const OUTBOX_GIVE_UP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
+/// How many owed deliveries a flush has in flight at once (De6d). Concurrency
+/// is what stops n dead relays costing n deadlines; the *bound* is because
+/// each in-flight entry holds its message's blob bytes twice (loaded from the
+/// cache, then staged), and a long backlog of images fanned out without limit
+/// would spike memory where the serial version never did.
+const FLUSH_CONCURRENCY: usize = 8;
+
 /// Tuning the edges inject at construction; `Default` fits production.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -572,29 +579,47 @@ impl Client {
         };
 
         let staging = blobs::stage(blobs).await?;
-        let mut pending_relays = 0;
+        // Concurrent per relay (De6d): relays are independent, and serially
+        // an unreachable one made every *other* relay wait out its deadline
+        // first — n down relays cost n × `connect_timeout` instead of one.
+        // Same shape as `deliver_direct`'s dials and De3's who-is fan-out.
         let mut skipped_relays = 0;
-        let mut last_error = String::new();
-        for relay in relays {
+        let deliveries = relays.iter().filter(|relay| {
             if discharged(relay) {
                 // The philosophy win (§1): for this message the relay learns
                 // nothing at all — not that it exists, not who it was for.
                 tracing::info!(relay, "delivered directly; skipping the deposit");
                 self.state.clear_outbox(id, relay);
                 skipped_relays += 1;
-                continue;
+                return false;
             }
-            match self
-                .deliver_to_relay(relay, envelope, blobs, &staging)
-                .await
-            {
-                Ok(()) => self.state.clear_outbox(id, relay),
+            true
+        });
+        // Collected before awaiting: `discharged` borrows `direct`, and the
+        // filter's side effects (skip logging, outbox clearing) belong to
+        // this synchronous pass, not to the concurrent one.
+        let deliveries: Vec<&String> = deliveries.collect();
+        // One staging store shared by reference across the concurrent pushes
+        // — each reads its own blobs out of it, nothing mutates it here.
+        let staging = &staging;
+        let outcomes = n0_future::join_all(deliveries.into_iter().map(|relay| async move {
+            match self.deliver_to_relay(relay, envelope, blobs, staging).await {
+                Ok(()) => {
+                    self.state.clear_outbox(id, relay);
+                    None
+                }
                 Err(error) => {
                     tracing::warn!(relay, %error, "delivery failed; queued for retry");
-                    pending_relays += 1;
-                    last_error = error.to_string();
+                    Some(error.to_string())
                 }
             }
+        }))
+        .await;
+        let mut pending_relays = 0;
+        let mut last_error = String::new();
+        for error in outcomes.into_iter().flatten() {
+            pending_relays += 1;
+            last_error = error;
         }
         // "Nothing took it" now includes the direct path: a send whose every
         // relay failed is still delivered if the peers themselves accepted it
@@ -800,52 +825,105 @@ impl Client {
     pub async fn flush_outbox(&self) -> Result<FlushReport, Error> {
         let mut report = FlushReport::default();
         let now = now_ms();
-        for entry in self.state.outbox() {
-            if now.saturating_sub(entry.created_ms) > OUTBOX_GIVE_UP_MS {
-                report.expired += 1;
-                continue;
-            }
-            let envelope = match self.state.load_envelope(entry.conversation, entry.message) {
-                Ok(envelope) => envelope,
-                Err(error) => {
+        // Cheap triage first: an aged-out entry never touches the network.
+        let owed: Vec<crate::state::OutboxEntry> = self
+            .state
+            .outbox()
+            .into_iter()
+            .filter(|entry| {
+                let expired = now.saturating_sub(entry.created_ms) > OUTBOX_GIVE_UP_MS;
+                report.expired += usize::from(expired);
+                !expired
+            })
+            .collect();
+        // Concurrent per entry (De6d) — serially, one unreachable relay made
+        // every later entry wait out its deadline first, so a backlog across
+        // n dead relays cost n × `connect_timeout`.
+        //
+        // **Chunked**, though: an entry in flight holds its message's blob
+        // bytes twice (loaded from the cache, then staged), so an unbounded
+        // fan-out over a long backlog of images would be a memory spike where
+        // the serial version had none. This bounds that at a few entries
+        // while still turning n deadlines into ceil(n / N).
+        for chunk in owed.chunks(FLUSH_CONCURRENCY) {
+            let mut ready = Vec::with_capacity(chunk.len());
+            for entry in chunk {
+                match self.restage_owed(entry).await? {
+                    Some(staged) => ready.push((entry, staged)),
                     // No stored envelope — nothing a retry could ever send.
-                    tracing::warn!(%error, "dropping unfulfillable outbox entry");
-                    self.state.clear_outbox(entry.message, &entry.relay);
-                    continue;
+                    None => continue,
                 }
-            };
-            // Re-stage owed blobs from the local cache (put there at send).
-            let encrypted: Vec<zink_protocol::EncryptedBlob> = envelope
-                .core
-                .blob_refs
-                .iter()
-                .filter_map(|blob_ref| {
-                    let bytes = self.state.load_blob(&blob_ref.hash);
-                    if bytes.is_none() {
-                        tracing::warn!(blob = %hex::encode(&blob_ref.hash.0), "blob missing from cache; delivering without it");
+            }
+            let outcomes = n0_future::join_all(ready.iter().map(
+                |(entry, (envelope, encrypted, staging))| async move {
+                    match self
+                        .deliver_to_relay(&entry.relay, envelope, encrypted, staging)
+                        .await
+                    {
+                        Ok(()) => {
+                            self.state.clear_outbox(entry.message, &entry.relay);
+                            true
+                        }
+                        Err(error) => {
+                            tracing::warn!(relay = %entry.relay, %error, "outbox retry failed");
+                            false
+                        }
                     }
-                    Some(zink_protocol::EncryptedBlob {
-                        hash: blob_ref.hash,
-                        bytes: bytes?,
-                    })
-                })
-                .collect();
-            let staging = blobs::stage(&encrypted).await?;
-            match self
-                .deliver_to_relay(&entry.relay, &envelope, &encrypted, &staging)
-                .await
-            {
-                Ok(()) => {
-                    self.state.clear_outbox(entry.message, &entry.relay);
+                },
+            ))
+            .await;
+            for delivered in outcomes {
+                if delivered {
                     report.delivered += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(relay = %entry.relay, %error, "outbox retry failed");
+                } else {
                     report.pending += 1;
                 }
             }
         }
         Ok(report)
+    }
+
+    /// Reload what one owed delivery needs: the stored envelope and its blobs
+    /// re-staged from the local cache (put there at send). `None` = the
+    /// envelope is gone, so no retry could ever fulfil this entry and it is
+    /// dropped from the ledger.
+    #[allow(clippy::type_complexity)]
+    async fn restage_owed(
+        &self,
+        entry: &crate::state::OutboxEntry,
+    ) -> Result<
+        Option<(
+            MessageEnvelope,
+            Vec<zink_protocol::EncryptedBlob>,
+            iroh_blobs::store::mem::MemStore,
+        )>,
+        Error,
+    > {
+        let envelope = match self.state.load_envelope(entry.conversation, entry.message) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::warn!(%error, "dropping unfulfillable outbox entry");
+                self.state.clear_outbox(entry.message, &entry.relay);
+                return Ok(None);
+            }
+        };
+        let encrypted: Vec<zink_protocol::EncryptedBlob> = envelope
+            .core
+            .blob_refs
+            .iter()
+            .filter_map(|blob_ref| {
+                let bytes = self.state.load_blob(&blob_ref.hash);
+                if bytes.is_none() {
+                    tracing::warn!(blob = %hex::encode(&blob_ref.hash.0), "blob missing from cache; delivering without it");
+                }
+                Some(zink_protocol::EncryptedBlob {
+                    hash: blob_ref.hash,
+                    bytes: bytes?,
+                })
+            })
+            .collect();
+        let staging = blobs::stage(&encrypted).await?;
+        Ok(Some((envelope, encrypted, staging)))
     }
 
     /// Drain every relay: register, then fetch page-by-page, dedup by
@@ -866,11 +944,24 @@ impl Client {
     /// down there is no partial result to protect, and edges keep rendering
     /// the precise message they always did.
     pub async fn recv(&self, relays: &[String]) -> Result<RecvReport, Error> {
-        let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
+        // Concurrent per relay (De6d): De6a stopped one dead relay losing
+        // another's mail, but left the *deadlines* additive — two relays with
+        // the first down cost two `connect_timeout`s to drain one mailbox.
+        //
+        // The cross-relay dedup set is shared behind a mutex, and its
+        // `insert` IS the dedup point: for one id exactly one drain wins and
+        // stores it, so a message deposited to several relays still surfaces
+        // once. No await is held across the lock. `join_all` preserves input
+        // order, so the batch still reads relay by relay.
+        let seen: std::sync::Mutex<BTreeSet<[u8; 32]>> = std::sync::Mutex::default();
+        let seen = &seen;
+        let drains = relays
+            .iter()
+            .map(|relay| async move { (relay, self.drain_relay(relay, seen).await) });
         let mut received = Vec::new();
         let mut failed: Vec<RelayFailure> = Vec::new();
-        for relay in relays {
-            match self.drain_relay(relay, &mut seen).await {
+        for (relay, outcome) in n0_future::join_all(drains).await {
+            match outcome {
                 Ok(batch) => received.extend(batch),
                 Err(error) => {
                     tracing::warn!(relay, %error, "drain failed; other relays continue");
@@ -910,7 +1001,7 @@ impl Client {
     async fn drain_relay(
         &self,
         relay: &str,
-        seen: &mut BTreeSet<[u8; 32]>,
+        seen: &std::sync::Mutex<BTreeSet<[u8; 32]>>,
     ) -> Result<Vec<Received>, Error> {
         let connection = net::connect(
             &self.endpoint,
@@ -974,7 +1065,7 @@ impl Client {
         // dead entry), the same coupling removed from the send path. Flush
         // after (the reconnect still means "network is back", §2).
         let received = self
-            .drain_connection(relay, &connection, &mut BTreeSet::new())
+            .drain_connection(relay, &connection, &std::sync::Mutex::default())
             .await?;
         // Reset backoff only now — a full register+drain proves the relay is
         // actually usable, not merely willing to accept `Register`. A relay
@@ -1001,7 +1092,7 @@ impl Client {
                 .map_err(|e| Error::Transport(format!("connection lost: {e}")))?;
             let started = std::time::Instant::now();
             let received = self
-                .drain_connection(relay, &connection, &mut BTreeSet::new())
+                .drain_connection(relay, &connection, &std::sync::Mutex::default())
                 .await?;
             tracing::info!(
                 relay,
@@ -1028,7 +1119,7 @@ impl Client {
         &self,
         relay: &str,
         connection: &iroh::endpoint::Connection,
-        seen: &mut BTreeSet<[u8; 32]>,
+        seen: &std::sync::Mutex<BTreeSet<[u8; 32]>>,
     ) -> Result<Vec<Received>, Error> {
         let mut received = Vec::new();
         let mut after = 0u64;
@@ -1070,7 +1161,16 @@ impl Client {
                     tracing::warn!("skipping message with unsupported version");
                     continue;
                 }
-                if !seen.insert(item.envelope.id().0) {
+                // The dedup point across concurrent relay drains (De6d): the
+                // lock is held for the insert alone. A poisoned lock recovers
+                // rather than failing the drain — the set guards no invariant,
+                // and the worst a lost entry costs is one duplicate, which
+                // storage collapses anyway (content-addressed).
+                let first_time = seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(item.envelope.id().0);
+                if !first_time {
                     continue; // already drained via another relay
                 }
                 let body = item.envelope.open(&self.device);
@@ -1379,16 +1479,31 @@ impl Client {
     /// a record: anyone who scans it must be able to deposit immediately —
     /// a record that names a relay where you have no mailbox is a lie.
     pub async fn register_at_home_relays(&self) -> Result<(), Error> {
-        for relay in self.state.home_relays() {
-            let connection = net::connect(
-                &self.endpoint,
-                &relay,
-                zink_protocol::MAILBOX_ALPN,
-                self.config.connect_timeout,
-            )
-            .await?;
-            net::request(&connection, MailboxOp::Register).await?;
-        }
+        // Concurrent (De6d), but still **all-or-error**: publishing a record
+        // that names a relay where we have no mailbox is a lie, so any
+        // failure is reported. What changed is the price of learning that —
+        // one deadline for n relays instead of n, and every reachable relay
+        // gets its mailbox even when a sibling is down (serially, a dead
+        // *first* relay meant the later ones were never even tried).
+        let registrations = self
+            .state
+            .home_relays()
+            .into_iter()
+            .map(|relay| async move {
+                let connection = net::connect(
+                    &self.endpoint,
+                    &relay,
+                    zink_protocol::MAILBOX_ALPN,
+                    self.config.connect_timeout,
+                )
+                .await?;
+                net::request(&connection, MailboxOp::Register).await?;
+                Ok(())
+            });
+        n0_future::join_all(registrations)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<()>, Error>>()?;
         Ok(())
     }
 
@@ -3895,6 +4010,78 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("reachcache"));
+    }
+
+    #[tokio::test]
+    async fn delivery__should_pay_one_deadline_for_two_dead_relays() {
+        // Given: a contact whose record names TWO mailboxes on TEST-NET
+        // (packets vanish, so each deposit runs out the full deadline) and no
+        // relay url, so nothing is dialed directly and the only network cost
+        // in this test is the two deposits.
+        //
+        // The dial strings carry **real endpoint ids**: the `unused@…` form
+        // the other tests use fails at *parse*, instantly, which would make a
+        // timing assertion here pass without dialing anything.
+        const DEADLINE: Duration = Duration::from_millis(500);
+        let dead_mailbox = |host: u8, seed: u8| RelayEntry {
+            mailbox: format!(
+                "{}@203.0.113.{host}:1",
+                hex::encode(&DeviceKey::from_seed([seed; 32]).public().0)
+            ),
+            relay_url: None,
+        };
+        let key_path = temp_key("twodead", "a");
+        keystore::create(&key_path).expect("key");
+        let a = Client::open_with(
+            &key_path,
+            ClientConfig {
+                connect_timeout: DEADLINE,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("open A");
+        a.add_contact(
+            &ContactRecord::new(
+                vec![DeviceKey::from_seed([73; 32]).public()],
+                vec![],
+                vec![dead_mailbox(7, 74), dead_mailbox(8, 75)],
+            ),
+            Some("ghost".to_string()),
+        )
+        .expect("add the contact");
+        let contact = a.resolve_contact("ghost").expect("resolve");
+
+        // When: one send fans out to both
+        let started = std::time::Instant::now();
+        let result = a.send(&[contact], b"into the void".to_vec(), vec![]).await;
+        let fan_out = started.elapsed();
+
+        // Then: queued for both, and it cost ONE deadline, not two — serially
+        // this was 2 × DEADLINE (De6d)
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        assert_eq!(a.state.outbox().len(), 2, "both relays still owed");
+        assert!(
+            // Halfway between the two outcomes: parallel lands just over one
+            // DEADLINE, serial at two, so neither side is a coin flip.
+            fan_out < DEADLINE + DEADLINE / 2,
+            "fan-out took {fan_out:?} — one deadline is {DEADLINE:?}, serial would be ≥ {:?}",
+            2 * DEADLINE
+        );
+
+        // And: the outbox flush pays the same way, over the same two entries
+        let started = std::time::Instant::now();
+        let report = a.flush_outbox().await.expect("flush");
+        let flush = started.elapsed();
+        assert_eq!(report.pending, 2, "still nowhere to deliver");
+        assert!(
+            flush < DEADLINE + DEADLINE / 2,
+            "flush took {flush:?} — one deadline is {DEADLINE:?}, serial would be ≥ {:?}",
+            2 * DEADLINE
+        );
+
+        drop(a); // `close()` would wait out iroh's drain (fast-failure.md F6)
+        let _ = std::fs::remove_dir_all(temp_root("twodead"));
     }
 
     #[test]

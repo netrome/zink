@@ -846,12 +846,44 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     API exists, but a UI indicator for a client's own first second is its
     own slice; worth doing when the profile/pairing screens next get
     attention, since it's the same window De5 chased.)*
-  - [ ] **De6d · Parallel per-relay work.** `deliver`, `flush_outbox` and
+  - [x] **De6d · Parallel per-relay work.** `deliver`, `flush_outbox` and
     `register_at_home_relays` iterate relays serially, so *n* unreachable
     relays cost *n* × deadline; `deliver_direct` (D5) and `who_is` (De3) are
     already concurrent, both fixed reactively after being felt in the field.
     Same `n0_future::join_all` shape, no runtime in the lib. *Done when:* a
     delivery to two down relays costs one deadline, not two.
+    ✅ *(2026-07-25: all four of F3's serial paths, semantics preserved in
+    each. **`recv` included beyond the three named here** — F3's table listed
+    it, and De6a had made it per-relay *tolerant* while leaving its deadlines
+    additive; safe to fan out because the cross-relay dedup set's `insert`
+    **is** the dedup point, so for one id exactly one drain wins and stores
+    it (shared `Mutex<BTreeSet>`, no await held across the lock, poison
+    recovered rather than fatal — the set guards no invariant).
+    `join_all` preserves input order, so a batch still reads relay by relay.
+    `register_at_home_relays` stays **all-or-error**: publishing a record
+    naming a mailbox you don't have is still a lie, it now just costs one
+    deadline to find out — and every reachable relay gets its mailbox even
+    when a sibling is down, where serially a dead *first* relay meant the
+    later ones were never tried. `deliver` keeps its discharged-skip pass
+    synchronous (it borrows `direct` and its outbox clearing belongs to that
+    pass) with only the deposits concurrent. **`flush_outbox` is chunked at
+    8, not unbounded** — each in-flight entry holds its message's blob bytes
+    twice (loaded from cache, then staged), so a long backlog of images
+    fanned out freely would spike memory where the serial version never did;
+    *n* deadlines become ceil(n/8). **Blob fetch deliberately left serial**:
+    it's a try-in-turn fallback where first success wins, so racing every
+    relay would pull the same bytes repeatedly — its additive cost wants
+    per-relay negative evidence (fast-failure.md §6A), not concurrency.
+    Test: two dead TEST-NET mailboxes on one record, asserting both the
+    fan-out and a subsequent flush finish inside 1.5 × deadline. **Verified
+    as a regression test** by restoring the serial loop — 1.004 s vs ~0.5 s,
+    caught. Also found while writing it: the `unused@…` dial strings the
+    other tests use fail at *parse*, instantly, so a timing test needs real
+    endpoint ids or it passes without dialing anything. Measured: `fanout`
+    2.13 → **1.52 s** (its both-relays-down phase was paying two deadlines);
+    `groups` unchanged at 7.02 s — honestly so, it sends to *reachable*
+    relays and had no additive deadlines to lose. Suite **28.5 → 24.7 s**
+    across De6a–d. 204 tests.)*
   - [ ] **De6e · 🎯 Relay presence query.** The genuinely *reactive* fix, and
     the only one that touches the wire: the relay already keeps a
     live-connection map per registered mailbox (C4b, for nudges), so an

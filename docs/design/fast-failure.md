@@ -155,22 +155,43 @@ could be drained (first failure verbatim, so the single-relay case is unchanged)
 `register_at_home_relays` deliberately left as is: failing loudly there is what
 keeps a published record from naming a mailbox that doesn't exist.
 
-### F3 · Serial per-relay work makes deadlines additive
+### F3 · Serial per-relay work makes deadlines additive ✅ fixed (De6d)
 
 | Path | Shape |
 |---|---|
 | `deliver_direct` (D5) | **concurrent** (`join_all`) ✅ |
 | `who_is` (De3) | **concurrent** (`join_all`) ✅ |
-| `recv` (`:781`) | serial, **aborts** on first failure |
-| `deliver` (`:539`) | serial, continues |
-| `flush_outbox` (`:727`) | serial per entry |
-| `register_at_home_relays` (`:1267`) | serial, aborts |
-| blob fetch (`:1023`) | serial try-in-turn (correct: first success wins) |
+| `recv` (`:781`) | serial, **aborts** on first failure → De6a, then De6d ✅ |
+| `deliver` (`:539`) | serial, continues → De6d ✅ |
+| `flush_outbox` (`:727`) | serial per entry → De6d ✅ (chunked at 8) |
+| `register_at_home_relays` (`:1267`) | serial, aborts → De6d ✅ (still all-or-error) |
+| blob fetch (`:1023`) | serial try-in-turn (correct: first success wins) — left alone |
 
 The two paths already fixed were fixed reactively, after each was felt in the
 field. The rest are the same bet: *n* unreachable relays cost *n* × deadline
 instead of one. direct-delivery.md §5.1 already measured this on the blob path
 (the 10 026 ms image send — "sequentially per relay").
+
+**Fixed in De6d** (2026-07-25): `recv`, `deliver`, `flush_outbox` and
+`register_at_home_relays` all fan out with `n0_future::join_all`. Semantics
+preserved in each case — `register` stays all-or-error (publishing a record
+naming a mailbox you don't have is still a lie, it just costs one deadline to
+find out), `deliver` keeps its discharged-skip and `AllRelaysPending` rule,
+`recv` keeps exactly-once cross-relay dedup via a shared set whose `insert`
+*is* the dedup point. Two things worth knowing:
+
+- **`flush_outbox` is chunked** (8 at a time), not unbounded. Each in-flight
+  entry holds its message's blob bytes twice — loaded from the cache and
+  staged — so a long backlog of images fanned out without limit would spike
+  memory where the serial version never did. `n` deadlines become
+  `ceil(n / 8)`.
+- **Blob fetch stays serial and should.** It is a try-in-turn fallback where
+  the first success wins, so racing every relay would pull the same bytes
+  several times. Its cost is the same additive deadline, but the fix there is
+  per-relay negative evidence (§6A), not concurrency.
+
+Measured: `fanout` 2.13 → **1.52 s** (its both-relays-down phase was paying
+two deadlines).
 
 ### F4 · No "reachable by key" readiness signal ✅ fixed (De6c)
 
@@ -271,8 +292,8 @@ stays a proposal and not a decision:
 - It does not remove the need for A: a relay we can't reach can't answer.
 
 **C · Parallelize the serial loops** (F3) and **fix `recv`'s abort** (F2).
-Turns *n* × deadline into max(). F2 is a correctness fix that should not wait
-for a latency slice.
+✅ **Done in De6a (abort) and De6d (concurrency).** Turns *n* × deadline into
+max(). F2 went first as the correctness fix it was.
 
 **D · Explicit readiness signal** (F4). ✅ **Done in De6c.** `listen` awaits
 `Endpoint::online()` (bounded) and prints a `reachability:` verdict; tests
@@ -300,15 +321,21 @@ the first ~6 s.
 | Today | 9.8 s | 9.96 s |
 | + A (persisted cooldown; ~6 sends × ~500 ms) | ~7 s | **7.97 s** (De6b) |
 | + D (readiness signal replaces the poll loops) | ~6 s | **7.02 s** (De6c) |
-| + C (parallel relay work) | ~5.5 s | — |
+| + C (parallel relay work) | ~5.5 s | **7.02 s** (De6d — no change *here*) |
 | Floor with the current harness (~30 × 50 ms open + close, ~8 recv × 90 ms) | ~3.5 s | — |
 | + F (De4 in-process) | <1 s | — |
 
-The **suite total is roughly unchanged at ~28 s**, and honestly so: De6b's ~2 s
-off `groups` was offset by De6a's new regression test taking `fanout` 0.49 →
-2.09 s. That test spends most of its time waiting out dead-relay deadlines —
-including two of them *serially* in its both-relays-down phase — so it is a
-customer of De6d rather than a counter-example to it.
+De6d moved `fanout` (2.13 → 1.52 s) but not `groups`, and that is the honest
+result: `groups` sends to *reachable* relays, mostly one at a time, so it had
+no additive deadlines to lose. The estimate credited De6d with ~0.5 s of
+`groups` and was simply wrong about where its win lands — the win is real, it
+just accrues to multi-relay and down-relay paths, which is where users feel it
+too (an unreachable home relay no longer taxes a drain twice).
+
+**Suite total: 28.5 s → 24.7 s** across De6a–d (summed per binary, run
+serially). The movers: `groups` −2.8 s, `multi_device` −1.2 s, `who_is`
+−0.7 s, `live` −0.4 s, and `fanout` **+1.0 s** — a new regression test that
+costs 1.5 s, itself down from 2.1 s once De6d removed its serial deadlines.
 
 Rough, but the ordering is the point: the product fixes are worth more than the
 harness rewrite, and they are worth something to users as well as to CI.
