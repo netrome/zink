@@ -775,19 +775,38 @@ impl Client {
     /// Drain every relay: register, then fetch page-by-page, dedup by
     /// message id, open, and remember what verified; ack each page at its
     /// own cursor.
-    pub async fn recv(&self, relays: &[String]) -> Result<Vec<Received>, Error> {
+    ///
+    /// **Best-effort per relay** (De6a): one relay we cannot reach costs its
+    /// own mail and nothing else — the healthy relays are still drained and
+    /// the failures are reported. This is the shape C4a gave the send path
+    /// (`SendReceipt.pending_relays`); before De6a a `?` in this loop let the
+    /// *first* unreachable relay abort the whole pass, so a second relay's
+    /// mail stayed invisible until an unrelated relay came back. Multi-relay
+    /// is a tenet; a drain must not be only as available as its worst relay.
+    ///
+    /// Still an error when **nothing** could be drained anywhere: the caller
+    /// asked for mail and got none for a reason it should see. The first
+    /// failure is returned verbatim (the rest are logged) — with every relay
+    /// down there is no partial result to protect, and edges keep rendering
+    /// the precise message they always did.
+    pub async fn recv(&self, relays: &[String]) -> Result<RecvReport, Error> {
         let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
         let mut received = Vec::new();
+        let mut failed: Vec<RelayFailure> = Vec::new();
         for relay in relays {
-            let connection = net::connect(
-                &self.endpoint,
-                relay,
-                zink_protocol::MAILBOX_ALPN,
-                self.config.connect_timeout,
-            )
-            .await?;
-            net::request(&connection, MailboxOp::Register).await?;
-            received.extend(self.drain_connection(relay, &connection, &mut seen).await?);
+            match self.drain_relay(relay, &mut seen).await {
+                Ok(batch) => received.extend(batch),
+                Err(error) => {
+                    tracing::warn!(relay, %error, "drain failed; other relays continue");
+                    failed.push(RelayFailure {
+                        relay: relay.clone(),
+                        error,
+                    });
+                }
+            }
+        }
+        if !failed.is_empty() && failed.len() == relays.len() {
+            return Err(failed.swap_remove(0).error);
         }
         // Distinguishes the *poll* path from the nudge path in the logs: a
         // message that shows up here but not via "drained (nudge)" arrived
@@ -805,7 +824,27 @@ impl Client {
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
         let _ = self.flush_outbox().await;
-        Ok(received)
+        Ok(RecvReport { received, failed })
+    }
+
+    /// One relay's full drain: connect, register (a registered connection is
+    /// what the relay nudges), then page through the mailbox. Split out of
+    /// `recv` so a failure anywhere in it — connect, register *or* mid-drain
+    /// — is one relay's failure rather than the pass's.
+    async fn drain_relay(
+        &self,
+        relay: &str,
+        seen: &mut BTreeSet<[u8; 32]>,
+    ) -> Result<Vec<Received>, Error> {
+        let connection = net::connect(
+            &self.endpoint,
+            relay,
+            zink_protocol::MAILBOX_ALPN,
+            self.config.connect_timeout,
+        )
+        .await?;
+        net::request(&connection, MailboxOp::Register).await?;
+        self.drain_connection(relay, &connection, seen).await
     }
 
     /// Live delivery (live-delivery.md §4): one relay's subscription loop —
@@ -2752,6 +2791,32 @@ pub struct FlushReport {
     pub pending: usize,
     /// Entries past the give-up window: left in place, no longer retried.
     pub expired: usize,
+}
+
+/// What one `recv` pass drained, and from where it got nothing (De6a).
+///
+/// `failed` non-empty with `received` non-empty is the honest partial view
+/// (tenet 6): mail from the relays that answered, plus which relays did not,
+/// so an edge can say "your view may be incomplete" instead of implying the
+/// mailbox is empty. Every relay answering leaves `failed` empty; *no* relay
+/// answering is an `Err` from `recv` rather than a report.
+///
+/// Deliberately not `Debug`: it carries opened message bodies, and a report
+/// that can be formatted into a log is a plaintext leak waiting to happen.
+#[derive(Default)]
+pub struct RecvReport {
+    pub received: Vec<Received>,
+    /// Relays this pass could not drain, with why. Not queued for anything:
+    /// unlike a send, a drain has nothing owed — the mail stays in the
+    /// mailbox and the next pass (or nudge) picks it up.
+    pub failed: Vec<RelayFailure>,
+}
+
+/// One relay that could not be drained this pass.
+#[derive(Debug)]
+pub struct RelayFailure {
+    pub relay: String,
+    pub error: Error,
 }
 
 /// One fetched envelope: opened if this device could decrypt it. The edge

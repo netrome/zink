@@ -127,7 +127,7 @@ face — if it is older than the cooldown it is simply ignored. Persisting
 `{key → last_failure_ms}` cannot produce a stale opinion, only skip a dial that
 was already known to be a coin-flip.
 
-### F2 · `recv` aborts the whole drain on the first unreachable relay
+### F2 · `recv` aborts the whole drain on the first unreachable relay ✅ fixed (De6a)
 
 `crates/zink-client/src/client.rs:781` — `net::connect(…).await?` inside
 `for relay in relays`. The `?` propagates out of `recv`, so with two home relays
@@ -141,6 +141,12 @@ the rest of the fan-out", `SendReceipt.pending_relays`) — `recv` never got the
 same treatment. Multi-relay is a tenet, so this is a reliability finding, not
 just a latency one. `register_at_home_relays` (`:1267`) has the same abort-on-
 first-failure shape, though it fails loudly rather than silently.
+
+**Fixed in De6a** (2026-07-25): per-relay work moved into `drain_relay`, `recv`
+returns `RecvReport { received, failed }`, and it errors only when *no* relay
+could be drained (first failure verbatim, so the single-relay case is unchanged).
+`register_at_home_relays` deliberately left as is: failing loudly there is what
+keeps a published record from naming a mailbox that doesn't exist.
 
 ### F3 · Serial per-relay work makes deadlines additive
 

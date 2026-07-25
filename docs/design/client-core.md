@@ -40,8 +40,15 @@ Client::open_with(key_path, ClientConfig)     // …with edge-injected tuning (e
 Client::open_or_create(key_path)              // app: silent first-run key creation
 client.send(&[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt  // seal → deposit per
                                               // distinct relay (retry) → push blobs
-client.recv(&[relay]) -> Vec<Received>        // register → page-fetch → dedup by id →
-                                              // open → remember → ack each page
+client.recv(&[relay]) -> RecvReport           // register → page-fetch → dedup by id →
+                                              // open → remember → ack each page.
+                                              // Best-effort PER RELAY (De6a): a relay
+                                              // that can't be drained goes in
+                                              // .failed and the rest still drain;
+                                              // Err only when none could be reached
+                                              // (first failure verbatim). Pre-De6a a
+                                              // `?` let the first dead relay abort
+                                              // the pass and hide healthy mail.
 client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else the relay it
                                               // arrived through; verify + decrypt
 // profile + contacts (C2): set_profile, my_record, add_contact, contacts,

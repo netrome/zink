@@ -730,7 +730,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   `connect_timeout` — direct-delivery.md §5.1 argued that trade and parked it;
   these slices avoid *making* doomed dials rather than giving up on honest
   ones sooner.
-  - [ ] **De6a · `recv` partial failure.** `recv` does
+  - [x] **De6a · `recv` partial failure.** `recv` does
     `net::connect(…).await?` inside its per-relay loop, so **one unreachable
     home relay aborts the whole drain** — a healthy second relay's mail stays
     invisible until the unrelated one returns, after 10 s of waiting for it.
@@ -738,6 +738,29 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     `recv` never got it, and multi-relay is a tenet. Reliability, not latency
     — independent of the rest. *Done when:* a drain across two relays with the
     first down returns the second's messages and reports the failure.
+    ✅ *(2026-07-25: per-relay work extracted to `drain_relay` — so connect,
+    register **and** mid-drain failures are all one relay's failure rather
+    than the pass's — and `recv` now returns `RecvReport { received, failed:
+    Vec<RelayFailure> }`. Still `Err` when **no** relay could be drained,
+    returning the first failure **verbatim**: with every relay down there is
+    no partial result to protect, and edges keep rendering the precise
+    message they always did, so the single-relay case (every pre-existing
+    test, and today's typical profile) is behaviourally unchanged.
+    `RecvReport` is deliberately **not `Debug`** — it carries opened bodies,
+    and a loggable report is a plaintext leak waiting to happen. Edges: the
+    CLI warns `<relay> not drained: <error>` on stderr before printing what
+    did arrive (a partial view that says it is partial — "no new messages"
+    would otherwise be a claim we can't make); the app logs the same and
+    keeps returning its count, since only a multi-relay profile can see a
+    partial drain at all and a "your view may be incomplete" UI line is its
+    own slice. e2e (`fanout.rs`): mail waiting on the second of two relays,
+    the first dropped, drained dead-relay-first — the message arrives, the
+    dead relay is named, the healthy one isn't; then the second relay drops
+    too and the drain fails again. **Verified as a regression test** by
+    restoring the `?` — the old code loses the mail and exits non-zero. 201
+    tests. Left standing, per F2: `register_at_home_relays` has the same
+    abort shape but fails loudly, so a record is never published claiming a
+    mailbox that isn't there — different semantics, its own call.)*
   - [ ] **De6b · Persist negative reach evidence.** `direct_budget`'s 60 s
     post-failure cooldown lives in an in-memory `sync::ReachMap`, so it never
     survives a process: three consecutive sends to the same offline peer

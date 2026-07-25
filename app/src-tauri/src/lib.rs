@@ -907,7 +907,16 @@ async fn refresh(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<us
     if relays.is_empty() {
         return Err("set up your profile first".into());
     }
-    Ok(client.recv(&relays).await?.len())
+    let report = client.recv(&relays).await?;
+    // A relay that didn't answer keeps its mail; the drain no longer fails
+    // over it (De6a). Logged rather than surfaced: only a multi-relay profile
+    // can see a *partial* drain at all (with one relay, `recv` still errors),
+    // and giving the UI a "your view may be incomplete" line is its own
+    // slice. Until then the diag log is where this shows up.
+    for failure in &report.failed {
+        tracing::warn!(relay = %failure.relay, error = %failure.error, "relay not drained");
+    }
+    Ok(report.received.len())
 }
 
 fn parse_id(id_hex: &str) -> Result<MessageId, String> {

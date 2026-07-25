@@ -377,7 +377,14 @@ async fn recv(args: &[String]) -> Result<(), String> {
             "no relays: pass --relay or set home relays via my-record\n{USAGE}"
         ));
     }
-    let received = client.recv(&relays).await?;
+    let report = client.recv(&relays).await?;
+    // A partial drain is honest about being partial (De6a): these relays
+    // still hold whatever they hold, so "no new messages" below would be a
+    // claim we can't make.
+    for failure in &report.failed {
+        eprintln!("warning: {} not drained: {}", failure.relay, failure.error);
+    }
+    let received = report.received;
     if received.is_empty() {
         println!("no new messages");
         client.close().await;
