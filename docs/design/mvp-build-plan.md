@@ -1012,6 +1012,35 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   strongest available fact; an ack adds a second async hop the one-shot CLI
   sender isn't even alive to receive, and would perturb existing `recv` /
   conversation-count assertions.)*
+- [x] **De8 · SPEC §8 relay shape corrected.** *(2026-07-25, found in a
+  pre-MVP doc/code sweep.)* §8 still described the shipped relay as "mailbox
+  ALPN + blob cache", with a parenthetical stating it "hosts neither an
+  iroh-relay server nor a Web Push sender" — true when written, superseded by
+  **D0b** (the embedded iroh relay server) and **De2** (QAD). The binary had
+  been doing both since 2026-07-19; only the build plan and the design docs
+  said so, and SPEC is the document a second implementation is pointed at.
+  Fixed: the §8 diagram gains the relay server and the QAD endpoint, the
+  parenthetical states what is *still* absent (a Web Push sender, and HTTPS —
+  the relay speaks plain HTTP, which is what keeps a browser client post-MVP)
+  and carries a dated correction note; the third bullet is renamed off "push
+  server", which the binary never became. Two **§11 rows** added, because
+  neither decision was recorded where cross-implementation decisions live:
+  *relay-coordinated connectivity* (one binary, both roles; homing; the
+  `RelayEntry` pairing) and *QAD port (interop)* — the **same-port
+  convention** is a real interop point, since another client must derive the
+  QAD port from the relay URL alone (no explicit port ⇒ iroh's default 7842).
+  Docs only, no code touched. *(Sweep also logged, not scheduled: `Client` is
+  a ~3.3 k-line, ~90-method god object wanting a split along its existing
+  seams before the PWA client reuses subsets; `history`/`conversations`
+  double-read every envelope — `load_dag` re-runs `load_envelopes` — and
+  re-verify + re-decrypt the whole conversation on every render, with no
+  pagination or cache, on the `new-messages` path; "what do I call this key"
+  is implemented three times — `Client::participant_labels`, plus a private
+  `label()` in each of the CLI and the app — and has already diverged: the
+  app's notification title (`app/src-tauri/src/lib.rs`) misses the
+  recognized-devices store, so a **send-to-self arrival from your own paired
+  device notifies as raw hex** instead of its name. The double-read is cheap
+  to fold into De7, which touches `history` anyway.)*
 - [x] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
   on the contacts' side IS the membership-presentation pipeline, so it ships

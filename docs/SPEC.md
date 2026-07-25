@@ -404,34 +404,43 @@ visible.
 ## 8. System components
 
 ```
-┌─────────────────┐    direct QUIC (hole-punched; relay-assisted when NATed —          ┌─────────────────┐
-│  App client      │    browsers, as a future second client, are always relay-routed)  │  App client      │
-│  (native + iroh) │◀───────────────────────────────────────────────────────────────▶│  (native + iroh) │
-└───────┬─────────┘                                                                 └─────────────────┘
-        │  mailbox sync · blob fetch · live-delivery connection
-        ▼
-┌──────────────────────────────────────────────────┐
-│  Relay + Mailbox (small binary)                     │  ← untrusted; ciphertext + metadata only
-│   · mailbox ALPN (offline delivery, deposit/fetch)  │     interchangeable; anyone can run one
-│   · encrypted blob cache (TTL)                      │
-│   · live-forward to connected recipients (C4)       │
-└──────────────────────────────────────────────────┘
+┌──────────────────┐   direct QUIC — holepunched via relay rendezvous, or   ┌──────────────────┐
+│   App client     │   encrypted-QUIC relayed when it can't (browsers, a    │   App client     │
+│  (native + iroh) │◀──future second client, are always relay-routed) ─────▶│  (native + iroh) │
+└────────┬─────────┘                                                        └──────────────────┘
+         │  mailbox sync · blob fetch · live-delivery connection · homing + rendezvous
+         ▼
+┌────────────────────────────────────────────────────────────┐
+│  Relay + Mailbox — ONE small binary, one service           │ ← untrusted; ciphertext
+│   · mailbox ALPN (offline delivery, deposit/fetch)         │   + metadata only.
+│   · encrypted blob cache (TTL)                             │   Interchangeable;
+│   · live-forward to connected recipients (C4)              │   anyone can run one.
+│   · embedded iroh relay server (D0b): peer rendezvous,     │
+│     holepunch coordination, encrypted-QUIC fallback        │
+│   · QUIC address discovery (QAD, De2): the STUN role       │
+└────────────────────────────────────────────────────────────┘
 ```
 
-*(Shipped relay = mailbox ALPN + blob cache; native clients dial its `id@ip:port`
-directly, so it hosts neither an iroh-relay server nor a Web Push sender. Both belong
-to the future PWA client's path: a co-located iroh-relay for browser WebSocket
-transport, and Web Push for browser wake — see §5.3 and the A6 spike.)*
+*(**Shipped relay = all five, in one process.** A device's `RelayEntry` (§3.6) names one
+service that both holds its mailbox and keeps it reachable by key — deliberately the same
+binary, so "which relay do I use" has one answer rather than two, and the two addresses
+cannot drift apart. What the relay still does **not** host is a **Web Push sender**: that
+belongs to the future PWA client's path (browser wake, §5.3). Nor does it serve **HTTPS** —
+the embedded relay server speaks plain HTTP, which native clients accept and browsers
+won't; a browser client needs a domain + cert, post-MVP. **Corrected 2026-07-25:** this
+paragraph previously said the shipped relay hosted neither an iroh-relay server nor a Web
+Push sender, which D0b (embedded relay server) and De2 (QAD) superseded for the first half.)*
 
 - **App client (native, Tauri v2):** the MVP client — Android + Linux desktop from
   one codebase. Native iroh: direct QUIC with hole-punching, relays only for
   introduction/fallback/offline. Holds keys, attestations, contacts, crypto, the DAG
   store, and UI. *(A PWA/WASM client is the planned second implementation, post-MVP:
   iroh-in-WASM is proven, but it is always relay-routed and needs the Web Push path.)*
-- **Relay / mailbox / push server:** small Rust binary; untrusted for content;
-  minimal role (help peers connect + retain messages). **Anyone can run one**, and
-  they are interchangeable — a user configures which relay(s) they use. I'll run one
-  or two to start.
+- **Relay / mailbox / rendezvous:** small Rust binary; untrusted for content; minimal
+  role — help peers *find and reach* each other (D0b), and retain messages for the ones
+  who aren't there. **Anyone can run one**, and they are interchangeable — a user
+  configures which relay(s) they use, and homing to **several** is the normal case, never
+  one shared relay. I'll run one or two to start.
 
 **Anti-spam (deferred).** The social graph is the boundary, and at friends-scale it
 mostly self-enforces: only your contacts hold your device key (shared via QR). MVP =
@@ -489,6 +498,8 @@ custom conversation views — is **client policy/UX**.
 | Ordering | **Lamport (`logical`) + per-sender `seq` + DAG** | Partial-view ordering, gap detection, honest concurrency. |
 | Message integrity | **Commit the content-key in the core** (`key-commit`) | AEADs aren't key-committing; without it "same id ⇒ same content" breaks. |
 | ContactRecord wire form | **Relay endpoints as dial strings** (`id@ip:port`); QR payload = `ZINK:<base32(borsh)>` | Compact, human-inspectable, QR-alphanumeric-mode friendly; richer relay addressing (browser relay URLs) is a version bump. |
+| Relay-coordinated connectivity | **One binary, both roles**: the mailbox ALPN *and* an embedded iroh relay server (plain HTTP — no domain, no cert). A device **homes** to its own relays (`RelayMode::Custom`, still multi-relay); a peer holding its record dials it **by key** through them — rendezvous → holepunch → encrypted-QUIC relaying as fallback. `RelayEntry { mailbox, relay_url }` pairs the two addresses in one structured entry | Cross-NAT reachability with **no discovery service and no third party**: the record already names the service holding your mailbox, so it names the one that finds you. One entry, because parallel lists of the same service's addresses would drift ([sync-primitives.md](./design/sync-primitives.md) §4, D0b, resolved 2026-07-18) |
+| QAD port (interop) | **Same-port convention:** the relay serves QUIC address discovery on **UDP at the relay URL's own port number**; a URL with no explicit port implies iroh's default **7842**. The cert is self-signed, unpinned, and clients skip verification | A second implementation must derive the QAD port from the URL alone, and one number per relay keeps several relays on one host collision-free. Nothing security-relevant rides on that TLS: iroh authenticates by endpoint key, so a QAD man-in-the-middle can at most misreport an observed address (degraded holepunching) — putting a webpki CA in the trust path would be the bigger concession (De2, resolved 2026-07-19) |
 | AEAD + commitment | **XChaCha20-Poly1305** (fresh random nonce, `nonce ‖ ct`); commitment = BLAKE3 `derive_key("zink v1 key-commit", content-key)` | Random-nonce-safe AEAD; domain-separated commitment, not a bare hash. |
 | Key sealing | **libsodium-style sealed box** (X25519 via the standard Ed25519 conversions) | Anonymous, per-recipient, vetted construction — nothing hand-rolled. |
 | `seq` origin | **0-based per (sender, conversation)** | Sender's first message = 0 (genesis included); a cross-impl interop point. |
