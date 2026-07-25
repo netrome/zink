@@ -719,7 +719,9 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   Estimated split: De6a–d take groups to ~5.5 s and the harness floor is
   ~3.5 s, so De4 buys the last ~3 s. **Do De6 first, then re-measure and
   decide whether this still earns its keep.**)*
-- [ ] **De6 · Fast failure.** 🎯 The systems-level finding behind De4:
+- [x] **De6 · Fast failure.** 🎯 *(a–d landed 2026-07-25; e declined as an op.
+  Suite 28.5 → 24.7 s, and the product wins are larger than the suite ones —
+  see each sub-slice.)* The systems-level finding behind De4:
   **failure is only ever learned by deadline expiry — nothing signals it.**
   Every reachable path measures ~100 ms (send to an online recipient 134 ms,
   `recv` 86 ms, who-is 111 ms); every unreachable one costs its full deadline
@@ -884,16 +886,103 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     `groups` unchanged at 7.02 s — honestly so, it sends to *reachable*
     relays and had no additive deadlines to lose. Suite **28.5 → 24.7 s**
     across De6a–d. 204 tests.)*
-  - [ ] **De6e · 🎯 Relay presence query.** The genuinely *reactive* fix, and
-    the only one that touches the wire: the relay already keeps a
+  - [~] **De6e · 🎯 Relay presence.** *(Discussed 2026-07-25; the standalone
+    query is **declined**, a narrower variant is on the table. Reasoning in
+    fast-failure.md §6B.)* The original idea: the relay already keeps a
     live-connection map per registered mailbox (C4b, for nudges), so an
-    additive mailbox op answers "is this key connected here?" in one ~5 ms
-    round-trip where a speculative dial takes 600 ms to fail. **Design
-    decision first** (fast-failure.md §6B): it asks a relay to report on a
-    third party's presence — the relay already knows and the asker can already
-    deposit there, but building a presence API on top of that is a metadata
-    call to make deliberately, not a refactor. Only if De6a–d leave a felt
-    gap; possibly never, which is a fine outcome.
+    additive mailbox op could answer "is this key connected here?" where a
+    speculative dial takes 600 ms to fail.
+    **Declined as an op.** (a) The latency case largely died with De6b — a
+    repeat send to an offline peer already costs ~80 ms and no dial. (b) It
+    would build a **pollable presence API**: anyone who can deposit (which is
+    anyone holding a record — that's what makes one-way adds work) could poll
+    a contact's sleep/wake/travel timeline. (c) It asks an **untrusted** party
+    an unverifiable question we then act on, where today the client
+    establishes reachability by trying. (d) It's the **wrong oracle** — "live
+    at the relay" is neither necessary nor sufficient for "dialable by me",
+    and it's stale on arrival. Also: the "~5 ms" in §6B was wrong; it needs a
+    relay connect, so tens of ms per relay.
+    **The variant still open:** the relay reports, **in the deposit response
+    for a *new* deposit only**, whether each recipient had a live registered
+    connection. Zero extra round-trips (a request we already make), and the
+    new-deposits-only guard is what keeps it un-pollable — re-depositing the
+    same envelope is idempotent and would otherwise hand back a fresh reading
+    each time (the hole in the first version of this idea). Purely
+    **advisory**: it seeds `Reach.seen_ms`, nothing gates on it, so a lying
+    relay gains nothing it couldn't get by not implementing the field.
+    Value: it corrects a *wrong negative* after one message, retiring two
+    parked notes — De6b's accepted cooldown trade (a peer that came back
+    online mid-cooldown) and §5.1's cold-probe miss. Cost: a wire field, a
+    SPEC §11 row, a mailbox-wire-doc change, and a metadata story. **Not
+    scheduled**; the zero-wire alternative is to widen the 600 ms cold probe
+    when the *conversation* is warm but the reach evidence has aged out.
+- [ ] **De7 · Delivery confirmation (the D5 ack, surfaced).** Since D5 a
+  direct delivery returns `SyncResult::Stored` **after the recipient's
+  durable store returns** — a real delivery confirmation, stronger than
+  anything a relay could offer, and it is currently **thrown away**. The CLI
+  prints it once on the send line (`"… 2 direct, 1 relay(s) skipped"`) and
+  then it is gone; the app's spawned delivery task reads only
+  `pending_relays == 0` to decide whether to flush the backlog and drops the
+  rest. Nothing persists it, so it appears in no `history` and nowhere in the
+  app at all — the D5 directness win is invisible to the person using it.
+  **Not a pure rendering change** (checked): the ack is transient and cannot
+  be derived after the fact, because a message with no outbox entries is
+  equally "direct-acked" or "deposited to every relay fine". It needs a small
+  ledger. Shape: a sidecar beside the stored envelope,
+  `conversations/<conv>/<msg>.acks`, listing the recipient keys that returned
+  `Stored` — mirrors the outbox ledger's per-(message, x) shape, is scoped to
+  the conversation so it dies with it, and needs no loader change
+  (`load_envelopes` already ignores anything that isn't `.env`). Written by
+  `deliver`; `HistoryMessage` gains the confirmed keys; CLI `history` renders
+  a marker so it is e2e-testable without phones (the C3a pattern), app
+  renders it per message. *(Watch the interaction with the `stage_send` /
+  `deliver` split: the app renders before delivery runs, so the marker must
+  appear on the `new-messages` re-render the delivery task already emits —
+  no new event plumbing needed.)*
+  **The rendering rule is load-bearing** (tenet 7, honesty over false
+  order): **positive-only.** "Confirmed received by X" when an ack is held;
+  absence means *no confirmation*, **never** "not delivered" — the recipient
+  may well have it via the mailbox and simply never said so. No greyed-out
+  ticks, no "undelivered" state. `pending` stays the only negative signal and
+  keeps its existing meaning: "we still owe a relay", not "they don't have
+  it". Per-recipient, so a group can honestly say "2 of 3 confirmed"
+  (labels via `participant_labels`).
+  *Non-goals:* client-issued acks for the mailbox path (below), read
+  receipts, relay presence (De6e), and any UI that implies non-delivery.
+  *Done when:* two clients exchange a message directly and the sender's
+  history shows it confirmed; a mailbox-path send shows no marker and no
+  false negative; headless e2e covers both.
+- [ ] **Client-issued delivery acks — not scheduled, design first.**
+  *(Proposed + discussed 2026-07-25.)* An optional, best-effort "I received
+  this" a client may choose to send — squarely in the spirit of tenet 2
+  (building blocks + discretion) and the right answer for the **mailbox
+  path**, which De7 cannot cover: if the recipient was offline, only they can
+  tell you they have it. Deferred because it is a protocol addition with
+  three real problems, all found before writing any code:
+  - **It cannot be a conversation message.** Since D2a, membership **is** the
+    heads' participant set (groups.md §2), so a sender-addressed ack, as a
+    head, would silently shrink the group for everyone reading through it —
+    the exact hazard D2a hit from the other direction (dropping a routeless
+    member from `recipients`). It needs to be a distinct object.
+  - **Amplification.** One message in an N-person group begets up to N−1
+    sealed envelopes; sender-addressed keeps it at N rather than N², but an
+    active group would still push the sender's mailbox toward the C0 cap of
+    1024 items. Wants coalescing (ack a *set* of ids, lazily), which is more
+    design than "add an ack".
+  - **It cannot be a body convention.** Tempting via the C3 self-wrap
+    precedent, but that transfers badly: self-wrap is *locally invisible*
+    (a wrap outside the hashed core; a client that ignores it only loses its
+    own history), whereas an ack convention is visible to **other**
+    implementations, which would render junk one-message conversations. For
+    a protocol-first project it goes in the protocol or nowhere.
+  Also collides with the parked **per-type format versions** item: one global
+  `FORMAT_VERSION` means a new hashed object type forks the whole protocol at
+  once. Same positive-only rendering rule as De7 applies. *(Judged on UX
+  alone: the "it would simplify testing" case doesn't hold — De6c already
+  made the e2e tests block on the recipient's own arrival line, which is the
+  strongest available fact; an ack adds a second async hop the one-shot CLI
+  sender isn't even alive to receive, and would perturb existing `recv` /
+  conversation-count assertions.)*
 - [x] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
   on the contacts' side IS the membership-presentation pipeline, so it ships
@@ -1428,10 +1517,12 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
 What remains before the MVP is called done: the two **parked** items below,
-**De6**'s fast-failure slices (with **De4**'s harness cleanup re-measured after
-them — [fast-failure.md](./fast-failure.md)), **U7**'s live check
-([ui-facelift.md](./ui-facelift.md)), and C4c's unmeasured overnight/battery
-numbers.
+**De7** (surfacing the delivery confirmation D5 already produces), **U7**'s
+live check ([ui-facelift.md](./ui-facelift.md)), and C4c's unmeasured
+overnight/battery numbers. **De6a–d landed** 2026-07-25 (fast failure —
+[fast-failure.md](./fast-failure.md), suite 28.5 → 24.7 s); **De6e** is
+declined as an op with a narrower variant unscheduled, and **De4**'s harness
+cleanup wants re-measuring now rather than assuming its original estimate.
 
 ---
 

@@ -273,23 +273,52 @@ predicted. Two threads left hanging deliberately:
   a *newer* `seen_ms` and asserts `None`), so changing it revises a resolved
   policy rather than implementing this one. Worth a decision, not a drive-by.
 
-**B · Ask instead of guessing** (the true reactive fix). The relay already keeps
-a live-connection map per registered mailbox — C4b built it to route nudges. An
-additive mailbox op ("is this key connected here?") answers in one ~5 ms
-round-trip what a speculative dial takes 600 ms to fail at, and the answer is
-*fresher* than any cached evidence. Implications to weigh, which is why this
-stays a proposal and not a decision:
+**B · Ask instead of guessing** (the true reactive fix). ❌ **Declined as a
+standalone op, 2026-07-25** — a narrower variant is still open. The relay
+already keeps a live-connection map per registered mailbox (C4b built it to
+route nudges), so an additive mailbox op could answer "is this key connected
+here?" where a speculative dial takes 600 ms to fail.
 
-- **Privacy.** It asks a relay to report on a third party's presence. The relay
-  already knows (it maintains the map for nudges), and the asker is already
-  authorized to deposit into that mailbox — but "the relay already knows" is
-  not the same as "we built a presence API on top of it", and presence leaks
-  are exactly what tenet-level metadata minimization is about. A conservative
-  form answers only about mailboxes the asker can already deposit to, and
-  says nothing about *when* the peer was last seen.
-- **It is a wire addition** — additive to `zink-mailbox/1`, old clients
-  unaffected, but SPEC §11 and the wire doc move.
-- It does not remove the need for A: a relay we can't reach can't answer.
+Why it was declined:
+
+- **The latency case died with De6b.** A repeat send to an offline peer now
+  costs ~80 ms and no dial at all. What remained was a *directness hit-rate*
+  argument, not a speed one.
+- **It builds a pollable presence API.** Anyone who can deposit — and anyone
+  holding a record can deposit, which is what makes one-way adds work — could
+  poll a contact's sleep/wake/travel timeline. That is precisely the metadata
+  tenet-level minimization exists to prevent, and the ACL is weak by design.
+- **It asks an untrusted party an unverifiable question and acts on the
+  answer.** A relay answering "everyone is offline" silently forces all
+  traffic through its own mailbox, defeating D5's point invisibly. Today the
+  client establishes reachability by *trying* — a fact it owns. (It can
+  already interfere with the direct path, often being the same service doing
+  rendezvous; but blocking a connection surfaces as a failure, whereas lying
+  makes us stop trying.)
+- **It is the wrong oracle.** "Live at the relay" is neither necessary nor
+  sufficient for "dialable by me" — a live mailbox connection can still fail a
+  holepunch, and an unregistered peer can be reachable on the LAN — and the
+  answer is stale on arrival. Multi-relay makes it mushier still.
+- **Correction to this section's own estimate:** the query is *not* ~5 ms. It
+  needs a relay connect, so tens of ms, per relay.
+
+**The variant still open** (build-plan De6e): the relay reports, **in the
+deposit response and only for a *new* deposit**, whether each recipient had a
+live registered connection. Zero extra round-trips, on a request we already
+make. The new-deposits-only guard is what makes it un-pollable — `Deposited`
+is an idempotency receipt, so re-depositing the same envelope would otherwise
+return a fresh reading forever (the hole in the first version of this idea).
+Strictly **advisory**: it seeds `Reach.seen_ms` and nothing gates on it, so a
+lying relay gains nothing it couldn't get by not implementing the field. It
+corrects a *wrong negative* after one message, retiring De6b's accepted
+cooldown trade and §5.1's cold-probe miss. Still a wire field with a metadata
+story, so: not scheduled.
+
+The **zero-wire alternative** to reach for first: widen the 600 ms cold probe
+when the *conversation* has recent message activity but the reach evidence has
+aged out. One constant and a unit test, and it asks nobody about anybody.
+
+Neither removes the need for A: a relay we can't reach can't answer.
 
 **C · Parallelize the serial loops** (F3) and **fix `recv`'s abort** (F2).
 ✅ **Done in De6a (abort) and De6d (concurrency).** Turns *n* × deadline into
