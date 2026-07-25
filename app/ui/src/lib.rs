@@ -1135,6 +1135,17 @@ fn ChatView(
                                 })
                                 .collect::<Vec<_>>();
                             let pending = if message.pending { " · sending…" } else { "" };
+                            // Delivery confirmation (De7): their device said
+                            // it stored this. **Positive-only** (tenet 7) —
+                            // nothing is rendered when empty, because an
+                            // absent confirmation is not a failed delivery
+                            // and must never be dressed as one. No greyed
+                            // tick; "sending…" stays the only negative cue.
+                            let confirmed = if message.confirmed.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · ✓ delivered to {}", message.confirmed.join(", "))
+                            };
                             // Concurrency cues (D4d, tenet 7): real causal
                             // data, but advanced — shown only when the reader
                             // opts in via the header toggle.
@@ -1173,7 +1184,7 @@ fn ChatView(
                                         })}
                                     <span class="dim">
                                         {message.sender} " · " {time_of(message.timestamp_ms)}
-                                        {pending} {concurrency}
+                                        {pending} {confirmed} {concurrency}
                                     </span>
                                     {(!deltas.is_empty())
                                         .then(|| view! { <div class="dim">{deltas.join(" · ")}</div> })}

@@ -148,6 +148,14 @@ pub struct Message {
     /// set. Derived from signed cores; empty for genesis / partial views.
     pub joined: Vec<String>,
     pub left: Vec<String>,
+    /// Labels of recipient devices that confirmed a durable store of this
+    /// message (De7) — vouched by the **recipient's own device key**, not
+    /// by a relay. **Positive-only** (tenet 7): render "confirmed by …"
+    /// when non-empty and render *nothing* when empty. Empty means no
+    /// confirmation was received, NOT that the message is undelivered —
+    /// most mailbox-path messages arrive fine and never say so. No greyed
+    /// ticks, no "undelivered" state; `pending` is the only negative cue.
+    pub confirmed: Vec<String>,
 }
 
 /// One unknown member of a conversation — the "a wild key appeared"

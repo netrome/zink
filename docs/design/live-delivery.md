@@ -62,6 +62,20 @@ mailbox exists because that can't be assumed).
   client policy. `send` still returns an error when *zero* relays took the
   deposit, but the message stays stored + outboxed either way: the send is
   honest ("queued, not delivered"), not rolled back.
+- **Third rung (De7, 2026-07-25):** the ledger distinguishes *two* states —
+  `pending` ("we still owe a relay", vouched by us) and cleared ("a relay
+  took it", vouched by the **relay**). D5 produces a third and stronger one:
+  a `Stored` ack from the **recipient's own device key**. It is transient and
+  cannot be reconstructed later (a message with no outbox entries is equally
+  direct-acked or deposited fine), so `deliver` writes it to a sidecar beside
+  the envelope — `conversations/<conv>/<msg>.acks`, mirroring this ledger's
+  per-(message, x) shape. `HistoryMessage.confirmed` surfaces it.
+  **Do not launder the relay's claim into a delivery guarantee:** relays are
+  untrusted (tenet 5), so a cleared entry means "sent", never "delivered".
+  Rendering is **positive-only** (tenet 7) — an absent confirmation means *no
+  confirmation*, never "not delivered", because the mailbox path delivers
+  perfectly well and has no way to say so. `pending` stays the only negative
+  signal.
 - **Give-up policy — resolved (2026-07-12):** entries older than the relay
   retention window (30 days) are dead — the recipients' cursors moved on and
   the social moment passed. Keep the entry, stop retrying, surface as

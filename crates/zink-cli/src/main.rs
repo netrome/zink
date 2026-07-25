@@ -485,6 +485,21 @@ async fn history(args: &[String]) -> Result<(), String> {
             println!("  [- {}]", label(&contacts, key));
         }
         let pending = if message.pending { " [pending]" } else { "" };
+        // Delivery confirmation (De7): the recipient's *own device* said it
+        // stored this — stronger than anything a relay can vouch for.
+        // **Positive-only** (tenet 7): nothing is printed for its absence,
+        // which means "no confirmation", not "undelivered" — a mailbox-path
+        // message is very likely delivered and simply cannot say so.
+        // `[pending]` stays the only negative signal, and the two can
+        // honestly co-occur (one recipient acked, another relay still owed).
+        let confirmed = if message.confirmed.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [✓ delivered to {}]",
+                client.participant_labels(&message.confirmed)?.join(", ")
+            )
+        };
         // Concurrency markers (D4d, tenet 7): real data the linear
         // default would otherwise hide; the order is unchanged.
         let crossed = if message.crossed {
@@ -499,10 +514,10 @@ async fn history(args: &[String]) -> Result<(), String> {
         };
         match &message.body {
             Ok(plaintext) => println!(
-                "{from}: {}{pending}{crossed}{merged}",
+                "{from}: {}{pending}{confirmed}{crossed}{merged}",
                 String::from_utf8_lossy(plaintext)
             ),
-            Err(e) => println!("{from}: <unopenable: {e}>{pending}{crossed}{merged}"),
+            Err(e) => println!("{from}: <unopenable: {e}>{pending}{confirmed}{crossed}{merged}"),
         }
         match &blobs_dir {
             Some(dir) => {

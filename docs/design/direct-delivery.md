@@ -91,6 +91,15 @@ mailbox's `Deposited` result) *before* the sender skips the mailbox. No ack in
 time ⇒ treat as undelivered ⇒ mailbox deposit. This keeps "honesty over false
 delivery" (tenet 6) intact.
 
+*(**Surfaced by De7, 2026-07-25.** Because the ack is attributable to the
+recipient's own device key and means *durably stored*, it is also the only true
+delivery confirmation in the system — stronger than a relay's `Deposited`, which
+an untrusted relay can claim and then drop. It was computed and discarded until
+De7 persisted it beside the envelope (`<msg>.acks`) and surfaced it as
+`HistoryMessage.confirmed`. Rendering is positive-only: the mailbox path
+delivers without ever producing an ack, so absence must never read as failure.
+See live-delivery.md §2.)*
+
 **Dedup is free.** A message content-addressed by BLAKE3 id already dedups
 across relays (rendezvous §receiver-side). A message that arrives both directly
 *and* (racily) via a mailbox fetch is the same free merge — no new bookkeeping.

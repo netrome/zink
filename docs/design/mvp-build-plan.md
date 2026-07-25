@@ -916,7 +916,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     SPEC §11 row, a mailbox-wire-doc change, and a metadata story. **Not
     scheduled**; the zero-wire alternative is to widen the 600 ms cold probe
     when the *conversation* is warm but the reach evidence has aged out.
-- [ ] **De7 · Delivery confirmation (the D5 ack, surfaced).** Since D5 a
+- [x] **De7 · Delivery confirmation (the D5 ack, surfaced).** Since D5 a
   direct delivery returns `SyncResult::Stored` **after the recipient's
   durable store returns** — a real delivery confirmation, stronger than
   anything a relay could offer, and it is currently **thrown away**. The CLI
@@ -981,6 +981,36 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   history reads `delivered`; the same send with the recipient offline reads
   `sent` (never a false negative); a send with a relay down reads
   `sending…`/pending as it does today; headless e2e covers all three.
+  ✅ *(2026-07-25: built as designed — `ClientState::add_acks` / `acks_in`
+  writing `conversations/<conv>/<msg>.acks` (raw 32-byte keys), `deliver`
+  persisting `deliver_direct`'s ack set, `HistoryMessage.confirmed`, CLI
+  `[✓ delivered to Bob]`, `Message.confirmed` + a `· ✓ delivered to …` cue
+  in the app. **No protocol change** — De7 records an ack D5 already
+  produced, so no SPEC change and no wire field. Acks are **unioned, never
+  replaced**: `deliver` reruns on a flush, and a later pass that reaches
+  nobody must not erase what an earlier one earned (regression test).
+  Best-effort write — a device that said it stored the message *has* it, so
+  a failed sidecar must cost the confirmation, not the send.
+  **Folded in (the pre-MVP sweep's cheap half):** `history` and
+  `conversations` were reading and BORSH-decoding every envelope **twice**
+  — `load_dag` re-ran `load_envelopes` under callers that had just loaded
+  them — on every `new-messages` render. `ClientState::dag_of(&envelopes,
+  conv)` shares the rebuild; `load_dag` keeps its move path for
+  `threaded_draft`. Behaviour-identical, pinned by the existing DAG tests.
+  Tests: 3 in-process (ack recorded + surviving a reopen + never
+  self-reported; nothing-acked reads as silence not failure; the union
+  rule) and a CLI e2e in `outbox.rs` covering rungs 3 and 2 in one run.
+  204 → **208 tests**. **Manual CLI run against a real relay** — all three
+  rungs on one screen: `me: you up? [✓ delivered to Bob]` (Bob listening,
+  direct), `me: still there?` (Bob killed, relay took it — **unmarked, and
+  Bob drained it fine on return**, which is exactly why the rule is
+  positive-only), `me: and now? [pending]` (relay killed too); on disk, 1
+  `.acks` sidecar and 1 outbox entry. Docs: live-delivery.md §2 (the third
+  rung), direct-delivery.md §3, client-core.md.
+  **Not done here:** the app-side render is compile-verified only
+  (`cargo check/clippy --target aarch64-linux-android` clean; this machine
+  has no webkit2gtk for the desktop target), so it wants one look on
+  device — and the group case ("2 of 3") has only ever run 1:1.)*
 - [ ] **Client-issued delivery acks — not scheduled, design first.**
   *(Proposed + discussed 2026-07-25.)* An optional, best-effort "I received
   this" a client may choose to send — squarely in the spirit of tenet 2
@@ -1575,9 +1605,9 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
 What remains before the MVP is called done: the two **parked** items below,
-**De7** (surfacing the delivery confirmation D5 already produces), **U7**'s
-live check ([ui-facelift.md](./ui-facelift.md)), and C4c's unmeasured
-overnight/battery numbers. **De6a–d landed** 2026-07-25 (fast failure —
+**U7**'s live check ([ui-facelift.md](./ui-facelift.md)), and C4c's unmeasured
+overnight/battery numbers. **De7 landed** 2026-07-25 (the D5 ack, surfaced —
+208 tests). **De6a–d landed** 2026-07-25 (fast failure —
 [fast-failure.md](./fast-failure.md), suite 28.5 → 24.7 s); **De6e** is
 declined as an op with a narrower variant unscheduled, and **De4**'s harness
 cleanup wants re-measuring now rather than assuming its original estimate.

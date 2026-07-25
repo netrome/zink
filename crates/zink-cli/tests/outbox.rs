@@ -1,10 +1,17 @@
 //! C4a end to end: a send while the relay is down is queued (pending in
 //! history, never lost), a later flush trigger delivers it — blobs included
 //! — and entries past the give-up window stop retrying but stay surfaced.
+//!
+//! Plus De7, the ledger's third rung: a recipient device that acked a
+//! durable store is named in the sender's history, and — the load-bearing
+//! half — one that never acked is *not* contradicted.
 
 mod common;
 
-use common::{cli, key_path, spawn_relay_at, stdout_of, temp_dir};
+use common::{
+    cli, key_path, spawn_homed_listener, spawn_iroh_relay, spawn_relay, spawn_relay_at, stdout_of,
+    temp_dir,
+};
 
 fn record_payload(key: &str, name: &str, relay: &str) -> String {
     stdout_of(&cli(&[
@@ -109,6 +116,66 @@ async fn outbox__should_queue_while_the_relay_is_down_and_flush_when_it_returns(
         .next()
         .expect("one saved blob");
     assert_eq!(saved, image);
+
+    std::fs::remove_dir_all(&dir).expect("clean up temp dir");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn delivery__should_confirm_only_what_the_recipients_device_acked() {
+    // Given: one relay service (mailbox + iroh relay server, so peers are
+    // dialable by key) and two profiles holding each other's records.
+    let (_router, dial) = spawn_relay().await;
+    let (_iroh_relay, url) = spawn_iroh_relay().await;
+    let spec = format!("{dial}#{url}");
+    let dir = temp_dir("confirm");
+    let key_a = key_path(&dir, "alice.key");
+    let key_b = key_path(&dir, "bob.key");
+    cli(&["keygen", &key_a]);
+    cli(&["keygen", &key_b]);
+    let record_a = record_payload(&key_a, "Alice", &spec);
+    let record_b = record_payload(&key_b, "Bob", &spec);
+    cli(&["contact-add", "--key", &key_a, &record_b]);
+    cli(&["contact-add", "--key", &key_b, &record_a]);
+
+    // When: Bob is live and reachable by key, so Alice's send goes
+    // peer-to-peer and comes back with his device's `Stored` ack (D5).
+    let bob = spawn_homed_listener(&key_b);
+    stdout_of(&cli(&["send", "--key", &key_a, "--to", "Bob", "you up?"]));
+    bob.wait_for("you up?");
+
+    // Then: Alice's history names who confirmed it — vouched by Bob's own
+    // device key, not by the relay.
+    let conversation = conversation_of(&key_a);
+    let history = stdout_of(&cli(&["history", "--key", &key_a, &conversation]));
+    assert_eq!(
+        history.lines().next(),
+        Some("me: you up? [✓ delivered to Bob]"),
+        "got: {history}"
+    );
+
+    // When: Bob goes away and Alice sends again — the mailbox takes it, and
+    // nobody can ack (only the recipient can, and it isn't running).
+    drop(bob);
+    stdout_of(&cli(&[
+        "reply",
+        "--key",
+        &key_a,
+        &conversation,
+        "still there?",
+    ]));
+
+    // Then: the second line carries NO marker and NO negative claim. This
+    // is the positive-only rule (tenet 7): the relay holds it, Bob will very
+    // likely get it, and we simply have no confirmation to show — which must
+    // never render as "undelivered". `[pending]` is absent too: the relay
+    // took the deposit, so nothing is owed.
+    let history = stdout_of(&cli(&["history", "--key", &key_a, &conversation]));
+    assert_eq!(
+        history.lines().collect::<Vec<_>>(),
+        ["me: you up? [✓ delivered to Bob]", "me: still there?"],
+        "got: {history}"
+    );
 
     std::fs::remove_dir_all(&dir).expect("clean up temp dir");
 }

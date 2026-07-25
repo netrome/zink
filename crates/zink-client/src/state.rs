@@ -5,6 +5,11 @@
 //! - `conversations/<conv-id-hex>/<message-id-hex>.env` — one file per
 //!   envelope, content = canonical wire bytes. The DAG is rebuilt from
 //!   these on demand (out-of-order insert is the store's normal mode).
+//! - `conversations/<conv-id-hex>/<message-id-hex>.acks` — delivery
+//!   confirmations (De7): the recipient device keys that returned D5's
+//!   `Stored` ack, concatenated raw. The C4a ledger's third rung, scoped to
+//!   the conversation so it dies with it. Positive-only — absence means "no
+//!   confirmation", never "undelivered".
 //! - `participants/<fingerprint-hex>` — maps a participant set to its
 //!   conversation id. "One conversation per participant set" is *client
 //!   policy* (SPEC tenet 4), not protocol: sender and recipients land in
@@ -26,13 +31,13 @@
 //!   removed on per-relay success; three text lines (relay dial string,
 //!   conversation hex, created-ms).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::error::Error;
 use zink_protocol::{
-    BlobHash, Claim, ContactRecord, ConversationDag, MessageEnvelope, MessageId, PublicKey,
-    RelayEntry, SignedAttestation,
+    BlobHash, Claim, ContactRecord, ConversationDag, MessageCore, MessageEnvelope, MessageId,
+    PublicKey, RelayEntry, SignedAttestation,
 };
 
 #[derive(Clone, Debug)]
@@ -143,28 +148,30 @@ impl ClientState {
     /// irrelevant — the store accepts children before parents. Only a
     /// missing genesis is unrecoverable (there is no root to build on).
     pub fn load_dag(&self, conversation: MessageId) -> Result<ConversationDag, Error> {
-        let mut cores: Vec<_> = self
+        let cores = self
             .load_envelopes(conversation)?
             .into_iter()
             .map(|envelope| envelope.core)
             .collect();
-        let genesis_at = cores
+        build_dag(cores, conversation)
+    }
+
+    /// `load_dag` over envelopes the caller already holds. Same rebuild,
+    /// without reading and BORSH-decoding the whole conversation a second
+    /// time: `history` and `conversations` load the envelopes anyway, so
+    /// going back to disk for the DAG doubled the cost of every render —
+    /// and both run on each `new-messages` event. Clones the cores, which
+    /// is the allocation a re-read would have made regardless, minus the
+    /// syscalls and the decode.
+    pub fn dag_of(
+        envelopes: &[MessageEnvelope],
+        conversation: MessageId,
+    ) -> Result<ConversationDag, Error> {
+        let cores = envelopes
             .iter()
-            .position(|core| core.conversation.is_none())
-            .ok_or_else(|| {
-                Error::Conversation(format!(
-                    "conversation {} has no genesis on disk",
-                    hex(&conversation.0)
-                ))
-            })?;
-        let mut dag = ConversationDag::new(cores.swap_remove(genesis_at))
-            .map_err(|e| Error::Conversation(format!("stored genesis invalid: {e}")))?;
-        for core in cores {
-            if let Err(e) = dag.insert(core) {
-                tracing::warn!(error = %e, "skipping invalid stored message");
-            }
-        }
-        Ok(dag)
+            .map(|envelope| envelope.core.clone())
+            .collect();
+        build_dag(cores, conversation)
     }
 
     /// One stored envelope by message id, wherever it lives. Content is
@@ -294,6 +301,65 @@ impl ClientState {
             hex(&message.0),
             &fingerprint.as_str()[..16]
         ))
+    }
+
+    /// Record recipient devices that confirmed a **durable store** of
+    /// `message` — D5's `Stored` ack, surfaced by De7. The outbox's third
+    /// rung: `pending` says we still owe a relay, a cleared entry says the
+    /// relay took it, and this says the *recipient's own device* has it.
+    /// The ack is transient and cannot be recovered afterwards (a message
+    /// with no outbox entries is equally direct-acked or deposited fine),
+    /// so it is written when it happens or never.
+    ///
+    /// **Unioned, never replaced:** `deliver` runs again on a flush or a
+    /// retry and may reach a device the first pass missed; a later pass
+    /// that reaches nobody must not erase what an earlier one earned.
+    pub fn add_acks(
+        &self,
+        conversation: MessageId,
+        message: MessageId,
+        keys: &BTreeSet<PublicKey>,
+    ) -> Result<(), Error> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let path = self.acks_path(conversation, message);
+        let mut all = read_keys(&path);
+        all.extend(keys.iter().copied());
+        let bytes: Vec<u8> = all.iter().flat_map(|key| key.0).collect();
+        create_parent(&path)?;
+        write_atomic(&path, &bytes).map_err(|e| Error::Storage(format!("write {path:?}: {e}")))
+    }
+
+    /// Every confirmation sidecar in a conversation, by message id — one
+    /// directory scan per history render rather than a read per message.
+    /// Absent entries are simply absent: no confirmation held is the
+    /// default, and never means "not delivered" (De7, tenet 7).
+    pub fn acks_in(&self, conversation: MessageId) -> BTreeMap<MessageId, Vec<PublicKey>> {
+        let dir = self.conversation_dir(conversation);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return BTreeMap::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "acks") {
+                    return None;
+                }
+                let id = MessageId(crate::hex::parse32(path.file_stem()?.to_str()?).ok()?);
+                let keys = read_keys(&path);
+                (!keys.is_empty()).then(|| (id, keys.into_iter().collect()))
+            })
+            .collect()
+    }
+
+    /// Beside the envelope, not under `outbox/`: scoped to the conversation
+    /// so it dies with it, and `load_envelopes` already ignores anything
+    /// that isn't `.env`, so the loader needs no change.
+    fn acks_path(&self, conversation: MessageId, message: MessageId) -> PathBuf {
+        self.conversation_dir(conversation)
+            .join(format!("{}.acks", hex(&message.0)))
     }
 
     pub fn save_profile(&self, name: &str, relays: &[RelayEntry]) -> Result<(), Error> {
@@ -840,6 +906,46 @@ fn decode_attestations(bytes: &[u8]) -> Vec<SignedAttestation> {
         rest = &rest[len..];
     }
     list
+}
+
+/// The shared rebuild behind `load_dag` / `dag_of`. A missing genesis is
+/// the only unrecoverable case; individual invalid messages are skipped so
+/// one bad file can't hide a whole conversation.
+fn build_dag(
+    mut cores: Vec<MessageCore>,
+    conversation: MessageId,
+) -> Result<ConversationDag, Error> {
+    let genesis_at = cores
+        .iter()
+        .position(|core| core.conversation.is_none())
+        .ok_or_else(|| {
+            Error::Conversation(format!(
+                "conversation {} has no genesis on disk",
+                hex(&conversation.0)
+            ))
+        })?;
+    let mut dag = ConversationDag::new(cores.swap_remove(genesis_at))
+        .map_err(|e| Error::Conversation(format!("stored genesis invalid: {e}")))?;
+    for core in cores {
+        if let Err(e) = dag.insert(core) {
+            tracing::warn!(error = %e, "skipping invalid stored message");
+        }
+    }
+    Ok(dag)
+}
+
+/// Keys from an `.acks` sidecar (concatenated raw 32-byte keys). A damaged
+/// tail is dropped like every advisory store — a lost confirmation renders
+/// as *no* confirmation, which is already the honest default (De7).
+fn read_keys(path: &std::path::Path) -> BTreeSet<PublicKey> {
+    std::fs::read(path)
+        .map(|bytes| {
+            bytes
+                .chunks_exact(32)
+                .map(|chunk| PublicKey(chunk.try_into().expect("32 bytes")))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn create_parent(path: &std::path::Path) -> Result<(), Error> {

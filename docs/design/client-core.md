@@ -115,7 +115,11 @@ client.fetch_blob(&Received, &BlobHash) -> Vec<u8>              // cache, else t
 client.conversations() -> Vec<ConversationSummary>   // id, participant keys, count,
                                               // last timestamp — naming is the edge's
 client.history(conversation) -> Vec<HistoryMessage>  // linearized; bodies opened per
-                                              // message (self-wrap covers own sends)
+                                              // message (self-wrap covers own sends).
+                                              // .confirmed = recipient devices that
+                                              // acked a durable store (De7) —
+                                              // POSITIVE-ONLY: empty means no
+                                              // confirmation, never "undelivered"
 client.fetch_stored_blob(conversation, message, &BlobHash) -> Vec<u8>
                                               // cache, else own home relays (that's
                                               // where senders push blobs for us)

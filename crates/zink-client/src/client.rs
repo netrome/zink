@@ -555,6 +555,15 @@ impl Client {
         let direct = self
             .deliver_direct(envelope, &envelope.core.recipients)
             .await;
+        // De7: persist the ack before anything else can fail. It is the one
+        // fact here that cannot be reconstructed later — an outbox-clear
+        // looks identical whether the recipient acked or a relay simply
+        // took the deposit. Best-effort: a device that told us it stored
+        // the message *has* it, so a failed sidecar write must not fail a
+        // send; it costs the confirmation, not the delivery.
+        if let Err(error) = self.state.add_acks(conversation, id, &direct) {
+            tracing::warn!(%error, "could not record a delivery confirmation");
+        }
 
         // Which relays direct delivery discharges entirely (direct-delivery
         // .md §3): every recipient the relay hosts acked. The outbox ledger
@@ -1270,9 +1279,7 @@ impl Client {
         conversation: MessageId,
         envelopes: &[MessageEnvelope],
     ) -> BTreeSet<PublicKey> {
-        let heads = self
-            .state
-            .load_dag(conversation)
+        let heads = ClientState::dag_of(envelopes, conversation)
             .ok()
             .map(|dag| dag.heads());
         envelopes
@@ -1360,8 +1367,9 @@ impl Client {
             .iter()
             .map(|envelope| (envelope.id(), envelope))
             .collect();
-        let dag = self.state.load_dag(conversation)?;
+        let dag = ClientState::dag_of(&envelopes, conversation)?;
         let pending = self.state.pending_messages();
+        let confirmed = self.state.acks_in(conversation);
         let crossed = dag.crossed_in_flight();
         Ok(dag
             .linearize()
@@ -1381,6 +1389,7 @@ impl Client {
                     left,
                     crossed: crossed.contains(&id),
                     merged: envelope.core.parents.len() > 1,
+                    confirmed: confirmed.get(&id).cloned().unwrap_or_default(),
                 }
             })
             .collect())
@@ -3225,6 +3234,16 @@ pub struct HistoryMessage {
     pub crossed: bool,
     /// Merges concurrent branches (more than one parent).
     pub merged: bool,
+    /// Recipient devices that confirmed a durable store of this message
+    /// (De7) — D5's `Stored` ack, attributable to the **recipient's own
+    /// device key**, not to a relay. Only ever non-empty for our own sends.
+    ///
+    /// **Positive-only** (tenet 7, honesty over false order): a key here
+    /// has confirmed; absence means *no confirmation was received*, never
+    /// "not delivered" — the recipient may well hold it via the mailbox and
+    /// simply have no way to say so. `pending` remains the only negative
+    /// signal, and it means "we still owe a relay".
+    pub confirmed: Vec<PublicKey>,
 }
 
 /// One message's participant set: `recipients` ∪ `sender` (signed core).
@@ -3783,6 +3802,157 @@ mod tests {
         assert!(live[0].relay.is_none(), "no relay was on the path");
 
         let _ = std::fs::remove_dir_all(temp_root("direct"));
+    }
+
+    #[tokio::test]
+    async fn deliver__should_record_the_recipients_own_ack_as_a_confirmation() {
+        // Given: A and B able to reach each other peer-to-peer (D5), so the
+        // send earns a `Stored` ack from B's *own device key* — the only
+        // party whose word means "delivered" (a relay's `Deposited` doesn't).
+        let (_relay_a, url_a) = spawn_test_relay().await;
+        let (_relay_b, url_b) = spawn_test_relay().await;
+        let a = open_homed("confirm", "a", &url_a).await;
+        let b = open_homed("confirm", "b", &url_b).await;
+        b.add_contact(
+            &record_with_dead_mailbox(a.public_key(), &url_a),
+            Some("a".to_string()),
+        )
+        .expect("B adds A");
+        a.add_contact(
+            &record_with_dead_mailbox(b.public_key(), &url_b),
+            Some("b".to_string()),
+        )
+        .expect("A adds B");
+        b.endpoint.online().await;
+
+        // When
+        let receipt = a
+            .send(
+                &[a.resolve_contact("b").expect("resolve")],
+                b"did you get this".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("send");
+        assert_eq!(receipt.direct_recipients, 1, "the ack came back");
+
+        // Then: the sender's history names the device that confirmed it —
+        // the D5 ack, which before De7 was computed and thrown away.
+        let history = a.history(receipt.conversation).expect("A history");
+        assert_eq!(history[0].confirmed, vec![b.public_key()]);
+        assert!(!history[0].pending, "and nothing is still owed");
+
+        // …and it survives a reopen: the ack is transient, the record isn't.
+        drop(a);
+        let a = open_homed("confirm", "a", &url_a).await;
+        assert_eq!(
+            a.history(receipt.conversation).expect("A history")[0].confirmed,
+            vec![b.public_key()],
+            "the confirmation is persisted, not in-memory"
+        );
+
+        // …while B's own copy claims nothing: a confirmation is something a
+        // *sender* holds about a recipient, never a self-report.
+        let received = b.history(receipt.conversation).expect("B history");
+        assert!(
+            received[0].confirmed.is_empty(),
+            "the recipient does not confirm to itself"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("confirm"));
+    }
+
+    #[tokio::test]
+    async fn history__should_report_no_confirmation_rather_than_a_failure() {
+        // Given: a recipient nobody can reach — no peer to ack, no mailbox
+        // to deposit in. The rendering rule (tenet 7) is what's under test:
+        // absence of a confirmation must read as *silence*, not as a
+        // negative claim, because the mailbox path never produces an ack
+        // even when it delivers perfectly well.
+        let key_path = temp_key("unconfirmed", "a");
+        keystore::create(&key_path).expect("key");
+        let a = Client::open_with(
+            &key_path,
+            ClientConfig {
+                connect_timeout: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("open");
+        let absent = DeviceKey::from_seed([62; 32]).public();
+        let contact = Contact {
+            keys: vec![absent],
+            relays: vec![format!("{}@203.0.113.9:1", hex::encode(&absent.0))],
+        };
+
+        // When
+        let staged = a
+            .stage_send(&[contact], b"into the void".to_vec(), vec![])
+            .expect("stage");
+        let _ = a.deliver(&staged).await; // every path fails; queued, not lost
+
+        // Then: no confirmation is claimed, and `pending` — not the empty
+        // confirmation — carries the honest "we still owe a relay".
+        let history = a.history(staged.conversation).expect("history");
+        assert!(
+            history[0].confirmed.is_empty(),
+            "nothing acked, so nothing is claimed"
+        );
+        assert!(history[0].pending, "the ledger still owes the delivery");
+        assert_eq!(
+            history[0].body.as_deref(),
+            Ok(b"into the void".as_slice()),
+            "and the message renders regardless"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("unconfirmed"));
+    }
+
+    #[tokio::test]
+    async fn add_acks__should_union_so_a_later_pass_cannot_erase_a_confirmation() {
+        // Given: a stored message confirmed by one of two recipients
+        let client = Client::open_or_create(&temp_key("acks", "a"))
+            .await
+            .expect("open");
+        let author = DeviceKey::from_seed([71; 32]);
+        let (first, second) = (
+            DeviceKey::from_seed([72; 32]).public(),
+            DeviceKey::from_seed([73; 32]).public(),
+        );
+        let genesis = message(&author, vec![first, second], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        client
+            .state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+        client
+            .state
+            .add_acks(conversation, genesis.id(), &BTreeSet::from([first]))
+            .expect("first ack");
+
+        // When: a later delivery pass reaches the *other* recipient, and
+        // then one that reaches nobody (a flush with everyone offline)
+        client
+            .state
+            .add_acks(conversation, genesis.id(), &BTreeSet::from([second]))
+            .expect("second ack");
+        client
+            .state
+            .add_acks(conversation, genesis.id(), &BTreeSet::new())
+            .expect("empty pass");
+
+        // Then: both are held — confirmations accumulate, and a pass that
+        // earned nothing takes nothing away. (Stored key-sorted, so compare
+        // as a set: the order is the store's, not the acks' arrival order.)
+        let held = client.state.acks_in(conversation);
+        assert_eq!(
+            held.get(&genesis.id())
+                .map(|keys| keys.iter().copied().collect::<BTreeSet<_>>()),
+            Some(BTreeSet::from([first, second]))
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("acks"));
     }
 
     #[test]

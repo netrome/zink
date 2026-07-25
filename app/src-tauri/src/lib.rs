@@ -573,6 +573,14 @@ async fn messages(
                 .iter()
                 .map(|key| label(&contacts, key))
                 .collect(),
+            // De7, positive-only: labelled off the already-loaded contacts
+            // and devices rather than `participant_labels`, which re-reads
+            // both stores per call — this runs inside a per-message map.
+            confirmed: message
+                .confirmed
+                .iter()
+                .map(|key| device_name(key).unwrap_or_else(|| label(&contacts, key)))
+                .collect(),
             mine: message.sender == me,
             text: message
                 .body
