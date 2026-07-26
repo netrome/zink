@@ -17,12 +17,21 @@
 //!
 //! ```text
 //! zink-relay [data-dir] [--port <udp-port>] [--relay-port <tcp-port>]
-//!            # defaults: ./zink-relay-data, ephemeral, ephemeral
+//!            [--allow-list <file>] [--max-mailboxes <n>] [--blob-budget <MiB>]
+//!            # defaults: ./zink-relay-data, ephemeral, ephemeral,
+//!            #           open, 128, 2048
 //! ```
 //!
 //! A deployed relay wants a fixed `--port` and `--relay-port` so its
 //! printed spec survives restarts (the endpoint key already does, via
 //! `relay.key`).
+//!
+//! **Bounded on purpose (R1/R2).** Both stores have a ceiling and the binary
+//! prints their sum on every start: mailboxes by admission policy + a
+//! per-mailbox byte cap, blobs by a total budget the sweep evicts down to.
+//! Blob pushes stay *ungated* — a sender pushing for one of our recipients is
+//! legitimate and will not be on any allow-list — so bytes, not identity, are
+//! what bounds them.
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -31,7 +40,7 @@ use iroh::endpoint::presets;
 use iroh::{Endpoint, SecretKey};
 use iroh_relay::server::{QuicConfig, RelayConfig, Server, ServerConfig};
 use zink_relay::admission::{AllowListFile, OpenToAll};
-use zink_relay::blobs::{BlobCacheConfig, fs_blob_cache};
+use zink_relay::blobs::{BlobCacheConfig, DEFAULT_BLOB_BUDGET_BYTES, fs_blob_cache};
 use zink_relay::clock::SystemClock;
 use zink_relay::fs::FsMailboxStore;
 use zink_relay::mailbox::MailboxService;
@@ -40,6 +49,7 @@ use zink_relay::store::{DEFAULT_MAILBOX_MAX_BYTES, DEFAULT_MAX_MAILBOXES};
 
 const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>] [--relay-port <tcp-port>]
                    [--allow-list <file>] [--max-mailboxes <n>]
+                   [--blob-budget <MiB>]
 
   data-dir          where mailboxes, the blob cache, and the relay's identity
                     key live (default: ./zink-relay-data)
@@ -59,6 +69,12 @@ const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>] [--relay-p
                     hard ceiling on hosted mailboxes (default: 128). With
                     --allow-list this is belt-and-braces; without it, it is
                     the only thing bounding the mailbox count
+  --blob-budget <MiB>
+                    total size of the encrypted blob cache (default: 2048).
+                    Blob pushes are deliberately UNGATED — a sender pushing
+                    for your friend is legitimate and won't be on any list —
+                    so a size budget, not an allow-list, is what bounds them.
+                    Over budget, the sweep evicts oldest-pushed first
   -h, --help        this text
   -V, --version     version + build info";
 
@@ -81,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         relay_port,
         allow_list,
         max_mailboxes,
+        blob_budget,
     } = parse_args();
     std::fs::create_dir_all(&data_dir)?;
 
@@ -113,15 +130,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  QAD: udp/{relay_http_port} (self-signed TLS)");
 
     let mailboxes = FsMailboxStore::new(data_dir.join("mailboxes"));
-    let blob_store = fs_blob_cache(
-        &data_dir.join("blobs"),
-        BlobCacheConfig::default(),
-        SystemClock,
-    )
-    .await?;
-    // The mailbox ceiling, stated up front: an operator running this beside
-    // other services should not have to read the source to know the worst
-    // case. (Blob-cache bytes are NOT yet bounded — see the R2 slice.)
+    let blob_config = BlobCacheConfig {
+        max_total_bytes: blob_budget,
+        ..BlobCacheConfig::default()
+    };
+    let blob_store = fs_blob_cache(&data_dir.join("blobs"), blob_config, SystemClock).await?;
+    // Both ceilings, stated up front: an operator running this beside other
+    // services should not have to read the source to know the worst case.
     let who = match &allow_list {
         Some(list) => format!("allow-list {}", list.path().display()),
         None => "OPEN to any key".to_string(),
@@ -131,7 +146,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         DEFAULT_MAILBOX_MAX_BYTES / (1 << 20),
         max_mailboxes as u64 * DEFAULT_MAILBOX_MAX_BYTES / (1 << 20),
     );
-    println!("  blobs: NOT yet bounded in total (per-blob 64 MiB, 30-day TTL)");
+    println!(
+        "  blobs: ungated pushes, ≤ {} MiB each · budget {} MiB (oldest evicted first)",
+        blob_config.max_blob_bytes / (1 << 20),
+        blob_budget / (1 << 20),
+    );
+    // The one number an operator actually needs: what this data dir can grow
+    // to. Stating it beats making them add up three caps from the source.
+    println!(
+        "  → data dir bounded at ≈ {} MiB total",
+        (max_mailboxes as u64 * DEFAULT_MAILBOX_MAX_BYTES + blob_budget) / (1 << 20),
+    );
     // Two admission types monomorphize to two service types; the router is
     // concrete, so each arm builds and spawns its own.
     let router = match allow_list {
@@ -219,6 +244,7 @@ struct Args {
     /// `None` = open to any key (still capped by `max_mailboxes`).
     allow_list: Option<AllowListFile>,
     max_mailboxes: usize,
+    blob_budget: u64,
 }
 
 /// The flags in [`USAGE`], in any order. `-h`/`-V` print and exit; argument
@@ -234,6 +260,7 @@ fn parse_args() -> Args {
     let mut relay_port = None;
     let mut allow_list = None;
     let mut max_mailboxes = DEFAULT_MAX_MAILBOXES;
+    let mut blob_budget = DEFAULT_BLOB_BUDGET_BYTES;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -279,6 +306,16 @@ fn parse_args() -> Args {
                     Err(e) => bad(&format!("--max-mailboxes: {e}")),
                 }
             }
+            "--blob-budget" => {
+                let Some(value) = args.next() else {
+                    bad("missing value for --blob-budget");
+                };
+                match value.parse::<u64>() {
+                    Ok(0) => bad("--blob-budget must be at least 1 MiB"),
+                    Ok(mib) => blob_budget = mib * (1 << 20),
+                    Err(e) => bad(&format!("--blob-budget: {e}")),
+                }
+            }
             flag if flag.starts_with('-') => bad(&format!("unknown flag {flag}")),
             _ if data_dir.is_some() => bad("more than one data-dir given"),
             _ => data_dir = Some(PathBuf::from(arg)),
@@ -290,6 +327,7 @@ fn parse_args() -> Args {
         relay_port,
         allow_list,
         max_mailboxes,
+        blob_budget,
     }
 }
 

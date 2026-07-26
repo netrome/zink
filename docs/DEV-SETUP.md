@@ -205,11 +205,23 @@ journalctl --user -u zink-relay -n 5   # the running relay logs its version
   created before that change keeps its old mode — `chmod 600` it once.
 - Abuse caps: 30-day mailbox retention, 1024 items **and 8 MiB** per mailbox,
   30-day blob TTL, 64 MiB max blob (oversized pushes are *evicted on the next
-  sweep* — iroh-blobs 0.103 cannot reject a push mid-stream).
-- **Bounding the mailbox store (R1).** The relay prints its ceiling on every
-  start (`mailboxes: … max 128 · ≤ 8 MiB each → ≤ 1024 MiB total`) so you
-  never have to read the source to know the worst case. On a box running
-  other services, gate registration to people you know:
+  sweep* — iroh-blobs 0.103 cannot reject a push mid-stream), and a **total
+  blob budget** (default 2 GiB).
+- **Bounding the data dir (R1/R2).** The relay prints both ceilings and their
+  sum on every start, so you never read source to learn the worst case:
+
+  ```
+  mailboxes: allow-list /…/allowed-keys · max 128 · ≤ 8 MiB each → ≤ 1024 MiB total
+  blobs: ungated pushes, ≤ 64 MiB each · budget 2048 MiB (oldest evicted first)
+  → data dir bounded at ≈ 3072 MiB total
+  ```
+
+  `--blob-budget <MiB>` moves the blob half; `--max-mailboxes` the other.
+  Blob pushes are **deliberately ungated** — a sender pushing an image for
+  your friend is legitimate and will not be on any allow-list — so bytes,
+  not identity, are what bound them. Over budget, the hourly sweep evicts
+  oldest-pushed first. On a box running other services, also gate
+  registration to people you know:
 
   ```sh
   # one hex key per line; '#' comments. `zink-cli pubkey <key-file>` prints one.
@@ -224,5 +236,9 @@ journalctl --user -u zink-relay -n 5   # the running relay logs its version
   rather than silently reopening it. Without `--allow-list` the relay is open
   to any key and bounded only by `--max-mailboxes` (default 128), which is
   first-come-first-served — fine for a throwaway, not for a shared box.
-- ⚠️ **The blob cache is not yet bounded in total** — per-blob and per-age
-  only. Until that lands, budget for it separately from the mailbox ceiling.
+- **What the ceiling does *not* cover:** a full mailbox silently skips new
+  deposits, so someone who fills a friend's 8 MiB can crowd out their real
+  mail until they drain. Bounding storage is what creates that; the fix is
+  SPEC §8's deferred capability grant, not a bigger cap. Reaching it needs
+  their device key *and* their relay's dial string — i.e. their QR — so
+  there is no internet-scannable surface today.

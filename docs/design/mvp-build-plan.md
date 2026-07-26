@@ -47,9 +47,14 @@ so these are deliberately deferred rather than forgotten:
 
 | Item | Why it blocks a release |
 |---|---|
-| **R2 · relay blob-cache bounds** | R1 bounded the mailbox store; the blob cache is still **ungated and unbounded in total** (64 MiB/blob, 30-day TTL, no size budget) — the dominant disk term on a shared server. |
-| **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change — a *UX* protection, not a disk one (that's R1/R2). |
+| **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change — a *UX* protection, not a disk one (that's R1/R2, both done). |
 | **Per-type format versions** | One global `FORMAT_VERSION` forks the whole protocol on any single bump — fine while every install is ours, untenable once two builds coexist. |
+
+*Relay disk is **bounded** as of R1+R2 — the binary prints the ceiling on every
+start. What remains unaddressed is **crowding** (a full mailbox skips new
+deposits), whose fix is SPEC §8's deferred capability grant; the reasoning is
+recorded under "Relay-side sender gating" above rather than left to be
+re-derived.*
 
 **Known, deliberately unscheduled:** De4 (e2e harness latency — re-measure before
 trusting the original estimate) · De6e (relay presence — declined as an op; a
@@ -1635,21 +1640,64 @@ Not scheduled into a stage; must land before any build leaves our hands.
   data dir holds one directory per admitted key. Docs: SPEC §5.3,
   mailbox-wire-protocol.md, DEV-SETUP §5.
   ⚠️ **This does NOT bound the relay yet** — see R2 below.
-- [ ] **R2 · Relay bounds: the blob cache.** The other half, and the *dominant*
-  disk term. `BlobsProtocol` accepts pushes from **anyone** (ungated — no
-  registration, no allow-list), with a 64 MiB per-blob cap and a 30-day TTL but
-  **no total size cap**: `BlobCacheConfig` has `ttl`, `gc_interval` and
-  `max_blob_bytes` and nothing else. So the mailbox ceiling R1 prints is only
-  part of the story, and the relay's data dir is still unbounded. Shape: a total
-  byte budget enforced in the existing sweep — it already enumerates
-  `pushed-<ms>-<hash>` retention tags in timestamp order, so "evict oldest until
-  under budget" is a natural extension rather than new machinery. Open question
-  worth ten minutes first: whether pushes should be gated to the keys that hold
-  mailboxes here (the R1 allow-list) — a sender pushing blobs for *our* recipient
-  is legitimate and generally isn't one of them, so the honest answer is probably
-  a size budget rather than a gate. *Done when:* the relay prints a total disk
-  ceiling covering both stores, and a push flood past the budget evicts rather
-  than grows.
+- [x] **R2 · Relay bounds: the blob cache.** *(2026-07-26.)* The other half, and
+  the dominant disk term: `BlobsProtocol` accepts pushes from **anyone**
+  (ungated — no registration, no allow-list) with a 64 MiB per-blob cap and a
+  30-day TTL but **no total size cap**, so the cache grew without limit until
+  the TTL caught up a month later. Added `BlobCacheConfig::max_total_bytes`
+  (default 2 GiB, `--blob-budget <MiB>`), enforced in the existing sweep: TTL
+  and per-blob evictions first, then oldest-pushed-first down to the budget.
+  **The open question resolved as expected: no push gate.** A sender pushing an
+  image for *our* recipient is legitimate and will essentially never be on the
+  R1 allow-list, so bytes — not identity — are what bound blobs.
+  **The subtle part is grouping by hash, not by tag.** A re-push writes a
+  *second* `pushed-<ms>-<hash>` tag rather than replacing the first, so summing
+  per tag double-counts the bytes *and* deleting one tag frees nothing while the
+  other still protects the blob. Eviction therefore drops **all** of a hash's
+  tags at once, and a hash's age is its **newest** tag (the documented
+  "re-pushing keeps it alive" semantics). **Verified as a regression test** by
+  restoring per-tag counting: only
+  `sweep_tags__should_not_double_count_a_re_pushed_blob` failed. Also folded in:
+  the oversize check was doing *two* `blobs().status()` awaits per tag; one
+  lookup now feeds both the size test and the budget.
+  A partial push with an unknown size counts 0 — mid-negotiation, counted next
+  sweep rather than guessed at. Untagged blobs are ignored (nothing protects
+  them; GC takes them anyway). No new dependency: tag names are held as
+  `Vec<u8>` rather than pulling in `bytes`.
+  218 → **222 tests**. The binary now prints both ceilings and their sum —
+  `→ data dir bounded at ≈ 768 MiB total` — which was the whole point: one
+  number for a box running other services. Docs: DEV-SETUP §5.
+- [ ] **Relay-side sender gating — deferred to SPEC §8, design settled.**
+  *(Discussed 2026-07-26.)* R1/R2 bound *storage*; they do not stop **crowding**
+  — a full mailbox silently skips new deposits, so someone who fills a friend's
+  8 MiB blocks their real mail until they drain. Bounding storage is what
+  creates that, so no cap fixes it. Two mechanisms were weighed:
+  - **Capability grant (SPEC §8, the answer).** The sender presents an
+    unforgeable token the recipient issued; the relay verifies it *without
+    maintaining an allowlist*. §3.6 already names the delivery vehicle — the QR
+    is "the natural place to later hand over an initial capability grant so a
+    new contact can message you from the start". The pieces already fit.
+  - **Uploading an allowed-senders policy to the relay — rejected.** It hands an
+    **untrusted** party (tenet 5) the whole social graph up front, including
+    people you have never messaged; today the relay learns it slowly and
+    partially from `sender`/`recipients` on traffic it already carries. It also
+    puts per-user state on a component that is meant to be minimal and
+    interchangeable. This is exactly the variant §8's "without maintaining an
+    allowlist" clause rules out.
+  Also checked and **discarded**: per-`(mailbox, sender)` fair-share. The relay
+  already reads `sender`, so it could cap any one sender at a fraction of a
+  mailbox with no new primitive and no graph upload — but sender keys are free
+  to generate, so a Sybil walks through it. Nothing resists that except
+  something unforgeable and tied to the recipient, which is why §8 landed where
+  it did; there is no cheap version.
+  **Not scheduled** on reach: depositing into a mailbox needs the recipient's
+  device key *and* their relay's dial string, both of which come only from their
+  ContactRecord — so there is no internet-scannable surface, and the attacker
+  has to be someone who was given the QR or whom it leaked to. Real, bounded,
+  and not the pre-MVP priority.
+  *(Also considered: per-key mailbox sizes, `key X → size Y`. Cheap and
+  unobjectionable, but no forcing case — uniform 8 MiB stands until someone
+  actually needs more.)*
 - [ ] **Unknown-sender quarantine.** Anyone holding a record can deposit
   (mutuality is not required — that's what makes one-way adds work), so an
   unknown key can fill a mailbox and the conversation list with noise. Client
