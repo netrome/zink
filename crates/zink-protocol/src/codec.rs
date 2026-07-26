@@ -4,6 +4,8 @@ use std::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
+use crate::Versioned;
+
 /// Decoding failure on bytes from the outside world. Never a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
@@ -38,11 +40,15 @@ pub(crate) fn content_hash<T: BorshSerialize>(value: &T) -> [u8; 32] {
 /// Decode a wire object whose first field is the `u16` format version.
 ///
 /// The version is checked *before* the full parse so an unknown future version is
-/// surfaced as such, never misparsed (SPEC §10).
-pub(crate) fn decode_versioned<T: BorshDeserialize>(bytes: &[u8]) -> Result<T, DecodeError> {
+/// surfaced as such, never misparsed (SPEC §10). The accepted set is **the
+/// decoded type's own** ([`Versioned::ACCEPTED`]), so a bump to one object
+/// never rejects another — see the trait for why that was worth the trouble.
+pub(crate) fn decode_versioned<T: BorshDeserialize + Versioned>(
+    bytes: &[u8],
+) -> Result<T, DecodeError> {
     let version_bytes = bytes.get(..2).ok_or(DecodeError::Malformed)?;
     let version = u16::from_le_bytes(version_bytes.try_into().expect("slice of length 2"));
-    if version != crate::FORMAT_VERSION {
+    if !T::supports(version) {
         return Err(DecodeError::UnsupportedVersion { found: version });
     }
     T::try_from_slice(bytes).map_err(|_| DecodeError::Malformed)

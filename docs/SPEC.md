@@ -486,6 +486,14 @@ custom conversation views — is **client policy/UX**.
   (Protobuf and bincode are unsuitable for the hashed objects.)
 - BORSH is not self-describing, so **every object begins with an explicit `version`**
   tag; unknown future versions are ignored or surfaced, never misparsed.
+- **Versions are per type, not global** *(2026-07-26)*. Each versioned object owns
+  its own current number and its own set of accepted numbers, so a change to one
+  never forks the others: `ContactRecord` can move to 2 and accept `{1, 2}` while
+  `MessageCore` stays at 1. That last part is the load-bearing one —
+  `MessageCore.version` sits **inside the hashed core**, so bumping it re-hashes
+  every message in existence; per-type versioning is what stops an unrelated
+  addition dragging content-addressing with it. A decoder judges bytes against
+  *the decoded type's* accepted set.
 
 ---
 

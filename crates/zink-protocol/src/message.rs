@@ -5,7 +5,7 @@ use std::fmt;
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand_core::CryptoRngCore;
 
-use crate::FORMAT_VERSION;
+use crate::Versioned;
 use crate::codec::{self, DecodeError};
 use crate::crypto::{ContentKey, CryptoError};
 use crate::keys::{self, DeviceKey, PublicKey, Signature, VerifyError};
@@ -32,6 +32,16 @@ pub struct MessageCore {
     pub body: Vec<u8>,
     pub key_commit: KeyCommitment,
     pub blob_refs: Vec<BlobRef>,
+}
+
+/// **The one version that moves message ids.** `version` is a field of the
+/// hashed core, so bumping it re-hashes every message in existence. Any
+/// change here needs a migration story for stored ids, which is exactly why
+/// per-type versioning exists — so evolving the *other* objects never
+/// forces this one to move.
+impl Versioned for MessageCore {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
 }
 
 impl MessageCore {
@@ -87,6 +97,13 @@ pub struct MessageEnvelope {
     pub key_wraps: Vec<KeyWrap>,
 }
 
+/// Transport framing, versioned independently of the core it carries
+/// (SPEC §4.1) — the whole point of the pair.
+impl Versioned for MessageEnvelope {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl MessageEnvelope {
     /// Encrypt and package a draft: body and each blob encrypted once with
     /// their own fresh content-keys, every key committed in the core and
@@ -140,7 +157,7 @@ impl MessageEnvelope {
             })
             .collect::<Result<Vec<_>, CryptoError>>()?;
         let core = MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: draft.conversation,
             parents: draft.parents,
             recipients: draft.recipients,
@@ -261,7 +278,7 @@ impl MessageEnvelope {
     pub fn new(core: MessageCore, sender_key: &DeviceKey) -> Self {
         let sig = sender_key.sign_hash(&core.id().0);
         Self {
-            version: FORMAT_VERSION,
+            version: Self::CURRENT,
             core,
             sig,
             key_wraps: Vec::new(),
@@ -270,6 +287,14 @@ impl MessageEnvelope {
 
     pub fn id(&self) -> MessageId {
         self.core.id()
+    }
+
+    /// Can this build read this envelope — framing *and* core (SPEC §4.1:
+    /// the two version independently, so both must be checked). Every
+    /// ingress path asks this before trusting an envelope; having one
+    /// answer beats three copies of the two-part comparison drifting apart.
+    pub fn version_supported(&self) -> bool {
+        Self::supports(self.version) && MessageCore::supports(self.core.version)
     }
 
     /// Check the sender's signature over the recomputed id.
@@ -285,7 +310,7 @@ impl MessageEnvelope {
         let envelope: Self = codec::decode_versioned(bytes)?;
         // The envelope and core versions evolve independently (SPEC §4.1);
         // check the inner tag too so a future core is surfaced, not misparsed.
-        if envelope.core.version != FORMAT_VERSION {
+        if !MessageCore::supports(envelope.core.version) {
             return Err(DecodeError::UnsupportedVersion {
                 found: envelope.core.version,
             });
@@ -448,7 +473,7 @@ mod tests {
 
     fn sample_core(sender: &DeviceKey) -> MessageCore {
         MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: Some(MessageId([1; 32])),
             parents: vec![MessageId([2; 32]), MessageId([3; 32])],
             recipients: vec![device_key(9).public()],

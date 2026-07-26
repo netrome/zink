@@ -83,9 +83,10 @@ MailboxResponse { version: u16, result }
 
 ⚠️ `refused` was appended to `MailboxErrorCode` in place at v1 (R1). BORSH tags enum
 variants by index, so a pre-R1 client decoding it fails the whole response rather than
-reading an unknown code — acceptable only because every install is ours. The parked
-**per-type format versions** item is what makes additions like this safe once two
-builds coexist.
+reading an unknown code — acceptable only because every install is ours. The *next*
+such addition should ride a `MailboxResponse` version bump instead: since per-type
+versioning landed, `MailboxResponse` can move to 2 and accept `{1, 2}` on its own,
+without disturbing `MessageCore` or anything else (SPEC §10).
 
 - **Cursor** = per-mailbox monotonic deposit index (relay-local, meaningless across
   relays). Each fetched item carries its cursor so the client acks precisely.

@@ -6,7 +6,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::FORMAT_VERSION;
+use crate::Versioned;
 use crate::attestation::SignedAttestation;
 use crate::codec::{self, DecodeError};
 use crate::contact_record::ContactRecord;
@@ -40,10 +40,15 @@ pub struct SyncRequest {
     pub op: SyncOp,
 }
 
+impl Versioned for SyncRequest {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl SyncRequest {
     pub fn new(op: SyncOp) -> Self {
         Self {
-            version: FORMAT_VERSION,
+            version: Self::CURRENT,
             op,
         }
     }
@@ -90,10 +95,15 @@ pub struct SyncResponse {
     pub result: SyncResult,
 }
 
+impl Versioned for SyncResponse {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl SyncResponse {
     pub fn new(result: SyncResult) -> Self {
         Self {
-            version: FORMAT_VERSION,
+            version: Self::CURRENT,
             result,
         }
     }
@@ -172,7 +182,7 @@ mod tests {
     fn sample_envelope() -> MessageEnvelope {
         let sender = DeviceKey::from_seed([1; 32]);
         let core = MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: None,
             parents: vec![],
             recipients: vec![DeviceKey::from_seed([2; 32]).public()],
@@ -195,7 +205,7 @@ mod tests {
         let subject = DeviceKey::from_seed([4; 32]);
         let attestation = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: subject.public(),
                 subject: subject.public(),
                 claim: Claim::Name("Carol".to_string()),
@@ -265,7 +275,7 @@ mod tests {
                     let voucher = DeviceKey::from_seed([6; 32]);
                     SignedAttestation::new(
                         Attestation {
-                            version: FORMAT_VERSION,
+                            version: Attestation::CURRENT,
                             attester: voucher.public(),
                             subject: DeviceKey::from_seed([4; 32]).public(),
                             claim: Claim::Name("Carol".to_string()),

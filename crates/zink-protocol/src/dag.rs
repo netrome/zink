@@ -239,7 +239,7 @@ impl std::error::Error for DagError {}
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::FORMAT_VERSION;
+    use crate::Versioned;
     use crate::keys::DeviceKey;
     use crate::message::KeyCommitment;
 
@@ -249,7 +249,7 @@ mod tests {
 
     fn genesis() -> MessageCore {
         MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: None,
             parents: vec![],
             recipients: vec![],
@@ -273,7 +273,7 @@ mod tests {
         marker: u8,
     ) -> MessageCore {
         MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: Some(dag.conversation()),
             parents,
             recipients: vec![],

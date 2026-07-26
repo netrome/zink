@@ -125,7 +125,7 @@ impl<S: MailboxStore, A: Admission> MailboxService<S, A> {
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use zink_protocol::{DeviceKey, FORMAT_VERSION, KeyCommitment, MessageCore, MessageEnvelope};
+    use zink_protocol::{DeviceKey, KeyCommitment, MessageCore, MessageEnvelope, Versioned};
 
     use super::*;
     use crate::store::{DEFAULT_MAILBOX_MAX_ITEMS, DEFAULT_MAILBOX_RETENTION, InMemoryStore};
@@ -137,7 +137,7 @@ mod tests {
     fn envelope_to(recipients: &[PublicKey], body: &[u8]) -> MessageEnvelope {
         let sender = device_key(1);
         let core = MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: None,
             parents: vec![],
             recipients: recipients.to_vec(),

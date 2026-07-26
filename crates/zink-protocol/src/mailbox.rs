@@ -4,7 +4,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::FORMAT_VERSION;
+use crate::Versioned;
 use crate::codec::{self, DecodeError};
 use crate::message::{MessageEnvelope, MessageId};
 
@@ -33,10 +33,15 @@ pub struct MailboxRequest {
     pub op: MailboxOp,
 }
 
+impl Versioned for MailboxRequest {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl MailboxRequest {
     pub fn new(op: MailboxOp) -> Self {
         Self {
-            version: FORMAT_VERSION,
+            version: Self::CURRENT,
             op,
         }
     }
@@ -69,10 +74,15 @@ pub struct MailboxResponse {
     pub result: MailboxResult,
 }
 
+impl Versioned for MailboxResponse {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl MailboxResponse {
     pub fn new(result: MailboxResult) -> Self {
         Self {
-            version: FORMAT_VERSION,
+            version: Self::CURRENT,
             result,
         }
     }
@@ -135,7 +145,7 @@ mod tests {
     fn sample_envelope() -> MessageEnvelope {
         let sender = DeviceKey::from_seed([1; 32]);
         let core = MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: None,
             parents: vec![],
             recipients: vec![DeviceKey::from_seed([2; 32]).public()],

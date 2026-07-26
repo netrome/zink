@@ -14,9 +14,8 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use rand_core::OsRng;
 use zink_protocol::{
-    ContactRecord, DeviceKey, FORMAT_VERSION, MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES,
-    MessageEnvelope, MessageId, PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest,
-    SyncResponse, SyncResult,
+    ContactRecord, DeviceKey, MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES, MessageEnvelope, MessageId,
+    PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest, SyncResponse, SyncResult,
 };
 
 use crate::client::Received;
@@ -192,7 +191,7 @@ impl SyncHandler {
             tracing::debug!("declining a direct delivery from a non-contact");
             return SyncResult::NotHeld;
         }
-        if envelope.version != FORMAT_VERSION || envelope.core.version != FORMAT_VERSION {
+        if !envelope.version_supported() {
             tracing::warn!("declining a direct delivery with an unsupported version");
             return SyncResult::NotHeld;
         }

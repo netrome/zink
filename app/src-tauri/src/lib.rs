@@ -140,10 +140,26 @@ fn notify_arrivals(
         return;
     }
     let contacts = client.contacts().unwrap_or_default();
+    // Own devices don't notify (De8 sweep): send-to-self (D3c) deposits every
+    // message to your other devices, so typing on the laptop used to buzz the
+    // phone — labelled as raw hex, since `label` doesn't read the devices
+    // store. You know what you just sent; the chat view still updates.
+    //
+    // **Receiver-side on purpose.** This device already holds
+    // `recognized_devices`, so it can tell a sibling from a contact without
+    // being told: a sender-set "don't notify" flag would put UX policy on the
+    // wire to carry a fact the receiver already has — and would enforce
+    // nothing anyway (tenet 3). A *silent-send* feature, where the sender
+    // genuinely knows something we don't, is a different question and belongs
+    // in the encrypted body as an advisory convention.
+    let own = client.own_keys();
     for message in messages {
         let Ok(body) = &message.body else {
             continue; // nothing readable to preview
         };
+        if own.contains(&message.envelope.core.sender) {
+            continue;
+        }
         if !notified
             .lock()
             .expect("notified lock")

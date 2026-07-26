@@ -2,6 +2,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
+use crate::Versioned;
 use crate::codec::{self, DecodeError};
 use crate::keys::{self, DeviceKey, PublicKey, Signature, VerifyError};
 use crate::message::BlobHash;
@@ -19,6 +20,11 @@ pub struct Attestation {
     pub revision: u64,
 }
 
+impl Versioned for Attestation {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl Attestation {
     pub fn id(&self) -> AttestationId {
         AttestationId(codec::content_hash(self))
@@ -31,6 +37,14 @@ pub struct SignedAttestation {
     pub attestation: Attestation,
     /// Ed25519 by `attestation.attester` over the id.
     pub sig: Signature,
+}
+
+/// The wrapper carries no version of its own: `attestation.version` is the
+/// first encoded field, so the leading peek in `decode_versioned` reads the
+/// inner one. Delegating keeps a single source of truth for the pair.
+impl Versioned for SignedAttestation {
+    const CURRENT: u16 = <Attestation as Versioned>::CURRENT;
+    const ACCEPTED: &'static [u16] = <Attestation as Versioned>::ACCEPTED;
 }
 
 impl SignedAttestation {
@@ -174,7 +188,6 @@ fn verified_self_link(signed: &SignedAttestation) -> Option<(PublicKey, PublicKe
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::FORMAT_VERSION;
 
     fn device_key(n: u8) -> DeviceKey {
         DeviceKey::from_seed([n; 32])
@@ -182,7 +195,7 @@ mod tests {
 
     fn sample_attestation(attester: &DeviceKey) -> Attestation {
         Attestation {
-            version: FORMAT_VERSION,
+            version: Attestation::CURRENT,
             attester: attester.public(),
             subject: device_key(9).public(),
             claim: Claim::Name("Alice".to_string()),
@@ -284,7 +297,7 @@ mod tests {
     fn link(attester: &DeviceKey, linked: PublicKey, signer: &DeviceKey) -> SignedAttestation {
         SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: attester.public(),
                 subject: attester.public(),
                 claim: Claim::SamePersonAs(linked),
@@ -381,7 +394,7 @@ mod tests {
     ) -> SignedAttestation {
         SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: attester.public(),
                 subject: disavowed,
                 claim: Claim::Negative,
@@ -417,7 +430,7 @@ mod tests {
         let laptop = device_key(2);
         let re_vouch = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: phone.public(),
                 subject: phone.public(),
                 claim: Claim::SamePersonAs(laptop.public()),
@@ -447,7 +460,7 @@ mod tests {
         let forger = device_key(3);
         let live_link = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: phone.public(),
                 subject: phone.public(),
                 claim: Claim::SamePersonAs(laptop.public()),
@@ -477,7 +490,7 @@ mod tests {
         let other = device_key(3);
         let third_party = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: phone.public(),
                 subject: other.public(), // not self-attested
                 claim: Claim::SamePersonAs(laptop.public()),

@@ -4,8 +4,8 @@
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use zink_protocol::{
-    DeviceKey, FORMAT_VERSION, KeyCommitment, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MailboxOp,
-    MailboxRequest, MailboxResponse, MailboxResult, MessageCore, MessageEnvelope,
+    DeviceKey, KeyCommitment, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MailboxOp, MailboxRequest,
+    MailboxResponse, MailboxResult, MessageCore, MessageEnvelope, Versioned,
 };
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
@@ -61,7 +61,7 @@ async fn request(connection: &Connection, op: MailboxOp) -> MailboxResult {
 fn envelope_from_1_to_2() -> MessageEnvelope {
     let sender = DeviceKey::from_seed([1; 32]);
     let core = MessageCore {
-        version: FORMAT_VERSION,
+        version: MessageCore::CURRENT,
         conversation: None,
         parents: vec![],
         recipients: vec![DeviceKey::from_seed([2; 32]).public()],

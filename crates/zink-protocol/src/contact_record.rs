@@ -5,7 +5,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use data_encoding::BASE32_NOPAD;
 
-use crate::FORMAT_VERSION;
+use crate::Versioned;
 use crate::attestation::{Claim, SignedAttestation};
 use crate::codec::{self, DecodeError};
 use crate::keys::PublicKey;
@@ -76,6 +76,11 @@ pub struct ContactRecord {
     pub relays: Vec<RelayEntry>,
 }
 
+impl Versioned for ContactRecord {
+    const CURRENT: u16 = 1;
+    const ACCEPTED: &'static [u16] = &[1];
+}
+
 impl ContactRecord {
     pub fn new(
         keys: Vec<PublicKey>,
@@ -83,7 +88,7 @@ impl ContactRecord {
         relays: Vec<RelayEntry>,
     ) -> Self {
         Self {
-            version: FORMAT_VERSION,
+            version: Self::CURRENT,
             keys,
             attestations,
             relays,
@@ -184,7 +189,7 @@ mod tests {
     fn name_attestation(attester: &DeviceKey, subject: PublicKey, name: &str) -> SignedAttestation {
         SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: attester.public(),
                 subject,
                 claim: Claim::Name(name.to_string()),
@@ -298,7 +303,7 @@ mod tests {
         let avatar = |attester: &DeviceKey, seed: u8, revision: u64, signer: &DeviceKey| {
             SignedAttestation::new(
                 Attestation {
-                    version: FORMAT_VERSION,
+                    version: Attestation::CURRENT,
                     attester: attester.public(),
                     subject: me.public(),
                     claim: Claim::Avatar {
@@ -335,7 +340,7 @@ mod tests {
         let forger = device_key(9);
         let renamed = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: me.public(),
                 subject: me.public(),
                 claim: Claim::Name("Alice II".to_string()),
@@ -345,7 +350,7 @@ mod tests {
         );
         let forged = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: me.public(),
                 subject: me.public(),
                 claim: Claim::Name("Mallory".to_string()),

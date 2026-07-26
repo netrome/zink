@@ -8,8 +8,8 @@ use iroh::Endpoint;
 use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, EncryptedBlob,
-    FORMAT_VERSION, MAX_GET_KEYS_IDS, MailboxOp, MailboxResult, MessageDraft, MessageEnvelope,
-    MessageId, OpenError, PublicKey, RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult,
+    MAX_GET_KEYS_IDS, MailboxOp, MailboxResult, MessageDraft, MessageEnvelope, MessageId,
+    OpenError, PublicKey, RelayEntry, SYNC_ALPN, SignedAttestation, SyncOp, SyncResult, Versioned,
     distinct_relays, open_avatar, seal_avatar,
 };
 
@@ -1161,9 +1161,7 @@ impl Client {
                 break;
             }
             for item in items {
-                if item.envelope.version != zink_protocol::FORMAT_VERSION
-                    || item.envelope.core.version != zink_protocol::FORMAT_VERSION
-                {
+                if !item.envelope.version_supported() {
                     // A future protocol version this client can't parse
                     // (SPEC §10: surfaced, never misparsed). Skipped, and
                     // acked with the page so it doesn't wedge the drain.
@@ -1634,7 +1632,7 @@ impl Client {
         // the deferred `Negative` flow (D4).
         let vouch = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: self.device.public(),
                 subject: self.device.public(),
                 claim: Claim::SamePersonAs(device_key),
@@ -1667,7 +1665,7 @@ impl Client {
             .unwrap_or(0);
         let vouch = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: self.device.public(),
                 subject,
                 claim: Claim::Name(petname.to_string()),
@@ -1726,7 +1724,7 @@ impl Client {
         };
         let negative = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: self.device.public(),
                 subject: key,
                 claim: Claim::Negative,
@@ -2656,7 +2654,7 @@ impl Client {
                     tracing::warn!("peer returned a mismatched id; skipping");
                     return Ok(false);
                 }
-                if envelope.version != FORMAT_VERSION || envelope.core.version != FORMAT_VERSION {
+                if !envelope.version_supported() {
                     tracing::warn!("skipping synced message with unsupported version");
                     return Ok(false);
                 }
@@ -2925,7 +2923,7 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
     let self_claim = |claim: Claim, revision: u64| {
         SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: me,
                 subject: me,
                 claim,
@@ -3322,7 +3320,7 @@ mod tests {
                 Some(genesis) => (Some(genesis.id()), vec![envelopes.last().unwrap().id()]),
             };
             let core = MessageCore {
-                version: FORMAT_VERSION,
+                version: MessageCore::CURRENT,
                 conversation,
                 parents,
                 recipients: vec![recipient],
@@ -3385,7 +3383,7 @@ mod tests {
     ) -> MessageEnvelope {
         MessageEnvelope::new(
             MessageCore {
-                version: FORMAT_VERSION,
+                version: MessageCore::CURRENT,
                 conversation,
                 parents,
                 recipients,
@@ -4616,7 +4614,7 @@ mod tests {
     ) -> ContactRecord {
         let attestation = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: device.public(),
                 subject: device.public(),
                 claim: Claim::Name(name.to_string()),
@@ -5193,7 +5191,7 @@ mod tests {
         // exactly the observer's job (multi-device.md §4)
         let laptop_vouch = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: laptop.public(),
                 subject: laptop.public(),
                 claim: Claim::SamePersonAs(a.public_key()),
@@ -5304,7 +5302,7 @@ mod tests {
         let vouch = |attester: &DeviceKey, linked: PublicKey| {
             SignedAttestation::new(
                 Attestation {
-                    version: FORMAT_VERSION,
+                    version: Attestation::CURRENT,
                     attester: attester.public(),
                     subject: attester.public(),
                     claim: Claim::SamePersonAs(linked),
@@ -5403,7 +5401,7 @@ mod tests {
         let claim = |attester: &DeviceKey, about: PublicKey, signer: &DeviceKey| {
             SignedAttestation::new(
                 Attestation {
-                    version: FORMAT_VERSION,
+                    version: Attestation::CURRENT,
                     attester: attester.public(),
                     subject: about,
                     claim: Claim::Name("Carol".to_string()),
@@ -5649,7 +5647,7 @@ mod tests {
         let endorse = |claim: Claim, revision: u64| {
             SignedAttestation::new(
                 Attestation {
-                    version: FORMAT_VERSION,
+                    version: Attestation::CURRENT,
                     attester: bob.public(),
                     subject: carol.public(),
                     claim,
@@ -5704,7 +5702,7 @@ mod tests {
         let laptop = DeviceKey::from_seed([94; 32]);
         let laptop_link = SignedAttestation::new(
             Attestation {
-                version: FORMAT_VERSION,
+                version: Attestation::CURRENT,
                 attester: laptop.public(),
                 subject: laptop.public(),
                 claim: Claim::SamePersonAs(phone.public_key()),

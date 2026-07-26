@@ -48,7 +48,6 @@ so these are deliberately deferred rather than forgotten:
 | Item | Why it blocks a release |
 |---|---|
 | **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change — a *UX* protection, not a disk one (that's R1/R2, both done). |
-| **Per-type format versions** | One global `FORMAT_VERSION` forks the whole protocol on any single bump — fine while every install is ours, untenable once two builds coexist. |
 
 *Relay disk is **bounded** as of R1+R2 — the binary prints the ceiling on every
 start. What remains unaddressed is **crowding** (a full mailbox skips new
@@ -59,10 +58,11 @@ re-derived.*
 **Known, deliberately unscheduled:** De4 (e2e harness latency — re-measure before
 trusting the original estimate) · De6e (relay presence — declined as an op; a
 narrower deposit-response variant is on the table) · client-issued delivery acks
-(a protocol addition, three named problems) · and the De8 sweep's tech-debt list
-(the `Client` god object, the per-render re-decrypt, and the three-way label
-duplication — which already causes a real bug: a send-to-self arrival notifies as
-raw hex instead of the device's name).
+(a protocol addition, three named problems) · relay-side sender gating (deferred
+to SPEC §8, reasoning recorded below) · and the De8 sweep's remaining tech debt:
+the `Client` god object, the per-render re-decrypt, and the three-way label
+duplication (`Client::participant_labels` plus a private `label()` in each of the
+CLI and the app).
 
 
 ---
@@ -1056,7 +1056,9 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   `label()` in each of the CLI and the app — and has already diverged: the
   app's notification title (`app/src-tauri/src/lib.rs`) misses the
   recognized-devices store, so a **send-to-self arrival from your own paired
-  device notifies as raw hex** instead of its name. The double-read is cheap
+  device notifies as raw hex** instead of its name — *fixed 2026-07-26 by
+  suppressing own-device notifications entirely (you know what you just sent);
+  the labelling duplication behind it remains.* The double-read is cheap
   to fold into De7, which touches `history` anyway.)*
 - [x] **D2 · Groups: membership & the unknown-key pipeline.** 🎯 *(Was D3 —
   reorg resolved 2026-07-19: the machinery that makes multi-device "seamless"
@@ -1710,15 +1712,31 @@ Not scheduled into a stage; must land before any build leaves our hands.
   Complements the relay-side caps (C0) until send-capabilities (SPEC §8,
   deferred) provide the real gate. *(Noted 2026-07-19 while wiring D1c;
   criterion sharpened at the D2 design.)*
-- [ ] **Per-type format versions.** One global `FORMAT_VERSION` is stamped into every
-  versioned object and `decode_versioned` accepts only the exact current value — so any
-  single object's version bump forks the whole protocol at once (v1 clients silently
-  skip v2 messages per SPEC §10, and a bumped client can't decode its own v1 on-disk
-  state). Fine while every install is ours (we change structs in-place at v1 and wipe
-  dev data, as in D0b); untenable the moment two builds coexist in the wild. Fix:
-  per-type version constants and a per-type accepted-version set in `decode_versioned`,
-  so e.g. `ContactRecord` can accept `{1, 2}` while `MessageCore` stays at 1 and ids
-  don't move.
+- [x] **Per-type format versions.** *(2026-07-26.)* One global `FORMAT_VERSION` was
+  stamped into every versioned object and `decode_versioned` accepted only the exact
+  current value, so any single bump forked the whole protocol at once. Two failure
+  modes, **both silent**: peers on the old build skip every object of every type (§10
+  ignores unknown versions rather than erroring, so nothing surfaces on either side),
+  and a bumped build cannot decode **its own on-disk state** — a stored v1 envelope
+  fails `decode_versioned` and `load_envelopes` drops it as damaged, so local history
+  quietly disappears. Fine while every install was ours and dev data could be wiped;
+  an unannounced break the first time a friend doesn't update in lockstep.
+  Replaced with a `Versioned` trait — `CURRENT` (what we stamp) + `ACCEPTED` (what we
+  read) per type — and `decode_versioned<T: Versioned>` judging bytes against *the
+  decoded type's* set. Nine impls; every type stays at 1, so **no wire change and no
+  id change**: this buys the *ability* to bump one object at a time and alters nothing
+  today. `MessageCore` carries the sharpest note and its own tripwire test, its version
+  being inside the hashed core — moving it re-hashes every message that exists.
+  Folded in: three copies of the two-part `envelope.version != … || core.version != …`
+  check (mailbox drain, direct delivery, backfill) became one
+  `MessageEnvelope::version_supported()`.
+  222 → **225 tests**, the new ones being cross-type invariants that had no home
+  before: `ACCEPTED` contains `CURRENT` for all nine, `MessageCore` is still at 1, and
+  — the property the slice exists for — a type widening to `{1, 2}` demonstrably
+  leaves its neighbour's decoding untouched, which one global constant could not give.
+  Docs: SPEC §10, mailbox-wire-protocol.md.
+  *(Deliberately absent: any actual bump, and any migration machinery. Both wait for a
+  real format change to motivate their shape.)*
 
 ---
 

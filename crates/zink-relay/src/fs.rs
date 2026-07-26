@@ -273,7 +273,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use zink_protocol::{DeviceKey, FORMAT_VERSION, KeyCommitment, MessageCore};
+    use zink_protocol::{DeviceKey, KeyCommitment, MessageCore, Versioned};
 
     use super::*;
     use crate::testutil::test_wall_clock;
@@ -288,7 +288,7 @@ mod tests {
     fn envelope(recipient: PublicKey, body: &[u8]) -> MessageEnvelope {
         let sender = DeviceKey::from_seed([1; 32]);
         let core = MessageCore {
-            version: FORMAT_VERSION,
+            version: MessageCore::CURRENT,
             conversation: None,
             parents: vec![],
             recipients: vec![recipient],
