@@ -22,6 +22,7 @@ use zink_protocol::{
     MailboxResult, PublicKey,
 };
 
+use crate::admission::Admission;
 use crate::blobs::push_tag;
 use crate::clock::WallClock;
 use crate::mailbox::MailboxService;
@@ -32,9 +33,9 @@ use crate::store::MailboxStore;
 /// deposit encrypted blobs so recipients can fetch after the sender goes
 /// offline); each push writes a timestamped retention tag that bounds the
 /// blob's lifetime (see `blobs`).
-pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, W: WallClock>(
+pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, A: Admission, W: WallClock>(
     endpoint: Endpoint,
-    service: MailboxService<S>,
+    service: MailboxService<S, A>,
     blob_store: &iroh_blobs::api::Store,
     wall_clock: W,
 ) -> Router {
@@ -108,12 +109,12 @@ struct LiveConnections {
 }
 
 #[derive(Debug)]
-struct MailboxHandler<S> {
-    service: Arc<MailboxService<S>>,
+struct MailboxHandler<S, A> {
+    service: Arc<MailboxService<S, A>>,
     live: Arc<Mutex<LiveConnections>>,
 }
 
-impl<S> Clone for MailboxHandler<S> {
+impl<S, A> Clone for MailboxHandler<S, A> {
     fn clone(&self) -> Self {
         Self {
             service: self.service.clone(),
@@ -122,7 +123,7 @@ impl<S> Clone for MailboxHandler<S> {
     }
 }
 
-impl<S: MailboxStore + fmt::Debug> ProtocolHandler for MailboxHandler<S> {
+impl<S: MailboxStore + fmt::Debug, A: Admission> ProtocolHandler for MailboxHandler<S, A> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let caller = PublicKey(*connection.remote_id().as_bytes());
         let mut session = None;

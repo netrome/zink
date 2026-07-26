@@ -29,6 +29,16 @@ Status: **resolved for MVP.**
   iroh connection. `register` / `fetch` / `ack` operate on *the caller's own* mailbox —
   there is no way to name another key's mailbox. `deposit` is open to any connected
   peer (gating deferred; rendezvous doc §5).
+- **Registration may be refused (R1).** *Whether* a relay hosts a mailbox for a key is
+  **operator policy** (SPEC §5.3), and a relay answers `Error { refused }` when it
+  declines — an allow-list it isn't on, or the relay at its mailbox ceiling. Refusing
+  honestly rather than acknowledging is the point: a false `Registered` leaves the
+  caller waiting forever on mail that will never be stored, which is exactly the
+  "never a false acknowledgment" rule that governs `Deposited`. A refusal is
+  **terminal for that relay** — retrying gets the same answer, so a client surfaces it
+  rather than looping. Refusal applies to `register` only; deposits *into* an already
+  registered mailbox are unaffected, so a stranger can still reach your friend on your
+  relay (which is what makes one-way adds work).
 - **The nudge (live delivery, C4b).** The relay MAY open **zero-length uni streams**
   on a connection whose peer holds a registered mailbox — one per deposit addressed
   to it. The stream itself is the signal (no payload, no framing); clients SHOULD
@@ -68,8 +78,14 @@ MailboxResponse { version: u16, result }
         | Deposited { id }                       // message id — idempotency receipt
         | Envelopes { items: [ {cursor, envelope} ] }
         | Acked
-        | Error { code: malformed | internal }
+        | Error { code: malformed | internal | refused }
 ```
+
+⚠️ `refused` was appended to `MailboxErrorCode` in place at v1 (R1). BORSH tags enum
+variants by index, so a pre-R1 client decoding it fails the whole response rather than
+reading an unknown code — acceptable only because every install is ours. The parked
+**per-type format versions** item is what makes additions like this safe once two
+builds coexist.
 
 - **Cursor** = per-mailbox monotonic deposit index (relay-local, meaningless across
   relays). Each fetched item carries its cursor so the client acks precisely.

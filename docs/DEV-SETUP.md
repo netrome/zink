@@ -203,7 +203,26 @@ journalctl --user -u zink-relay -n 5   # the running relay logs its version
   every open, disco-only address discovery).
 - New key files (`relay.key`, client `device.key`) are written `0600`. A key
   created before that change keeps its old mode — `chmod 600` it once.
-- Abuse caps are compiled-in defaults for now: 30-day mailbox retention,
-  1024 items per mailbox, 30-day blob TTL, 64 MiB max blob (oversized pushes
-  are *evicted on the next sweep* — iroh-blobs 0.103 cannot reject a push
-  mid-stream).
+- Abuse caps: 30-day mailbox retention, 1024 items **and 8 MiB** per mailbox,
+  30-day blob TTL, 64 MiB max blob (oversized pushes are *evicted on the next
+  sweep* — iroh-blobs 0.103 cannot reject a push mid-stream).
+- **Bounding the mailbox store (R1).** The relay prints its ceiling on every
+  start (`mailboxes: … max 128 · ≤ 8 MiB each → ≤ 1024 MiB total`) so you
+  never have to read the source to know the worst case. On a box running
+  other services, gate registration to people you know:
+
+  ```sh
+  # one hex key per line; '#' comments. `zink-cli pubkey <key-file>` prints one.
+  printf '%s   # alice laptop\n' "$ALICE_KEY" >> ~/zink-relay-allowed
+  # then add to the unit's ExecStart:
+  #   --allow-list %h/zink-relay-allowed [--max-mailboxes 32]
+  ```
+
+  The file is **re-read on every registration**, so appending a friend takes
+  effect immediately — no restart, no reload signal. A **missing or unreadable
+  file permits nobody** (fails closed), so a typo'd path locks the relay down
+  rather than silently reopening it. Without `--allow-list` the relay is open
+  to any key and bounded only by `--max-mailboxes` (default 128), which is
+  first-come-first-served — fine for a throwaway, not for a shared box.
+- ⚠️ **The blob cache is not yet bounded in total** — per-blob and per-age
+  only. Until that lands, budget for it separately from the mailbox ceiling.

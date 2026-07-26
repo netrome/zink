@@ -30,13 +30,16 @@ use std::path::{Path, PathBuf};
 use iroh::endpoint::presets;
 use iroh::{Endpoint, SecretKey};
 use iroh_relay::server::{QuicConfig, RelayConfig, Server, ServerConfig};
+use zink_relay::admission::{AllowListFile, OpenToAll};
 use zink_relay::blobs::{BlobCacheConfig, fs_blob_cache};
 use zink_relay::clock::SystemClock;
 use zink_relay::fs::FsMailboxStore;
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
+use zink_relay::store::{DEFAULT_MAILBOX_MAX_BYTES, DEFAULT_MAX_MAILBOXES};
 
 const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>] [--relay-port <tcp-port>]
+                   [--allow-list <file>] [--max-mailboxes <n>]
 
   data-dir          where mailboxes, the blob cache, and the relay's identity
                     key live (default: ./zink-relay-data)
@@ -47,6 +50,15 @@ const USAGE: &str = "usage: zink-relay [data-dir] [--port <udp-port>] [--relay-p
                     peer rendezvous/holepunch coordination; clients home to
                     it. QUIC address discovery is served on the same port
                     number over UDP — open both (default: ephemeral)
+  --allow-list <file>
+                    only these keys may register a mailbox — one hex key per
+                    line, '#' comments; re-read per registration, so adding a
+                    friend needs no restart. A missing file permits NOBODY
+                    (fails closed). Default: open to any key
+  --max-mailboxes <n>
+                    hard ceiling on hosted mailboxes (default: 128). With
+                    --allow-list this is belt-and-braces; without it, it is
+                    the only thing bounding the mailbox count
   -h, --help        this text
   -V, --version     version + build info";
 
@@ -63,7 +75,13 @@ fn version() -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing();
-    let (data_dir, port, relay_port) = parse_args();
+    let Args {
+        data_dir,
+        port,
+        relay_port,
+        allow_list,
+        max_mailboxes,
+    } = parse_args();
     std::fs::create_dir_all(&data_dir)?;
 
     // The embedded iroh relay server (D0b): plain HTTP — `RelayConfig::new`
@@ -101,12 +119,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         SystemClock,
     )
     .await?;
-    let router = spawn_relay_router(
-        endpoint,
-        MailboxService::new(mailboxes),
-        &blob_store,
-        SystemClock,
+    // The mailbox ceiling, stated up front: an operator running this beside
+    // other services should not have to read the source to know the worst
+    // case. (Blob-cache bytes are NOT yet bounded — see the R2 slice.)
+    let who = match &allow_list {
+        Some(list) => format!("allow-list {}", list.path().display()),
+        None => "OPEN to any key".to_string(),
+    };
+    println!(
+        "  mailboxes: {who} · max {max_mailboxes} · ≤ {} MiB each → ≤ {} MiB total",
+        DEFAULT_MAILBOX_MAX_BYTES / (1 << 20),
+        max_mailboxes as u64 * DEFAULT_MAILBOX_MAX_BYTES / (1 << 20),
     );
+    println!("  blobs: NOT yet bounded in total (per-blob 64 MiB, 30-day TTL)");
+    // Two admission types monomorphize to two service types; the router is
+    // concrete, so each arm builds and spawns its own.
+    let router = match allow_list {
+        // Turbofish: `MailboxService`'s admission parameter defaults to
+        // `OpenToAll` (so `new` stays a one-liner), and a default is used
+        // rather than inferred.
+        Some(list) => spawn_relay_router(
+            endpoint,
+            MailboxService::<_, AllowListFile>::with_admission(mailboxes, list, max_mailboxes),
+            &blob_store,
+            SystemClock,
+        ),
+        None => spawn_relay_router(
+            endpoint,
+            MailboxService::with_admission(mailboxes, OpenToAll, max_mailboxes),
+            &blob_store,
+            SystemClock,
+        ),
+    };
 
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;
@@ -168,11 +212,19 @@ fn qad_tls_config() -> Result<rustls::ServerConfig, Box<dyn std::error::Error + 
     Ok(config)
 }
 
-/// `[data-dir] [--port <udp-port>] [--relay-port <tcp-port>]`, in any
-/// order. `-h`/`-V` print and exit; argument mistakes print usage and
-/// exit(2) — never a Debug-dumped error, and never silently taken as the
-/// data dir.
-fn parse_args() -> (PathBuf, Option<u16>, Option<u16>) {
+struct Args {
+    data_dir: PathBuf,
+    port: Option<u16>,
+    relay_port: Option<u16>,
+    /// `None` = open to any key (still capped by `max_mailboxes`).
+    allow_list: Option<AllowListFile>,
+    max_mailboxes: usize,
+}
+
+/// The flags in [`USAGE`], in any order. `-h`/`-V` print and exit; argument
+/// mistakes print usage and exit(2) — never a Debug-dumped error, and never
+/// silently taken as the data dir.
+fn parse_args() -> Args {
     let bad = |message: &str| -> ! {
         eprintln!("{message}\n{USAGE}");
         std::process::exit(2);
@@ -180,6 +232,8 @@ fn parse_args() -> (PathBuf, Option<u16>, Option<u16>) {
     let mut data_dir = None;
     let mut port = None;
     let mut relay_port = None;
+    let mut allow_list = None;
+    let mut max_mailboxes = DEFAULT_MAX_MAILBOXES;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -209,16 +263,34 @@ fn parse_args() -> (PathBuf, Option<u16>, Option<u16>) {
                     Err(e) => bad(&format!("--relay-port: {e}")),
                 }
             }
+            "--allow-list" => {
+                let Some(value) = args.next() else {
+                    bad("missing value for --allow-list");
+                };
+                allow_list = Some(AllowListFile::new(value));
+            }
+            "--max-mailboxes" => {
+                let Some(value) = args.next() else {
+                    bad("missing value for --max-mailboxes");
+                };
+                match value.parse::<usize>() {
+                    Ok(0) => bad("--max-mailboxes must be at least 1"),
+                    Ok(value) => max_mailboxes = value,
+                    Err(e) => bad(&format!("--max-mailboxes: {e}")),
+                }
+            }
             flag if flag.starts_with('-') => bad(&format!("unknown flag {flag}")),
             _ if data_dir.is_some() => bad("more than one data-dir given"),
             _ => data_dir = Some(PathBuf::from(arg)),
         }
     }
-    (
-        data_dir.unwrap_or_else(|| PathBuf::from("./zink-relay-data")),
+    Args {
+        data_dir: data_dir.unwrap_or_else(|| PathBuf::from("./zink-relay-data")),
         port,
         relay_port,
-    )
+        allow_list,
+        max_mailboxes,
+    }
 }
 
 /// Logs to stderr, off unless `RUST_LOG` is set (default `warn` so real

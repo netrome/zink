@@ -132,6 +132,24 @@ pub(crate) async fn connect_addr(
         .map_err(|e| Error::Unreachable(e.to_string()))
 }
 
+/// Register at a relay, surfacing a **refusal** rather than walking past it.
+/// The bare `request` returns `Ok(Error { Refused })`, which every caller
+/// used to ignore before going on to fetch — draining a mailbox the relay
+/// was never going to fill, forever, with no clue why. A refusal is operator
+/// policy (SPEC §5.3) and terminal for this relay, so it belongs in the
+/// error channel where the subscription loop and the CLI can report it.
+pub(crate) async fn register(connection: &Connection, relay: &str) -> Result<(), Error> {
+    match request(connection, MailboxOp::Register).await? {
+        MailboxResult::Registered => Ok(()),
+        MailboxResult::Error {
+            code: zink_protocol::MailboxErrorCode::Refused,
+        } => Err(Error::MailboxRefused(relay.to_string())),
+        other => Err(Error::UnexpectedResponse(format!(
+            "register at {relay}: {other:?}"
+        ))),
+    }
+}
+
 pub(crate) async fn request(
     connection: &Connection,
     op: MailboxOp,

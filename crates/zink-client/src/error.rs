@@ -71,6 +71,11 @@ pub enum Error {
     /// The relay/peer answered outside the protocol.
     #[error("unexpected response: {0}")]
     UnexpectedResponse(String),
+    /// The relay declines to host a mailbox for this key — operator policy
+    /// (SPEC §5.3), not a fault. Terminal for that relay: retrying will get
+    /// the same answer, so use one that will have you.
+    #[error("relay {0} declines to host a mailbox for this key — use another relay")]
+    MailboxRefused(String),
     /// No relay accepted the deposit; the message is queued in the outbox
     /// and will retry — "queued", not "lost" (live-delivery.md §2).
     #[error("no relay took the deposit — message queued for retry ({0})")]

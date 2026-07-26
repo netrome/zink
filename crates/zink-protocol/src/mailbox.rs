@@ -116,6 +116,13 @@ pub enum MailboxErrorCode {
     Malformed,
     /// The relay failed internally; retrying is reasonable.
     Internal,
+    /// This relay declines to host a mailbox for the calling key — operator
+    /// policy (SPEC §5.3: *who may deposit* and retention are the operator's
+    /// call, not the protocol's). Retrying does not help; use another relay.
+    /// Answered honestly rather than acknowledging a registration the relay
+    /// will not honour — a false `Registered` would silently black-hole the
+    /// caller's mail.
+    Refused,
 }
 
 #[cfg(test)]

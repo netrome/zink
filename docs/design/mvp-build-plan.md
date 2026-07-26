@@ -35,18 +35,20 @@ decision and field-lesson record, not as work. Update this block when something
 lands, so nobody has to scroll 1,600 lines to find the open things. The parallel
 [ui-facelift.md](./ui-facelift.md) pass (U1–U8) closed 2026-07-26.*
 
-**To call the MVP done — one measurement.** No code is outstanding:
-
-| Item | State | Where |
-|---|---|---|
-| **C4c · battery numbers** | Qualitative half field-verified (a backgrounded phone notifies). The overnight screen-off/unplugged **drain measurement** is untaken — C4's original criterion asked for single-digit drain. | Stage C · C4c |
+**To call the MVP done — nothing.** *(2026-07-26: **C4c's drain measurement is
+deferred**, not pending. The qualitative half is field-verified, and a night with
+the app open showed no noticeable drain — anecdotal, and accepted as such: taking
+the real number needs an adb setup Mårten doesn't have yet. Re-open it if a phone
+ever reports a hot battery; the C4c-i instrumentation is already in place to
+answer it.)*
 
 **Before any build leaves our hands** — neither is started; no external users yet,
 so these are deliberately deferred rather than forgotten:
 
 | Item | Why it blocks a release |
 |---|---|
-| **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change. |
+| **R2 · relay blob-cache bounds** | R1 bounded the mailbox store; the blob cache is still **ungated and unbounded in total** (64 MiB/blob, 30-day TTL, no size budget) — the dominant disk term on a shared server. |
+| **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change — a *UX* protection, not a disk one (that's R1/R2). |
 | **Per-type format versions** | One global `FORMAT_VERSION` forks the whole protocol on any single bump — fine while every install is ours, untenable once two builds coexist. |
 
 **Known, deliberately unscheduled:** De4 (e2e harness latency — re-measure before
@@ -1599,6 +1601,55 @@ two don't drift.)*
 
 Not scheduled into a stage; must land before any build leaves our hands.
 
+- [x] **R1 · Relay bounds: the mailbox store.** *(2026-07-26.)* C0's caps are
+  **per-mailbox only** — 1024 items, 30-day retention — and `register` created a
+  mailbox directory for **any** key that connected. So the number of mailboxes
+  was unbounded: generate keys in a loop, register each, deposit into each. With
+  envelopes up to `MAX_REQUEST_BYTES` (1 MiB), even one mailbox was a 1 GiB worst
+  case. Nothing in the relay had a global bound of any kind. Fixed with three
+  things, all **operator policy** in SPEC §5.3's sense, no protocol redesign:
+  a per-mailbox **byte** cap (8 MiB — thousands of text messages, and it clamps
+  the 1 MiB-envelope case hard); an **allow-list** (`--allow-list <file>`, hex
+  keys, `#` comments) consulted on `register`; and `--max-mailboxes` (default
+  128) as the backstop that bounds the open case. Ceiling = `max_mailboxes ×
+  max_bytes`, **printed on every start** so an operator never reads source to
+  learn the worst case.
+  Three decisions worth keeping: the allow-list is **re-read per registration**,
+  so `echo <key> >> allowed-keys` works with no restart (verified live); a
+  **missing file permits nobody**, because the operator reached for it precisely
+  because the box has other jobs and a typo'd path must not silently reopen the
+  relay; and **a key already hosted is always re-admitted**, since a
+  re-registration takes no new slot and refusing it would turn a capacity limit
+  into an outage for the people already using the relay (regression test).
+  Refusal is honest — `MailboxErrorCode::Refused`, appended in place at v1 —
+  rather than a false `Registered` that would leave a client waiting forever on
+  mail the relay will never store. Found while wiring it: the client **ignored
+  the `Register` result entirely** at all three call sites, so a refusal would
+  have surfaced as a silently-empty mailbox forever; `net::register` now puts it
+  in the error channel (`Error::MailboxRefused`).
+  Policy lives in the domain (`MailboxService`) behind an `Admission` port with
+  `OpenToAll` / `AllowListFile` impls — who we serve is a decision, storage is a
+  mechanism. 208 → **218 tests**. Live run: an allow-listed key drains, a
+  stranger gets *"declines to host a mailbox for this key — use another
+  relay"*, appending the stranger's key admits them with no restart, and the
+  data dir holds one directory per admitted key. Docs: SPEC §5.3,
+  mailbox-wire-protocol.md, DEV-SETUP §5.
+  ⚠️ **This does NOT bound the relay yet** — see R2 below.
+- [ ] **R2 · Relay bounds: the blob cache.** The other half, and the *dominant*
+  disk term. `BlobsProtocol` accepts pushes from **anyone** (ungated — no
+  registration, no allow-list), with a 64 MiB per-blob cap and a 30-day TTL but
+  **no total size cap**: `BlobCacheConfig` has `ttl`, `gc_interval` and
+  `max_blob_bytes` and nothing else. So the mailbox ceiling R1 prints is only
+  part of the story, and the relay's data dir is still unbounded. Shape: a total
+  byte budget enforced in the existing sweep — it already enumerates
+  `pushed-<ms>-<hash>` retention tags in timestamp order, so "evict oldest until
+  under budget" is a natural extension rather than new machinery. Open question
+  worth ten minutes first: whether pushes should be gated to the keys that hold
+  mailboxes here (the R1 allow-list) — a sender pushing blobs for *our* recipient
+  is legitimate and generally isn't one of them, so the honest answer is probably
+  a size budget rather than a gate. *Done when:* the relay prints a total disk
+  ceiling covering both stores, and a push flood past the budget evicts rather
+  than grows.
 - [ ] **Unknown-sender quarantine.** Anyone holding a record can deposit
   (mutuality is not required — that's what makes one-way adds work), so an
   unknown key can fill a mailbox and the conversation list with noise. Client

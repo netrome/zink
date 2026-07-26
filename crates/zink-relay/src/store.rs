@@ -18,6 +18,20 @@ pub const DEFAULT_MAILBOX_RETENTION: Duration = Duration::from_secs(30 * 24 * 60
 /// silently skipped — best-effort, bounded storage. Draining frees space.
 pub const DEFAULT_MAILBOX_MAX_ITEMS: usize = 1024;
 
+/// Per-mailbox **byte** cap (R1). The item cap alone does not bound disk:
+/// an envelope may be up to `MAX_REQUEST_BYTES` (1 MiB), so 1024 items is a
+/// 1 GiB worst case per mailbox. 8 MiB is thousands of text messages and
+/// clamps the pathological case hard. Same best-effort skip as the item cap.
+pub const DEFAULT_MAILBOX_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How many mailboxes this relay will host (R1). The backstop under the
+/// admission policy: with [`crate::admission::OpenToAll`] anyone may
+/// register, so without a ceiling the disk is unbounded in the *number* of
+/// mailboxes however tight the per-mailbox caps are. With an allow-list this
+/// is redundant — belt and braces, and it makes the ceiling arithmetic
+/// (`max_mailboxes × max_bytes`) true regardless of policy.
+pub const DEFAULT_MAX_MAILBOXES: usize = 128;
+
 /// What the mailbox domain needs from storage. Async trait (per STYLE.md)
 /// so an on-disk adapter can implement it later without touching the domain.
 ///
@@ -29,13 +43,25 @@ pub trait MailboxStore: Send + Sync + 'static {
     fn register(&self, mailbox: PublicKey) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Append an envelope to a mailbox. No-op if the mailbox is not
-    /// registered (no storage for keys that never asked) or if the message
-    /// id is already present (idempotent sender retries).
+    /// registered (no storage for keys that never asked), if the message id
+    /// is already present (idempotent sender retries), or if the mailbox is
+    /// at its item or byte cap (best-effort skip — draining frees space).
     fn append(
         &self,
         mailbox: PublicKey,
         envelope: MessageEnvelope,
     ) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// How many mailboxes are currently registered — what the service's
+    /// `max_mailboxes` backstop is checked against before admitting a new
+    /// one. Registrations are rare, so an O(mailboxes) count is fine.
+    fn registered_count(&self) -> impl Future<Output = io::Result<usize>> + Send;
+
+    /// Whether this key already has a mailbox. A re-registration by a key we
+    /// already host must never be refused for being "over the cap" — it
+    /// consumes no new slot, and refusing it would break every reconnect
+    /// once the relay is full.
+    fn is_registered(&self, mailbox: PublicKey) -> impl Future<Output = io::Result<bool>> + Send;
 
     /// Envelopes with cursor > `after`, oldest first, each with its cursor.
     fn fetch(
@@ -52,6 +78,7 @@ pub struct InMemoryStore<C: Clock = SystemClock> {
     mailboxes: Mutex<HashMap<PublicKey, Mailbox>>,
     retention: Duration,
     max_items: usize,
+    max_bytes: u64,
     clock: C,
 }
 
@@ -79,10 +106,15 @@ impl<C: Clock> InMemoryStore<C> {
     }
 
     pub fn with_config(retention: Duration, max_items: usize, clock: C) -> Self {
+        Self::with_caps(retention, max_items, DEFAULT_MAILBOX_MAX_BYTES, clock)
+    }
+
+    pub fn with_caps(retention: Duration, max_items: usize, max_bytes: u64, clock: C) -> Self {
         Self {
             mailboxes: Mutex::new(HashMap::new()),
             retention,
             max_items,
+            max_bytes,
             clock,
         }
     }
@@ -136,6 +168,14 @@ impl<C: Clock> MailboxStore for InMemoryStore<C> {
         if state.items.len() >= self.max_items {
             return Ok(()); // full mailbox — best-effort skip, never an error
         }
+        let held: u64 = state
+            .items
+            .iter()
+            .map(|item| item.envelope.to_bytes().len() as u64)
+            .sum();
+        if held + envelope.to_bytes().len() as u64 > self.max_bytes {
+            return Ok(()); // over the byte cap — same best-effort skip
+        }
         state.last_cursor += 1;
         state.items.push(StoredItem {
             cursor: state.last_cursor,
@@ -168,6 +208,14 @@ impl<C: Clock> MailboxStore for InMemoryStore<C> {
             state.items.retain(|item| item.cursor > up_to);
         }
         Ok(())
+    }
+
+    async fn registered_count(&self) -> io::Result<usize> {
+        Ok(self.mailboxes.lock().unwrap().len())
+    }
+
+    async fn is_registered(&self, mailbox: PublicKey) -> io::Result<bool> {
+        Ok(self.mailboxes.lock().unwrap().contains_key(&mailbox))
     }
 }
 

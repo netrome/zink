@@ -337,8 +337,12 @@ visible.
   key: reading/deleting your mailbox just requires the connection key to match the
   mailbox key — no separate challenge (a signed challenge is only the stateless/HTTP
   fallback). This stops anyone draining or deleting another key's mailbox. *Who may
-  deposit*, retention windows, rate/size caps, and whether to keep messages from
-  non-contacts are **relay-operator policy**, not protocol.
+  deposit*, **who may register a mailbox at all**, retention windows, rate/size caps,
+  and whether to keep messages from non-contacts are **relay-operator policy**, not
+  protocol. A relay that declines to host a key says so (`Error { refused }`) rather
+  than acknowledging a registration it won't honour — the same "never a false
+  acknowledgment" rule as `Deposited`. Declining is not enforcement: the key simply
+  uses a relay that will have it, and relays are interchangeable by design.
 - **Wake-on-message:** the *native* MVP client holds a live connection to its
   relay(s) and receives deliveries forwarded over it ("forward-now"), kept alive by an
   OS foreground service. The **Web Push gateway** (content-free push → device wakes,

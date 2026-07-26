@@ -25,6 +25,7 @@ pub struct FsMailboxStore<W: WallClock = SystemClock> {
     root: PathBuf,
     retention: Duration,
     max_items: usize,
+    max_bytes: u64,
     clock: W,
     /// Serializes mutations: concurrent deposits must not race the
     /// scan-then-write cursor/dedup logic (the in-memory store gets the
@@ -54,10 +55,27 @@ impl<W: WallClock> FsMailboxStore<W> {
         max_items: usize,
         clock: W,
     ) -> Self {
+        Self::with_caps(
+            root,
+            retention,
+            max_items,
+            crate::store::DEFAULT_MAILBOX_MAX_BYTES,
+            clock,
+        )
+    }
+
+    pub fn with_caps(
+        root: impl Into<PathBuf>,
+        retention: Duration,
+        max_items: usize,
+        max_bytes: u64,
+        clock: W,
+    ) -> Self {
         Self {
             root: root.into(),
             retention,
             max_items,
+            max_bytes,
             clock,
             lock: Mutex::new(()),
         }
@@ -134,6 +152,16 @@ impl<W: WallClock> MailboxStore for FsMailboxStore<W> {
         if items.len() >= self.max_items {
             return Ok(()); // full mailbox — best-effort skip, never an error
         }
+        // Byte cap (R1): sizes come from the filesystem, so a mailbox full of
+        // 1 MiB envelopes is bounded even well under the item cap.
+        let held: u64 = items
+            .iter()
+            .filter_map(|item| std::fs::metadata(dir.join(item.file_name())).ok())
+            .map(|meta| meta.len())
+            .sum();
+        if held + envelope.to_bytes().len() as u64 > self.max_bytes {
+            return Ok(()); // over the byte cap — same best-effort skip
+        }
         // Cursor is a persistent per-mailbox high-water mark, NOT derived
         // from live items: a full drain (ack or TTL purge) must not reset it,
         // or a client persisting its fetch cursor would silently miss the
@@ -176,6 +204,21 @@ impl<W: WallClock> MailboxStore for FsMailboxStore<W> {
             }
         }
         Ok(())
+    }
+
+    async fn registered_count(&self) -> io::Result<usize> {
+        let _guard = self.lock.lock().unwrap();
+        // One directory per mailbox; a fresh data dir has none yet.
+        Ok(match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries.filter(|e| e.is_ok()).count(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e),
+        })
+    }
+
+    async fn is_registered(&self, mailbox: PublicKey) -> io::Result<bool> {
+        let _guard = self.lock.lock().unwrap();
+        Ok(self.mailbox_dir(&mailbox).is_dir())
     }
 }
 
@@ -388,6 +431,64 @@ mod tests {
 
         // Then: the third deposit was skipped
         assert_eq!(store.fetch(mailbox, 0).await.unwrap().len(), 2);
+
+        std::fs::remove_dir_all(&root).expect("clean up temp dir");
+    }
+
+    #[tokio::test]
+    async fn append__should_skip_deposits_over_the_byte_cap() {
+        // Given: a generous item cap but a tight byte cap (R1) — on disk the
+        // held size comes from filesystem metadata, a different code path
+        // from the in-memory store's, so it gets its own test. The `cursor`
+        // file must not be counted: it isn't an `.env`, so `live_items`
+        // never yields it.
+        let root = temp_root("byte-cap");
+        let (_, clock) = test_wall_clock();
+        let store = FsMailboxStore::with_caps(&root, Duration::from_secs(100), 1024, 2048, clock);
+        let mailbox = DeviceKey::from_seed([2; 32]).public();
+        store.register(mailbox).await.unwrap();
+
+        // When: 512-byte bodies are deposited well past the byte budget
+        for i in 0..20u8 {
+            let mut body = vec![0u8; 512];
+            body[0] = i; // distinct ids
+            store
+                .append(mailbox, envelope(mailbox, &body))
+                .await
+                .unwrap();
+        }
+
+        // Then: bounded by bytes, nowhere near the 1024-item cap
+        let held = store.fetch(mailbox, 0).await.unwrap();
+        assert!(!held.is_empty(), "some mail got through");
+        assert!(held.len() < 20, "the byte cap stopped the rest");
+        let bytes: usize = held.iter().map(|(_, e)| e.to_bytes().len()).sum();
+        assert!(bytes <= 2048, "held {bytes} bytes, over the cap");
+
+        std::fs::remove_dir_all(&root).expect("clean up temp dir");
+    }
+
+    #[tokio::test]
+    async fn registered_count__should_count_mailboxes_and_start_at_zero() {
+        // Given: a data dir with no mailboxes yet (a fresh relay — the count
+        // backing the service's ceiling must not error on a missing dir)
+        let root = temp_root("count");
+        let (_, clock) = test_wall_clock();
+        let store = FsMailboxStore::with_config(&root, Duration::from_secs(100), 8, clock);
+        assert_eq!(store.registered_count().await.unwrap(), 0);
+        let mailbox = DeviceKey::from_seed([2; 32]).public();
+        assert!(!store.is_registered(mailbox).await.unwrap());
+
+        // When
+        store.register(mailbox).await.unwrap();
+        store
+            .register(DeviceKey::from_seed([3; 32]).public())
+            .await
+            .unwrap();
+
+        // Then
+        assert_eq!(store.registered_count().await.unwrap(), 2);
+        assert!(store.is_registered(mailbox).await.unwrap());
 
         std::fs::remove_dir_all(&root).expect("clean up temp dir");
     }

@@ -1019,7 +1019,7 @@ impl Client {
             self.config.connect_timeout,
         )
         .await?;
-        net::request(&connection, MailboxOp::Register).await?;
+        net::register(&connection, relay).await?;
         self.drain_connection(relay, &connection, seen).await
     }
 
@@ -1066,7 +1066,7 @@ impl Client {
             self.config.connect_timeout,
         )
         .await?;
-        net::request(&connection, MailboxOp::Register).await?;
+        net::register(&connection, relay).await?;
         tracing::info!(relay, "subscription live (registered)");
         // Catch up on what arrived while we were away *first* — incoming
         // messages take priority over retrying the outbox. Flushing before
@@ -1506,7 +1506,7 @@ impl Client {
                     self.config.connect_timeout,
                 )
                 .await?;
-                net::request(&connection, MailboxOp::Register).await?;
+                net::register(&connection, &relay).await?;
                 Ok(())
             });
         n0_future::join_all(registrations)

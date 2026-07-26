@@ -4,6 +4,7 @@
 //! content. Domain logic in `mailbox`, storage port in `store`, iroh edge
 //! in `net`.
 
+pub mod admission;
 pub mod blobs;
 pub mod clock;
 pub mod fs;
