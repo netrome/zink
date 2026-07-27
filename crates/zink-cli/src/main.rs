@@ -426,14 +426,16 @@ async fn save_blobs(client: &Client, message: &Received, dir: &str) -> Result<()
 async fn conversations(args: &[String]) -> Result<(), String> {
     let (flags, _) = parse_flags(args)?;
     let client = open_client(&flags).await?;
-    let summaries = client.conversations()?;
-    if summaries.is_empty() {
+    // Unknown senders are quarantined into a bounded requests queue
+    // (groups.md §6) rather than mixed into the main list.
+    let inbox = zink_client::triage(client.conversations()?);
+    if inbox.conversations.is_empty() && inbox.requests.is_empty() {
         println!("no conversations");
     }
     // The whole own cluster is "me" (D3c): a conversation is never
     // "with mårten laptop".
     let own = client.own_keys();
-    for summary in summaries {
+    let line = |summary: &zink_client::ConversationSummary| -> Result<(), String> {
         let other_keys: Vec<_> = summary
             .participants
             .iter()
@@ -453,6 +455,19 @@ async fn conversations(args: &[String]) -> Result<(), String> {
                 others.join(", ")
             }
         );
+        Ok(())
+    };
+    for summary in &inbox.conversations {
+        line(summary)?;
+    }
+    if !inbox.requests.is_empty() {
+        println!("\nmessage requests (nobody you know has written here yet):");
+        for summary in &inbox.requests {
+            line(summary)?;
+        }
+        if inbox.dropped > 0 {
+            println!("  … and {} more beyond the cap", inbox.dropped);
+        }
     }
     client.close().await;
     Ok(())

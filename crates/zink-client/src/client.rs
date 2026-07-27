@@ -1294,6 +1294,9 @@ impl Client {
     /// Every stored conversation, newest first (by wall-clock hint — a
     /// display ordering, like everything timestamp-based).
     pub fn conversations(&self) -> Result<Vec<ConversationSummary>, Error> {
+        // Loaded once for the whole pass, not once per conversation.
+        let contacts = self.state.contacts()?;
+        let own = self.own_keys();
         let mut summaries = Vec::new();
         for id in self.state.conversations() {
             let envelopes = self.state.load_envelopes(id)?;
@@ -1310,6 +1313,11 @@ impl Client {
                     .map(|envelope| envelope.core.timestamp_ms)
                     .max()
                     .unwrap_or(0),
+                // Computed from the envelopes already in hand — asking
+                // `has_contributing_contact` here would re-read the whole
+                // conversation from disk, once per conversation, per render.
+                known: self.contributed_to(&envelopes, &contacts, &own),
+                first_seen_ms: self.state.first_seen_ms(id),
             });
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_timestamp_ms));
@@ -2224,22 +2232,32 @@ impl Client {
     /// auto-query policy, never storage: a conversation upgrades
     /// retroactively the moment a contact's message arrives.
     pub fn has_contributing_contact(&self, conversation: MessageId) -> Result<bool, Error> {
-        let records = self.state.contacts()?;
-        // Own-cluster authorship counts (D3c, multi-device.md §5): there is
-        // no key this client trusts more than its own — a fresh device's
-        // conversations arrive authored by its siblings, and the empty
-        // contact store must not mute the auto-query bootstrap.
+        let contacts = self.state.contacts()?;
         let own = self.own_keys();
-        Ok(self
-            .state
-            .load_envelopes(conversation)?
-            .iter()
-            .any(|envelope| {
-                own.contains(&envelope.core.sender)
-                    || records
-                        .iter()
-                        .any(|(_, record)| record.keys.contains(&envelope.core.sender))
-            }))
+        let envelopes = self.state.load_envelopes(conversation)?;
+        Ok(self.contributed_to(&envelopes, &contacts, &own))
+    }
+
+    /// The contributing-contact rule over envelopes already loaded — has a
+    /// key we trust **authored** one of them?
+    ///
+    /// Own-cluster authorship counts (D3c, multi-device.md §5): there is no
+    /// key this client trusts more than its own — a fresh device's
+    /// conversations arrive authored by its siblings, and an empty contact
+    /// store must not mute the auto-query bootstrap or quarantine your own
+    /// history.
+    fn contributed_to(
+        &self,
+        envelopes: &[MessageEnvelope],
+        contacts: &[(String, ContactRecord)],
+        own: &BTreeSet<PublicKey>,
+    ) -> bool {
+        envelopes.iter().any(|envelope| {
+            own.contains(&envelope.core.sender)
+                || contacts
+                    .iter()
+                    .any(|(_, record)| record.keys.contains(&envelope.core.sender))
+        })
     }
 
     /// The scoped auto-query (D2b, groups.md §4 — the who-is-this.md §5
@@ -3208,6 +3226,65 @@ pub struct ConversationSummary {
     pub message_count: usize,
     /// Largest wall-clock hint seen — display ordering only, never trusted.
     pub last_timestamp_ms: u64,
+    /// The contributing-contact rule (groups.md §6): a contact — or one of
+    /// our own devices — has **authored** a message we hold here. Presence
+    /// in `recipients` deliberately does not count: a spammer can list your
+    /// friends for free, authorship they cannot forge.
+    ///
+    /// False means "no contact has spoken here *yet*", not "spam": triage is
+    /// at presentation only, so a contact's message arriving later promotes
+    /// the conversation with no migration and nothing lost.
+    pub known: bool,
+    /// When this device first stored anything here — our clock, not the
+    /// sender's. What the requests queue orders and evicts by.
+    pub first_seen_ms: u64,
+}
+
+/// A conversation list split by the contributing-contact rule (groups.md §6).
+pub struct Inbox {
+    /// Conversations a contact has contributed to — the main list.
+    pub conversations: Vec<ConversationSummary>,
+    /// Requests from senders nobody you know has vouched for by speaking,
+    /// newest-first and capped at [`MAX_MESSAGE_REQUESTS`].
+    pub requests: Vec<ConversationSummary>,
+    /// Requests beyond the cap. Surfaced rather than silently swallowed —
+    /// a view that quietly hides mail is the failure this one exists to
+    /// prevent.
+    pub dropped: usize,
+}
+
+/// How many pending requests the quarantine view holds. Anyone with your
+/// record can deposit (mutuality is not required — that is what makes
+/// one-way adds work), so without a cap a flood of strangers makes the
+/// requests view as unusable as the main list it protects.
+pub const MAX_MESSAGE_REQUESTS: usize = 32;
+
+/// Split a conversation list into the main inbox and the bounded requests
+/// queue (groups.md §6, the parked unknown-sender quarantine).
+///
+/// **Pure, and deliberately here rather than in the edges.** Both the CLI
+/// and the app need exactly this split; implemented twice it would drift,
+/// the way "what do I call this key" already has.
+///
+/// **View-only.** Nothing is deleted and nothing is refused at delivery —
+/// groups.md §6 is explicit that messages arrive in any order, so a
+/// contact's first contribution may land *after* the stranger's message
+/// that opened the conversation. Dropping data at the cap would destroy
+/// what a later arrival would have legitimised. Bounding client *storage*
+/// is a separate question, and belongs to the deferred ephemerality work.
+pub fn triage(summaries: Vec<ConversationSummary>) -> Inbox {
+    let (conversations, mut requests): (Vec<_>, Vec<_>) =
+        summaries.into_iter().partition(|summary| summary.known);
+    // Newest first by *our* clock, so the queue cannot be steered by a
+    // sender's chosen timestamp (see `ClientState::first_seen_ms`).
+    requests.sort_by_key(|summary| std::cmp::Reverse(summary.first_seen_ms));
+    let dropped = requests.len().saturating_sub(MAX_MESSAGE_REQUESTS);
+    requests.truncate(MAX_MESSAGE_REQUESTS);
+    Inbox {
+        conversations,
+        requests,
+        dropped,
+    }
 }
 
 /// One message out of a stored conversation, in linearized order.
@@ -3800,6 +3877,119 @@ mod tests {
         assert!(live[0].relay.is_none(), "no relay was on the path");
 
         let _ = std::fs::remove_dir_all(temp_root("direct"));
+    }
+
+    fn summary(id: u8, known: bool, first_seen_ms: u64) -> ConversationSummary {
+        ConversationSummary {
+            id: MessageId([id; 32]),
+            participants: vec![],
+            message_count: 1,
+            last_timestamp_ms: 0,
+            known,
+            first_seen_ms,
+        }
+    }
+
+    #[test]
+    fn triage__should_split_on_the_contributing_contact_rule() {
+        // Given: one conversation a contact has written in, one nobody known has
+        let inbox = triage(vec![summary(1, true, 10), summary(2, false, 20)]);
+
+        // Then
+        assert_eq!(inbox.conversations.len(), 1);
+        assert_eq!(inbox.conversations[0].id, MessageId([1; 32]));
+        assert_eq!(inbox.requests.len(), 1);
+        assert_eq!(inbox.requests[0].id, MessageId([2; 32]));
+        assert_eq!(inbox.dropped, 0);
+    }
+
+    #[test]
+    fn triage__should_order_requests_by_our_clock_not_the_senders() {
+        // Given: three requests seen locally in a known order. Their
+        // `last_timestamp_ms` is a sender-chosen hint (SPEC §4.3) and is
+        // deliberately left at 0 — nothing here may depend on it.
+        let inbox = triage(vec![
+            summary(1, false, 100),
+            summary(2, false, 300),
+            summary(3, false, 200),
+        ]);
+
+        // Then: newest-first by first-seen, so a stranger cannot pin itself
+        // to the top of the queue by dating a message in the future.
+        let order: Vec<u8> = inbox.requests.iter().map(|s| s.id.0[0]).collect();
+        assert_eq!(order, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn triage__should_cap_the_requests_queue_and_report_what_it_dropped() {
+        // Given: more requests than the queue holds, oldest first
+        let flood: Vec<ConversationSummary> = (0..MAX_MESSAGE_REQUESTS + 5)
+            .map(|i| summary(i as u8, false, i as u64))
+            .collect();
+
+        // When
+        let inbox = triage(flood);
+
+        // Then: bounded, newest kept, and the overflow is *counted* rather
+        // than silently swallowed — a view that quietly hides mail is the
+        // failure this one exists to prevent.
+        assert_eq!(inbox.requests.len(), MAX_MESSAGE_REQUESTS);
+        assert_eq!(inbox.dropped, 5);
+        assert_eq!(
+            inbox.requests[0].first_seen_ms,
+            (MAX_MESSAGE_REQUESTS + 4) as u64,
+            "the newest request survives the cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversations__should_quarantine_a_stranger_until_a_contact_speaks() {
+        // Given: a message from a key we have never heard of
+        let client = Client::open_or_create(&temp_key("quarantine", "me"))
+            .await
+            .expect("open");
+        let stranger = DeviceKey::from_seed([81; 32]);
+        let me = client.public_key();
+        let genesis = message(&stranger, vec![me], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        client
+            .state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+
+        // Then: it is a request, not a conversation — presence in
+        // `recipients` is attacker-controlled, authorship is not.
+        let inbox = triage(client.conversations().expect("conversations"));
+        assert!(inbox.conversations.is_empty());
+        assert_eq!(inbox.requests.len(), 1);
+
+        // When: we add them as a contact (the promote-out path)
+        client
+            .add_contact(
+                &ContactRecord::new(
+                    vec![stranger.public()],
+                    vec![],
+                    vec![RelayEntry {
+                        mailbox: format!("{}@203.0.113.9:1", hex::encode(&stranger.public().0)),
+                        relay_url: None,
+                    }],
+                ),
+                Some("stranger".to_string()),
+            )
+            .expect("add");
+
+        // Then: it promotes with nothing migrated and nothing lost —
+        // triage is at presentation only (groups.md §6).
+        let inbox = triage(client.conversations().expect("conversations"));
+        assert_eq!(inbox.conversations.len(), 1);
+        assert!(inbox.requests.is_empty());
+        assert_eq!(
+            client.history(conversation).expect("history").len(),
+            1,
+            "the message was never withheld from storage"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("quarantine"));
     }
 
     #[tokio::test]

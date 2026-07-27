@@ -24,8 +24,9 @@ mod sync;
 #[cfg(not(target_family = "wasm"))]
 pub use client::{
     AvatarReceipt, Client, ClientConfig, Contact, ConversationSummary, DeviceEvidence, Disavowal,
-    FlushReport, HistoryMessage, LearnedName, Reachable, Received, RecvReport, RelayFailure,
-    ReplyContacts, ResolvedName, SendReceipt, StagedSend, WhoIsAnswer, WhoIsOutcome,
+    FlushReport, HistoryMessage, Inbox, LearnedName, MAX_MESSAGE_REQUESTS, Reachable, Received,
+    RecvReport, RelayFailure, ReplyContacts, ResolvedName, SendReceipt, StagedSend, WhoIsAnswer,
+    WhoIsOutcome, triage,
 };
 pub use error::Error;
 #[cfg(target_family = "wasm")]

@@ -28,32 +28,30 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
 
 ---
 
-## What's left
+## Status — 🎉 MVP complete (2026-07-26)
 
-*The live view — every slice below is done, and those entries are kept as the
-decision and field-lesson record, not as work. Update this block when something
-lands, so nobody has to scroll 1,600 lines to find the open things. The parallel
-[ui-facelift.md](./ui-facelift.md) pass (U1–U8) closed 2026-07-26.*
+*The live view. Every slice below is done; those entries are kept as the decision
+and field-lesson record, not as work. Update this block when something lands, so
+nobody has to scroll 1,600 lines to find what is actually open. The parallel
+[ui-facelift.md](./ui-facelift.md) pass (U1–U8) closed the same day.*
 
-**To call the MVP done — nothing.** *(2026-07-26: **C4c's drain measurement is
-deferred**, not pending. The qualitative half is field-verified, and a night with
-the app open showed no noticeable drain — anecdotal, and accepted as such: taking
-the real number needs an adb setup Mårten doesn't have yet. Re-open it if a phone
-ever reports a hot battery; the C4c-i instrumentation is already in place to
-answer it.)*
+**Nothing is outstanding.** Stages A–D, the U1–U8 facelift, De1–De8, the relay
+bounds (R1/R2), per-type format versions, and the unknown-sender quarantine have
+all landed. The parked "before any build leaves our hands" list is empty.
 
-**Before any build leaves our hands** — neither is started; no external users yet,
-so these are deliberately deferred rather than forgotten:
+Two things were **deferred with reasons**, not forgotten:
 
-| Item | Why it blocks a release |
-|---|---|
-| **Unknown-sender quarantine** | Anyone holding a record can deposit; an unknown key can flood the conversation list. Client policy, no protocol change — a *UX* protection, not a disk one (that's R1/R2, both done). |
-
-*Relay disk is **bounded** as of R1+R2 — the binary prints the ceiling on every
-start. What remains unaddressed is **crowding** (a full mailbox skips new
-deposits), whose fix is SPEC §8's deferred capability grant; the reasoning is
-recorded under "Relay-side sender gating" above rather than left to be
-re-derived.*
+- **C4c's battery drain measurement.** The qualitative half is field-verified (a
+  backgrounded phone notifies); a night with the app open showed no noticeable
+  drain — anecdotal, and accepted as such, since the real number needs an adb
+  setup Mårten doesn't have yet. Re-open if a phone ever runs hot; the C4c-i
+  instrumentation is already in place to answer it.
+- **Mailbox crowding.** Relay *disk* is bounded as of R1+R2 (the binary prints
+  the ceiling on every start), but a full mailbox still skips new deposits, so a
+  stranger with your QR can crowd out real mail. Bounding storage is what creates
+  that; the fix is SPEC §8's capability grant, and the full reasoning — including
+  why an uploaded allowed-senders list is the wrong shape and why per-sender
+  quotas die to a Sybil — is under "Relay-side sender gating" below.
 
 **Known, deliberately unscheduled:** De4 (e2e harness latency — re-measure before
 trusting the original estimate) · De6e (relay presence — declined as an op; a
@@ -1604,9 +1602,10 @@ two don't drift.)*
 
 ---
 
-## Parked — before first external deployment
+## Parked — before first external deployment ✅
 
-Not scheduled into a stage; must land before any build leaves our hands.
+The gate on any build leaving our hands. **All clear as of 2026-07-26** — kept
+here as the record of what the gate was and how each item was answered.
 
 - [x] **R1 · Relay bounds: the mailbox store.** *(2026-07-26.)* C0's caps are
   **per-mailbox only** — 1024 items, 30-day retention — and `register` created a
@@ -1700,43 +1699,42 @@ Not scheduled into a stage; must land before any build leaves our hands.
   *(Also considered: per-key mailbox sizes, `key X → size Y`. Cheap and
   unobjectionable, but no forcing case — uniform 8 MiB stands until someone
   actually needs more.)*
-- [ ] **Unknown-sender quarantine.** Anyone holding a record can deposit
-  (mutuality is not required — that's what makes one-way adds work), so an
-  unknown key can fill a mailbox and the conversation list with noise. Client
-  policy, no protocol change: conversations failing the **contributing-contact
-  rule** (groups.md §6 — no contact has *authored* a held message; presence in
-  `recipients` is attacker-controlled, authorship isn't) land in a bounded
-  "message requests" view instead of the main list (oldest evicted at the
-  cap); D1c's who-is hook is the promote-out path. D2b computes the predicate
-  (it gates the scoped auto-query); this parked item is just the view.
-  Complements the relay-side caps (C0) until send-capabilities (SPEC §8,
-  deferred) provide the real gate. *(Noted 2026-07-19 while wiring D1c;
-  criterion sharpened at the D2 design.)*
-- [x] **Per-type format versions.** *(2026-07-26.)* One global `FORMAT_VERSION` was
-  stamped into every versioned object and `decode_versioned` accepted only the exact
-  current value, so any single bump forked the whole protocol at once. Two failure
-  modes, **both silent**: peers on the old build skip every object of every type (§10
-  ignores unknown versions rather than erroring, so nothing surfaces on either side),
-  and a bumped build cannot decode **its own on-disk state** — a stored v1 envelope
-  fails `decode_versioned` and `load_envelopes` drops it as damaged, so local history
-  quietly disappears. Fine while every install was ours and dev data could be wiped;
-  an unannounced break the first time a friend doesn't update in lockstep.
-  Replaced with a `Versioned` trait — `CURRENT` (what we stamp) + `ACCEPTED` (what we
-  read) per type — and `decode_versioned<T: Versioned>` judging bytes against *the
-  decoded type's* set. Nine impls; every type stays at 1, so **no wire change and no
-  id change**: this buys the *ability* to bump one object at a time and alters nothing
-  today. `MessageCore` carries the sharpest note and its own tripwire test, its version
-  being inside the hashed core — moving it re-hashes every message that exists.
-  Folded in: three copies of the two-part `envelope.version != … || core.version != …`
-  check (mailbox drain, direct delivery, backfill) became one
-  `MessageEnvelope::version_supported()`.
-  222 → **225 tests**, the new ones being cross-type invariants that had no home
-  before: `ACCEPTED` contains `CURRENT` for all nine, `MessageCore` is still at 1, and
-  — the property the slice exists for — a type widening to `{1, 2}` demonstrably
-  leaves its neighbour's decoding untouched, which one global constant could not give.
-  Docs: SPEC §10, mailbox-wire-protocol.md.
-  *(Deliberately absent: any actual bump, and any migration machinery. Both wait for a
-  real format change to motivate their shape.)*
+- [x] **Unknown-sender quarantine.** *(2026-07-26.)* Anyone holding a record can
+  deposit (mutuality is not required — that is what makes one-way adds work), so
+  an unknown key could fill the conversation list with noise. Now triaged by the
+  **contributing-contact rule** (groups.md §6): a conversation is legitimate iff a
+  contact — or one of our own devices — has **authored** a message we hold. The
+  distinction is what makes it spam-resistant: presence in `recipients` is
+  attacker-controlled, authorship is not.
+  Failing conversations land in a bounded "message requests" queue instead of the
+  main list; `add_contact` (or D1c's who-is) is the promote-out path, with nothing
+  migrated because the rule is evaluated at read time.
+  **View-only, deliberately.** groups.md §6 is explicit that triage happens at
+  presentation, never at storage or delivery: messages arrive in any order, so a
+  contact's first contribution can land *after* the stranger's opening message and
+  retroactively legitimise the conversation. Evicting at the cap would destroy
+  exactly that. Bounding client *storage* is a different question and belongs to
+  the deferred ephemerality work.
+  **The ordering is the part worth remembering.** The queue is newest-first by a
+  new local `first-seen` marker, not by `last_timestamp_ms` — the latter is a
+  display hint the *sender* chooses (SPEC §4.3), so ordering the spam view by it
+  would let a stranger pin themselves to the top forever by dating a message in
+  the future and push real requests off the cap. Ordering a defence by something
+  the attacker controls hands them the eviction policy.
+  Shape: `ConversationSummary` gains `known` + `first_seen_ms`; the split is a
+  **pure `triage()`** in the client core rather than in each edge — both the CLI
+  and the app need exactly this rule, and implemented twice it would drift, the
+  way "what do I call this key" already has. Cap `MAX_MESSAGE_REQUESTS = 32`, with
+  the overflow **counted and shown** rather than silently swallowed.
+  Also folded in: `conversations()` was going to re-read every conversation a
+  second time via `has_contributing_contact`; the predicate is now computed from
+  the envelopes already in hand, with contacts and own-keys loaded once per pass
+  instead of once per conversation.
+  225 → **229 tests** (three pure triage tests + a stranger-quarantined-then-
+  promoted integration test that also asserts the message was never withheld from
+  storage). Live CLI run: a friend's message lists normally, a stranger's lands
+  under "message requests", `history` on it shows the message was stored all
+  along, and adding them promotes it.
 
 ---
 

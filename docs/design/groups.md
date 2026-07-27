@@ -174,11 +174,15 @@ is attacker-controlled* — a spammer can list your friends for free —
   Triaged at render time, a conversation upgrades to the main list the
   moment a contact's message arrives.
 - **This rule is the triage criterion for the parked unknown-sender
-  quarantine** ("message requests", see the plan's parked section): a 1:1
-  from a stranger is just its degenerate case — a two-party group with no
-  contributing contact. One rule covers both; the bounded-quarantine *view*
-  itself stays parked (pre-external-deployment), but D2 computes the
-  predicate since the auto-query gates on it (§4).
+  quarantine** ("message requests"): a 1:1 from a stranger is just its
+  degenerate case — a two-party group with no contributing contact. One rule
+  covers both. *(Shipped 2026-07-26: D2 computed the predicate for the
+  auto-query gate (§4); the view is `zink_client::triage`, a pure split into
+  the main list plus a queue capped at `MAX_MESSAGE_REQUESTS`. The queue is
+  ordered newest-first by a **local** first-seen marker, never by the
+  sender's `timestamp_ms` — a display hint the sender picks, so ordering the
+  spam view by it would let a stranger pin themselves to the top and push
+  real requests off the cap. Overflow is counted and shown, not hidden.)*
 - Pure client policy, revisable per client without coordination — like
   everything in this doc.
 

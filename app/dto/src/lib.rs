@@ -111,6 +111,21 @@ pub struct Conversation {
     pub message_count: usize,
     /// Wall-clock hint of the newest message — display ordering only.
     pub last_timestamp_ms: u64,
+    /// Nobody you know has *written* here yet (groups.md §6), so this sits
+    /// in the requests queue rather than the main list. Not a verdict: a
+    /// contact's first message promotes it with nothing lost.
+    pub request: bool,
+}
+
+/// The chats screen's two lists (groups.md §6, unknown-sender quarantine).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Inbox {
+    /// Conversations a contact has contributed to.
+    pub conversations: Vec<Conversation>,
+    /// Requests from unknown senders — bounded; newest first.
+    pub requests: Vec<Conversation>,
+    /// Requests past the cap. Shown as a count rather than hidden.
+    pub dropped: usize,
 }
 
 /// One message-view row, in linearized DAG order.

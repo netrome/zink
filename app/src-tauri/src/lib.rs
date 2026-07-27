@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Message, OutgoingImage,
-    PersonDetail, QrPayload, RecordPreview, UnknownMember, WhoIsCandidate, WhoIsReport,
+    AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Inbox, Message,
+    OutgoingImage, PersonDetail, QrPayload, RecordPreview, UnknownMember, WhoIsCandidate,
+    WhoIsReport,
 };
 use zink_client::{Client, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -507,13 +508,22 @@ async fn person_detail(
 async fn conversations(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
-) -> Result<Vec<Conversation>, String> {
+) -> Result<Inbox, String> {
     let client = client(&app, &managed).await?;
     // The whole own cluster is "me" (D3c): a conversation is never
     // "with mårten laptop".
     let own = client.own_keys();
+    // Unknown senders are quarantined into a bounded requests queue by the
+    // client core (groups.md §6), so CLI and app cannot drift on the rule.
+    let inbox = zink_client::triage(client.conversations()?);
+    let dropped = inbox.dropped;
     let mut conversations = Vec::new();
-    for summary in client.conversations()? {
+    let mut requests = Vec::new();
+    for summary in inbox
+        .conversations
+        .iter()
+        .chain(inbox.requests.iter())
+    {
         let other_keys: Vec<_> = summary
             .participants
             .iter()
@@ -523,7 +533,7 @@ async fn conversations(
         // Deduped per person (multi-device.md §7): a two-device contact
         // labels once.
         let others = client.participant_labels(&other_keys)?;
-        conversations.push(Conversation {
+        let row = Conversation {
             id: hex::encode(&summary.id.0),
             label: if others.is_empty() {
                 "only me".to_string()
@@ -532,9 +542,19 @@ async fn conversations(
             },
             message_count: summary.message_count,
             last_timestamp_ms: summary.last_timestamp_ms,
-        });
+            request: !summary.known,
+        };
+        if row.request {
+            requests.push(row);
+        } else {
+            conversations.push(row);
+        }
     }
-    Ok(conversations)
+    Ok(Inbox {
+        conversations,
+        requests,
+        dropped,
+    })
 }
 
 /// One conversation's messages, linearized, petname-labelled.

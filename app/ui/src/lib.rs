@@ -12,7 +12,7 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use wasm_bindgen::prelude::wasm_bindgen;
 use zink_app_dto::{
-    AppState, Conversation, Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview,
+    AppState, Conversation, Inbox, Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview,
     UnknownMember, WhoIsReport,
 };
 
@@ -42,7 +42,7 @@ fn App() -> impl IntoView {
     // True until a profile exists — drives the first-run onboarding takeover
     // (no tab bar) instead of dropping a new user into the full Me screen.
     let onboarding = RwSignal::new(false);
-    let conversations = RwSignal::new(Vec::<Conversation>::new());
+    let conversations = RwSignal::new(Inbox::default());
     let messages = RwSignal::new(Vec::<Message>::new());
     let status = RwSignal::new((String::new(), ""));
 
@@ -65,8 +65,8 @@ fn App() -> impl IntoView {
     };
     let load_conversations = move || {
         spawn_local(async move {
-            match invoke::invoke::<Vec<Conversation>>("conversations", &NoArgs {}).await {
-                Ok(list) => conversations.set(list),
+            match invoke::invoke::<Inbox>("conversations", &NoArgs {}).await {
+                Ok(inbox) => conversations.set(inbox),
                 Err(e) => err(e),
             }
         })
@@ -430,7 +430,7 @@ fn OnboardingView(
 /// backstop poll keep the list current.
 #[component]
 fn ChatsView(
-    conversations: RwSignal<Vec<Conversation>>,
+    conversations: RwSignal<Inbox>,
     state: RwSignal<Option<AppState>>,
     open_chat: impl Fn(String, String) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
@@ -538,8 +538,25 @@ fn ChatsView(
                     view! {
                         <button on:click=move |_| composing.set(true)>"+ new chat"</button>
                         {move || {
-                            let list = conversations.get();
-                            if list.is_empty() {
+                            let inbox = conversations.get();
+                            let row = |conversation: Conversation| {
+                                let (id, label) = (
+                                    conversation.id.clone(),
+                                    conversation.label.clone(),
+                                );
+                                view! {
+                                    <div
+                                        class="row"
+                                        on:click=move |_| open_chat(id.clone(), label.clone())
+                                    >
+                                        <b>{conversation.label}</b>
+                                        <span class="dim">
+                                            {format!("{} message(s)", conversation.message_count)}
+                                        </span>
+                                    </div>
+                                }
+                            };
+                            if inbox.conversations.is_empty() && inbox.requests.is_empty() {
                                 view! {
                                     <div class="dim">
                                         "no conversations yet — tap + new chat to start one"
@@ -547,28 +564,42 @@ fn ChatsView(
                                 }
                                     .into_any()
                             } else {
-                                list.into_iter()
-                                    .map(|conversation| {
-                                        let (id, label) = (
-                                            conversation.id.clone(),
-                                            conversation.label.clone(),
-                                        );
+                                let main = inbox
+                                    .conversations
+                                    .into_iter()
+                                    .map(row)
+                                    .collect::<Vec<_>>();
+                                // Message requests (groups.md §6): nobody you
+                                // know has written here yet. Kept out of the
+                                // main list, never hidden — and phrased as
+                                // "not yet", because one message from a
+                                // contact promotes the whole conversation.
+                                let (requests, dropped) = (inbox.requests, inbox.dropped);
+                                let pending = (!requests.is_empty())
+                                    .then(|| {
+                                        let rows = requests
+                                            .into_iter()
+                                            .map(row)
+                                            .collect::<Vec<_>>();
                                         view! {
-                                            <div
-                                                class="row"
-                                                on:click=move |_| open_chat(id.clone(), label.clone())
-                                            >
-                                                <b>{conversation.label}</b>
-                                                <span class="dim">
-                                                    {format!(
-                                                        "{} message(s)",
-                                                        conversation.message_count,
-                                                    )}
-                                                </span>
+                                            <div class="dim section">
+                                                "message requests — nobody you know has written here yet"
                                             </div>
+                                            {rows}
+                                            {(dropped > 0)
+                                                .then(|| {
+                                                    view! {
+                                                        <div class="dim">
+                                                            {format!("+ {dropped} more not shown")}
+                                                        </div>
+                                                    }
+                                                })}
                                         }
-                                    })
-                                    .collect::<Vec<_>>()
+                                    });
+                                view! {
+                                    {main}
+                                    {pending}
+                                }
                                     .into_any()
                             }
                         }}

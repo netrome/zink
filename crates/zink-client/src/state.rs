@@ -82,7 +82,44 @@ impl ClientState {
             .join(format!("{}.env", hex(&envelope.id().0)));
         create_parent(&path)?;
         write_atomic(&path, &envelope.to_bytes())
-            .map_err(|e| Error::Storage(format!("write {path:?}: {e}")))
+            .map_err(|e| Error::Storage(format!("write {path:?}: {e}")))?;
+        self.note_first_seen(conversation);
+        Ok(())
+    }
+
+    /// When this device first stored anything for a conversation — **our**
+    /// clock, written once. 0 when unrecorded (a conversation from before
+    /// this marker existed), which sorts as oldest.
+    ///
+    /// The senders' `timestamp_ms` cannot do this job: it is a display hint
+    /// a sender chooses freely (SPEC §4.3), so a stranger could pin their
+    /// message to the top of the requests queue forever by dating it in the
+    /// future, and push real requests off the cap. Ordering the spam view by
+    /// something attacker-controlled would hand them the eviction policy.
+    pub fn first_seen_ms(&self, conversation: MessageId) -> u64 {
+        std::fs::read_to_string(self.first_seen_path(conversation))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Write the marker if absent. Best-effort: losing it costs ordering
+    /// precision in one view, never a message.
+    fn note_first_seen(&self, conversation: MessageId) {
+        let path = self.first_seen_path(conversation);
+        if path.exists() {
+            return;
+        }
+        let now = crate::client::now_ms();
+        if let Err(error) = write_atomic(&path, now.to_string().as_bytes()) {
+            tracing::debug!(%error, "could not record a conversation's first-seen time");
+        }
+    }
+
+    /// Inside the conversation dir, with no `.env` suffix, so
+    /// `load_envelopes` ignores it like the `.acks` sidecars.
+    fn first_seen_path(&self, conversation: MessageId) -> PathBuf {
+        self.conversation_dir(conversation).join("first-seen")
     }
 
     /// All decodable envelopes stored under a conversation, unordered. A
