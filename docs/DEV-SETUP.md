@@ -4,6 +4,33 @@ Everything needed to build and test zink on a fresh Linux machine (headless is
 fine — no GUI tools required anywhere). Reproduces the exact toolchain used in
 development; versions are pinned where the ecosystem makes that matter.
 
+Two ways to get the toolchain: **Nix** (§0, reproducible, one command) or the
+**manual rustup + downloads** path (§1 onward). The manual sections remain the
+source of truth for *what* each target needs; the flake just assembles it.
+
+## 0. Nix (recommended on NixOS / any machine with Nix + flakes)
+
+`flake.nix` pins the whole toolchain via `rust-toolchain.toml` and
+`flake.lock` — same Rust (1.97, edition 2024), same `wasm-bindgen` 0.2.126,
+same Android SDK 34 / NDK 27.1. Three shells, layered so the common case is
+light:
+
+```sh
+nix develop            # core + WASM: cargo build / nextest run / clippy / fmt, ./web/spike/build.sh
+nix develop .#desktop  # + webkit2gtk + tauri-cli — the Tauri desktop app
+nix develop .#android  # + JDK 21 + Android SDK/NDK + aarch64 target (x86_64-linux only)
+```
+
+Each shell exports the env the corresponding manual section sets by hand (the
+wasm clang bridge for `ring`, and the Android `JAVA_HOME`/`NDK_HOME`/linker
+vars of §3.3/§3.5). The `default` and `desktop` shells work on both
+`x86_64-linux` and `aarch64-linux`; the `android` shell is `x86_64-linux` only
+(Google ships the NDK toolchain prebuilt for that host). First `.#android`
+entry downloads the SDK (~1.5 GB); `cargo tauri android` then pulls Gradle
+deps over the network as usual.
+
+If you're not on Nix, follow the manual sections below instead.
+
 ## 1. Core (all crates, all tests)
 
 - **Rust** (stable, ≥ 1.97, edition 2024) via [rustup](https://rustup.rs).

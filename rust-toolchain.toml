@@ -1,0 +1,10 @@
+# Pinned toolchain, consumed by both the Nix flake (rust-overlay's
+# fromRustupToolchainFile) and a plain `rustup` checkout. Keep in sync with
+# docs/DEV-SETUP.md §1 (stable, edition 2024, ≥ 1.97).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+targets = [
+  "wasm32-unknown-unknown",   # browser client + Leptos UI (DEV-SETUP §2)
+  "aarch64-linux-android",    # native phone client (DEV-SETUP §3.4)
+]
