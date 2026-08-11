@@ -66,12 +66,19 @@
             AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-ar";
           };
 
-          # Android SDK/NDK for the native phone client. Versions pinned to
-          # DEV-SETUP §3.2/§3.4: platform 34, build-tools 34.0.0, NDK 27.1.
+          # Android SDK/NDK for the native phone client. The platform +
+          # build-tools versions MUST match what `cargo tauri android`'s
+          # generated Gradle project asks for (app/build.gradle.kts:
+          # compileSdk/targetSdk, and AGP's default build-tools) — under Nix
+          # the SDK lives read-only in /nix/store, so Gradle can't silently
+          # auto-download a missing component the way it does on a writable
+          # ~/android/sdk. Currently AGP 8.11 → compileSdk 36 / build-tools
+          # 35.0.0. Bump these together when Tauri/AGP moves.
           ndkVersion = "27.1.12297006";
+          buildToolsVersion = "35.0.0";
           androidComposition = pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "34" ];
-            buildToolsVersions = [ "34.0.0" ];
+            platformVersions = [ "36" ];
+            buildToolsVersions = [ buildToolsVersion ];
             includeNDK = true;
             ndkVersions = [ ndkVersion ];
             abiVersions = [ "arm64-v8a" ]; # aarch64 phones (DEV-SETUP §3.4)
@@ -146,7 +153,27 @@
             };
             shellHook = ''
               export PATH="${androidSdkRoot}/platform-tools:$PATH"
-              echo "zink android shell — sdk 34 / ndk ${ndkVersion} / jdk 21"
+
+              # NixOS: the Android Gradle Plugin downloads its own aapt2 from
+              # Maven — a dynamically-linked ELF that can't start here (no FHS
+              # loader). Force AGP to use the SDK's autoPatchelf'd aapt2 instead.
+              #
+              # We pass the override as a Gradle project property via a JVM
+              # system property (org.gradle.project.<name>) in GRADLE_OPTS. This
+              # keeps the dependency cache in the default, shared ~/.gradle (like
+              # ~/.cargo) while writing NO file: not into the git-tracked
+              # gen/android/gradle.properties (the override is a machine-specific
+              # /nix/store path that must never be committed), and not into a
+              # global ~/.gradle config (which would leak into your other Gradle
+              # projects). The setting lives only in this shell's environment.
+              #
+              # (A Gradle init script does NOT work for this: AGP reads the
+              # property via providers.gradleProperty(), whose value is snapshot
+              # from files/CLI/env before init scripts run, so mutating
+              # startParameter.projectProperties there has no effect.)
+              export GRADLE_OPTS="-Dorg.gradle.project.android.aapt2FromMavenOverride=${androidSdkRoot}/build-tools/${buildToolsVersion}/aapt2 ''${GRADLE_OPTS:-}"
+
+              echo "zink android shell — sdk 36 / build-tools ${buildToolsVersion} / ndk ${ndkVersion} / jdk 21"
               echo "  smoke test:  cargo build -p zink-relay --lib --target aarch64-linux-android"
               echo "  app:         (cd app/src-tauri && cargo tauri android init && cargo tauri android build --debug --target aarch64)"
             '';

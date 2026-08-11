@@ -85,8 +85,18 @@ rm cmdtools.zip
 export JAVA_HOME=~/android/jdk
 yes | sdk/cmdline-tools/latest/bin/sdkmanager --licenses
 sdk/cmdline-tools/latest/bin/sdkmanager \
-  "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.1.12297006"
+  "platform-tools" "platforms;android-36" "build-tools;35.0.0" "ndk;27.1.12297006"
 ```
+
+⚠️ The `platforms;android-N` and `build-tools;N` versions must match what
+`cargo tauri android`'s generated Gradle project requests — see
+`app/src-tauri/gen/android/app/build.gradle.kts` (`compileSdk`/`targetSdk`)
+and the Android Gradle Plugin version in `gen/android/build.gradle.kts`
+(AGP picks a default build-tools). Currently AGP 8.11 → `compileSdk 36`,
+`build-tools;35.0.0`. On this writable SDK a mismatch just makes Gradle
+download the missing component on first build; **under the Nix flake (§0)
+the SDK is read-only, so the flake must pin these exactly** — bump both
+places together when Tauri/AGP moves.
 
 ### 3.3 Environment (add to your shell rc)
 
