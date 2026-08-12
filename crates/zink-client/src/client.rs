@@ -60,10 +60,8 @@ pub struct Client<C: Clock + WallClock = SystemClock> {
     endpoint: Endpoint,
     state: ClientState,
     config: ClientConfig,
-    /// Time behind a port (I/O at the edges): monotonic waits/elapsed and
-    /// wall timestamps both come from here, so tests drive them without real
-    /// sleeps. `SystemClock` in production; the default type parameter keeps
-    /// edges writing bare `Client`. See `crate::clock`.
+    /// Monotonic and wall time, behind ports. `SystemClock` in production; see
+    /// `crate::clock`.
     clock: C,
     /// The auto-query rate limit (D2b, groups.md §4): (subject, conversation)
     /// pairs already asked this run — a drain loop must not re-broadcast
@@ -81,9 +79,8 @@ pub struct Client<C: Clock + WallClock = SystemClock> {
     reach: crate::sync::ReachMap,
 }
 
-/// The production constructors: they load keys from disk and bind a real
-/// endpoint, so they always build a `Client<SystemClock>`. Tests that need a
-/// controllable clock build through the generic `with_device` instead.
+/// Production constructors: they read keys from disk and bind a real endpoint,
+/// so they always build a `Client<SystemClock>`.
 impl Client<SystemClock> {
     /// Open with an existing key (the CLI path — `keygen` created it).
     pub async fn open(key_path: &str) -> Result<Self, Error> {
@@ -3374,12 +3371,8 @@ fn membership_delta(
     )
 }
 
-/// The un-injected production wall clock, for the two call-sites that live
-/// outside a `Client` and whose timing nothing asserts — the conversation
-/// first-seen marker (`state.rs`) and the "a peer reached us" stamp
-/// (`sync.rs`). Everything a test needs to drive goes through `self.clock`
-/// instead; threading a clock into `ClientState`/`SyncHandler` for these two
-/// is deferred until a slice actually needs it.
+/// Wall time for the two call-sites outside a `Client` (`state.rs` first-seen,
+/// `sync.rs` reach stamp); elsewhere use the injected `self.clock`.
 pub(crate) fn now_ms() -> u64 {
     SystemClock.now_ms()
 }
