@@ -49,23 +49,19 @@ and call it out** — never encode it silently in code.
 
 ## Workflow: post-MVP iterations
 
-We still build in **small vertical slices toward a runnable product**, walking-skeleton
-first. Each iteration is a numbered project under `docs/projects/N-name/`; its tracker is
-the slice checklist for that effort.
+We build in **small vertical slices**, each ending in something runnable with focused
+tests (`// Given / // When / // Then`, per STYLE.md). Each iteration is a numbered project
+under `docs/projects/N-name/`; its tracker is the live slice checklist (highest number is
+current — keep it current: tick finished slices, add follow-ups).
 
-- Each slice is the smallest step that ends in **something runnable**, with **focused
-  tests** (`// Given / // When / // Then`, per STYLE.md).
-- The **current project's tracker** (highest number in `docs/projects/`) is the live
-  checklist. Keep it current: check off finished slices, add follow-ups.
 - **Separate the log from the knowledge.** Trackers record *what we did and when*;
   durable *how-it-works-and-why* graduates out — subsystem rationale to `docs/design/`,
   cross-cutting architecture decisions to `docs/decisions/` (an ADR), protocol decisions
   to SPEC §11. Don't leave load-bearing decisions buried in a tracker's slice notes.
-- Scaffolding and dev tooling (e.g. a native CLI test-client) are welcome when they
-  speed the loop or de-risk integration — these are dev tools, not shipped clients.
 - No creep beyond the current slice; the invariants above always hold.
 - Write a short `docs/design/<name>.md` only for a slice with genuine unresolved design
-  — just-in-time, not upfront.
+  — just-in-time, not upfront. Dev tooling (e.g. the CLI test-client) is welcome when it
+  speeds the loop or de-risks integration — dev tools, not shipped clients.
 
 For each slice:
 1. Briefly state it: what it adds, files touched, non-goals.
