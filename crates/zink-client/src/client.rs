@@ -2,7 +2,7 @@
 //! send/recv flows over them. Edges (CLI, app) stay presentation-only.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use iroh::Endpoint;
 use rand_core::{OsRng, RngCore};
@@ -13,6 +13,7 @@ use zink_protocol::{
     distinct_relays, open_avatar, seal_avatar,
 };
 
+use crate::clock::{Clock, SystemClock, WallClock};
 use crate::error::Error;
 use crate::state::ClientState;
 use crate::{blobs, hex, keystore, net};
@@ -54,11 +55,16 @@ impl Default for ClientConfig {
     }
 }
 
-pub struct Client {
+pub struct Client<C: Clock + WallClock = SystemClock> {
     device: DeviceKey,
     endpoint: Endpoint,
     state: ClientState,
     config: ClientConfig,
+    /// Time behind a port (I/O at the edges): monotonic waits/elapsed and
+    /// wall timestamps both come from here, so tests drive them without real
+    /// sleeps. `SystemClock` in production; the default type parameter keeps
+    /// edges writing bare `Client`. See `crate::clock`.
+    clock: C,
     /// The auto-query rate limit (D2b, groups.md §4): (subject, conversation)
     /// pairs already asked this run — a drain loop must not re-broadcast
     /// interest in a key. In-memory on purpose; the manual trigger re-asks.
@@ -75,7 +81,10 @@ pub struct Client {
     reach: crate::sync::ReachMap,
 }
 
-impl Client {
+/// The production constructors: they load keys from disk and bind a real
+/// endpoint, so they always build a `Client<SystemClock>`. Tests that need a
+/// controllable clock build through the generic `with_device` instead.
+impl Client<SystemClock> {
     /// Open with an existing key (the CLI path — `keygen` created it).
     pub async fn open(key_path: &str) -> Result<Self, Error> {
         Self::open_with(key_path, ClientConfig::default()).await
@@ -83,7 +92,7 @@ impl Client {
 
     /// `open` with edge-injected tuning.
     pub async fn open_with(key_path: &str, config: ClientConfig) -> Result<Self, Error> {
-        Self::with_device(keystore::load(key_path)?, key_path, config).await
+        Self::with_device(keystore::load(key_path)?, key_path, config, SystemClock).await
     }
 
     /// Open, creating the key on first run (the app path).
@@ -92,14 +101,18 @@ impl Client {
             keystore::load_or_create(key_path)?,
             key_path,
             ClientConfig::default(),
+            SystemClock,
         )
         .await
     }
+}
 
+impl<C: Clock + WallClock> Client<C> {
     async fn with_device(
         device: DeviceKey,
         key_path: &str,
         config: ClientConfig,
+        clock: C,
     ) -> Result<Self, Error> {
         // State first: the endpoint homes to the profile's relay URLs (D0b),
         // and iroh fixes the relay transport at bind time — so a relay added
@@ -123,7 +136,7 @@ impl Client {
         // fresh process re-pays the dial deadline for every peer that is
         // simply offline, which the app does on every start and the one-shot
         // CLI on every command.
-        let reach = load_unreachable(&state);
+        let reach = load_unreachable(&state, &clock);
         let sync_router = crate::sync::spawn_sync_router(
             endpoint.clone(),
             state.clone(),
@@ -140,6 +153,7 @@ impl Client {
             _sync_router: sync_router,
             direct_sink,
             reach,
+            clock,
         })
     }
 
@@ -317,7 +331,7 @@ impl Client {
                 recipients,
                 seq: 0,
                 logical: 0,
-                timestamp_ms: now_ms(),
+                timestamp_ms: self.clock.now_ms(),
                 plaintext: vec![],
                 blobs: vec![],
             }),
@@ -424,7 +438,7 @@ impl Client {
             recipients,
             seq: dag.next_seq(&self.device.public()),
             logical: dag.next_logical(),
-            timestamp_ms: now_ms(),
+            timestamp_ms: self.clock.now_ms(),
             plaintext: vec![],
             blobs: vec![],
         })
@@ -496,7 +510,7 @@ impl Client {
                 .chain(device_contacts.iter())
                 .map(|c| c.relays.clone()),
         );
-        let now = now_ms();
+        let now = self.clock.now_ms();
         for relay in &relays {
             self.state.add_outbox(id, relay, conversation, now)?;
         }
@@ -678,7 +692,7 @@ impl Client {
         envelope: &MessageEnvelope,
         recipients: &[PublicKey],
     ) -> BTreeSet<PublicKey> {
-        let now = now_ms();
+        let now = self.clock.now_ms();
         let me = self.device.public();
         let mut targets = Vec::new();
         for &key in recipients {
@@ -833,7 +847,7 @@ impl Client {
     /// stays surfaced as pending/undelivered (deleting it is not our call).
     pub async fn flush_outbox(&self) -> Result<FlushReport, Error> {
         let mut report = FlushReport::default();
-        let now = now_ms();
+        let now = self.clock.now_ms();
         // Cheap triage first: an aged-out entry never touches the network.
         let owed: Vec<crate::state::OutboxEntry> = self
             .state
@@ -1045,7 +1059,7 @@ impl Client {
             let jitter = 0.5 + f64::from(OsRng.next_u32()) / f64::from(u32::MAX);
             let delay = backoff.mul_f64(jitter);
             tracing::debug!(relay, ?delay, "reconnecting after backoff");
-            n0_future::time::sleep(delay).await;
+            self.clock.sleep(delay).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     }
@@ -1099,7 +1113,7 @@ impl Client {
                 .accept_uni()
                 .await
                 .map_err(|e| Error::Transport(format!("connection lost: {e}")))?;
-            let started = std::time::Instant::now();
+            let started = self.clock.now();
             let received = self
                 .drain_connection(relay, &connection, &std::sync::Mutex::default())
                 .await?;
@@ -2049,7 +2063,7 @@ impl Client {
                         &answer.responder,
                         &answer.record,
                         &answer.endorsements,
-                        now_ms(),
+                        self.clock.now_ms(),
                     )?;
                     answers.push(answer);
                 }
@@ -2852,8 +2866,8 @@ impl Client {
 /// Only `failed_ms` is restored. `seen_ms` deliberately starts at zero, so a
 /// peer we knew last run gets one cheap probe rather than the full
 /// known-peer budget: a path that existed then may not exist now.
-fn load_unreachable(state: &ClientState) -> crate::sync::ReachMap {
-    let now = now_ms();
+fn load_unreachable(state: &ClientState, clock: &impl WallClock) -> crate::sync::ReachMap {
+    let now = clock.now_ms();
     let map: std::collections::BTreeMap<[u8; 32], crate::sync::Reach> = state
         .unreachable()
         .into_iter()
@@ -3360,11 +3374,14 @@ fn membership_delta(
     )
 }
 
+/// The un-injected production wall clock, for the two call-sites that live
+/// outside a `Client` and whose timing nothing asserts — the conversation
+/// first-seen marker (`state.rs`) and the "a peer reached us" stamp
+/// (`sync.rs`). Everything a test needs to drive goes through `self.clock`
+/// instead; threading a clock into `ClientState`/`SyncHandler` for these two
+/// is deferred until a slice actually needs it.
 pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before 1970")
-        .as_millis() as u64
+    SystemClock.now_ms()
 }
 
 #[cfg(test)]
@@ -4454,7 +4471,7 @@ mod tests {
             .expect("save unreachable");
 
         // When
-        let loaded = load_unreachable(&state);
+        let loaded = load_unreachable(&state, &SystemClock);
         let loaded = loaded.lock().expect("reach lock");
 
         // Then: the cooled-down one is gone — persisted negative evidence

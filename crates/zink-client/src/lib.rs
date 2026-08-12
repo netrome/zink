@@ -8,6 +8,8 @@
 mod blobs;
 #[cfg(not(target_family = "wasm"))]
 mod client;
+#[cfg(not(target_family = "wasm"))]
+mod clock;
 mod error;
 pub mod hex;
 #[cfg(not(target_family = "wasm"))]

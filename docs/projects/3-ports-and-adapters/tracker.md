@@ -145,11 +145,31 @@ Ordered so each is runnable and measured. **DoD (every slice):** builds ·
 re-measured where relevant · this tracker updated · durable bits graduated per §5.
 
 **Tier 1 — Clock port into the client**
-- [ ] **P1 · `Clock` port in `zink-client`.** Mirror the relay's `clock.rs`
-  pattern; inject a clock into `Client`; route the direct time call-sites
-  (`client.rs:1048, 1102, 3364, 3768, 4414, 4431, 6265`) through it.
-  `SystemClock` in production, unchanged behavior. *Done when:* no
-  `Instant::now` / `SystemTime::now` / `sleep` remains outside the adapter.
+- [x] **P1 · `Clock` port in `zink-client`.** ✅ 2026-08-13. New
+  `crates/zink-client/src/clock.rs` mirrors the relay's `clock.rs`: `Clock`
+  (monotonic `now` + `sleep`) and `WallClock` (`now_ms`) traits, `SystemClock`
+  implementing both. Injected into `Client` as **one generic parameter with a
+  default** — `Client<C: Clock + WallClock = SystemClock>` — mirroring the
+  relay's `InMemoryStore<C = SystemClock>`, *not* a trait object. Edges
+  (`zink-cli`, the excluded Tauri app) keep writing bare `Client`/`Arc<Client>`
+  and needed **zero** changes; production monomorphizes to `SystemClock` with
+  no allocation or type erasure, and `sleep` is `impl Future` (RPITIT) rather
+  than boxed. All production time calls now route through `self.clock`; `fmt`
+  + `clippy --all-targets` clean; 229/229 tests in ~6.0 s (unchanged — P1 is
+  behavior-preserving); native + `wasm32` both compile. *Done:* no
+  `Instant::now` / `SystemTime::now` / `sleep` outside the adapter in
+  production code.
+  - **Scope corrections vs. the original line-number list:** of the seven
+    `client.rs` sites, four (`3768/4414/4431/6265`) were **`#[cfg(test)]`
+    elapsed-assertions**, deliberately left for P2 to convert into *scheduling*
+    assertions. The real production monotonic sites were just two (backoff
+    `sleep`, elapsed logging). The wall site (`now_ms()`) had **12 callers
+    across three files**; the ten inside `Client` now use `self.clock`, while
+    the two that live outside a `Client` and whose timing nothing asserts
+    (`state.rs` first-seen, `sync.rs` reach-seen) stay on a `SystemClock`-backed
+    free `now_ms()` — threading a clock into `ClientState`/`SyncHandler` for
+    those is deferred until a slice needs it (would require `ClientState<W>` /
+    `SyncHandler<W>`, out of P1's scope).
 - [ ] **P2 · `TestClock` + migrate in-proc time waits.** Advanceable clock;
   the `zink-client` lib tests that currently wait real backoff/deadline advance
   mock time instead. Convert `delivery__should_pay_one_deadline` to assert
@@ -191,6 +211,8 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 |---|---|
 | Layer | Ports live in `zink-client`; `zink-protocol` core stays pure (tenet: I/O at the edges). |
 | Time | A `Clock` port mirroring the relay's, injected into `Client`; `TestClock` advanceable. |
+| Injection mechanism | **Generics with a default type parameter** (`Client<C: Clock + WallClock = SystemClock>`), *not* `dyn`/`Arc<dyn>`. Rationale: no heap allocation, no type erasure, full monomorphization; a default type param means edges keep writing bare `Client` (zero edge churn), exactly as the relay's `InMemoryStore<C = SystemClock>`. `sleep` is `impl Future` (RPITIT), which the generic seam makes free. Decided P1 (2026-08-13). |
+| Wall-clock reach | Two un-asserted wall sites (`state.rs` first-seen, `sync.rs` reach-seen) stay on a `SystemClock`-backed free `now_ms()`; injecting them would need `ClientState<W>`/`SyncHandler<W>` and buys no current test — deferred, not in P1. |
 | Transport | A narrow byte/stream port keyed by pubkey, seam *below* fan-out & reachability. Trait split (send vs accept) decided in P3. |
 | Test doubles | Small composable per-scenario doubles, not one simulator (§4). |
 | Smoke tier | Retained and explicit; never zero real-network tests. |
