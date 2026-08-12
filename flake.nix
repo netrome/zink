@@ -180,6 +180,33 @@
           };
         });
 
+      # `nix build .#zink-relay` — the deployable relay binary, consumed by
+      # server configs as a flake input. Built with the same pinned toolchain
+      # as the dev shell so both agree on the compiler.
+      packages = forAllSystems (pkgs:
+        let
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+        in
+        rec {
+          zink-relay = rustPlatform.buildRustPackage {
+            pname = "zink-relay";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            buildAndTestSubdir = "crates/zink-relay";
+            # Tests run via nextest in dev/CI; deploy builds stay lean.
+            # (build.rs finds no .git in the Nix sandbox, so --version
+            # reports "unknown" — the documented tarball fallback.)
+            doCheck = false;
+            meta.mainProgram = "zink-relay";
+          };
+          default = zink-relay;
+        });
+
       formatter = forAllSystems (pkgs: pkgs.nixpkgs-fmt);
     };
 }
