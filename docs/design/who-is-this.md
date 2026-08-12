@@ -288,4 +288,4 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
   still-to-pin-down; record the resolutions (D1a).
 - SPEC §3.2: `Claim::Avatar` shape (hash + key) (D1d).
 - `client-core.md`: `who_is`, the learned store, resolution precedence (D1b).
-- `mvp-build-plan.md`: tick sub-slices as they land.
+- `../projects/1-mvp/build-plan.md`: tick sub-slices as they land.

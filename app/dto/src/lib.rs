@@ -50,7 +50,7 @@ pub struct ContactRow {
     /// The record's first key, hex — the row's avatar / `who_is` handle.
     pub key: String,
     /// The full cluster of keys grouped under this person, hex — cluster-first
-    /// (U4, ui-facelift.md §4); consumers read the set, never assume `key` is
+    /// (U4, design/ui-design-system.md §1); consumers read the set, never assume `key` is
     /// the only one.
     pub keys: Vec<String>,
     /// Whether this device currently vouches for them (D4c toggle).
@@ -60,7 +60,7 @@ pub struct ContactRow {
     pub disavowals: Vec<String>,
 }
 
-/// The person-detail screen (U4, ui-facelift.md §4): the three separated
+/// The person-detail screen (U4, design/ui-design-system.md §1): the three separated
 /// belief layers, all read-time (no network pull). Fetched by petname when a
 /// People row is tapped.
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -237,7 +237,7 @@ never leaves the device (no third party anywhere in this path).
 
 ## 6. Slicing
 
-*(Tracked as C4a/C4b/C4c in [mvp-build-plan.md](./mvp-build-plan.md) — this
+*(Tracked as C4a/C4b/C4c in [mvp-build-plan.md](../projects/1-mvp/build-plan.md) — this
 section records the rationale for the cut, the plan tracks progress.)*
 
 - **C4a · Outbox.** §2 complete, CLI-testable e2e (relay down → pending →

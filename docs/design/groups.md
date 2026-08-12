@@ -3,7 +3,7 @@
 Design for the D2 sub-slices. Downstream of [SPEC](../SPEC.md) §4 (the
 conversation DAG — already multi-recipient since B1/B2) and
 [who-is-this.md](./who-is-this.md) (the lookup + provenance machinery this
-pipeline drives); feeds [D3 · Multi-device](./mvp-build-plan.md), which rides
+pipeline drives); feeds [D3 · Multi-device](../projects/1-mvp/build-plan.md), which rides
 this pipeline ("your new device" and "a new member" are the same event under
 the hood, SPEC §5.2).
 
@@ -240,7 +240,7 @@ is attacker-controlled* — a spammer can list your friends for free —
 
 - who-is-this.md §5: replace the pending-revision blockquote with the
   resolved carve-out (D2b).
-- mvp-build-plan.md: tick sub-slices as they land.
+- ../projects/1-mvp/build-plan.md: tick sub-slices as they land.
 - SPEC: **nothing** — the protocol is untouched end to end, which is the
   strongest sign the model was right. (§4.4 already states membership =
   per-message recipients; §5.2 already states the device/member

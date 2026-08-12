@@ -1,10 +1,17 @@
 # MVP Build Plan
 
-The slice checklist and shared task tracker for reaching a working MVP. Downstream of
-[SPEC.md](../SPEC.md); governed by [../../AGENTS.md](../../AGENTS.md).
+> **Status: ✅ complete & archived (2026-07-26).** Project **1-mvp**. This is the
+> narrative record of how the MVP was built — the decision and field-lesson log,
+> not open work. Durable design rationale graduated to
+> [`docs/design/`](../../design/); resolved protocol decisions live in SPEC §11;
+> architecture decisions worth calling out are in [`docs/decisions/`](../../decisions/).
+> Post-MVP work opens as a new numbered project under [`docs/projects/`](../).
 
-> The UX/visual polish pass runs in its own tracker, parallel to this one:
-> [ui-facelift.md](./ui-facelift.md).
+The slice checklist and shared task tracker for reaching a working MVP. Downstream of
+[SPEC.md](../../SPEC.md); governed by [AGENTS.md](../../../AGENTS.md).
+
+> The UX/visual polish pass ran in its own tracker, parallel to this one:
+> [2-ui-facelift](../2-ui-facelift/tracker.md).
 
 **How to use this doc.** We build in small vertical slices, native-first, walking-
 skeleton first. Each slice ends in something *runnable* with focused tests. Check items
@@ -33,7 +40,7 @@ web/                   # browser spike page (A6) — post-MVP PWA groundwork
 *The live view. Every slice below is done; those entries are kept as the decision
 and field-lesson record, not as work. Update this block when something lands, so
 nobody has to scroll 1,600 lines to find what is actually open. The parallel
-[ui-facelift.md](./ui-facelift.md) pass (U1–U8) closed the same day.*
+[2-ui-facelift](../2-ui-facelift/tracker.md) pass (U1–U8) closed the same day.*
 
 **Nothing is outstanding.** Stages A–D, the U1–U8 facelift, De1–De8, the relay
 bounds (R1/R2), per-type format versions, and the unknown-sender quarantine have
@@ -107,7 +114,7 @@ CLI and the app).
 - [x] **B1 · Message DAG & ordering.** 🎯 Genesis rules; parents/heads; conversation id;
   a client-side DAG store; `logical`/`seq`; linearization. *Done when:* ordering tests
   pass — concurrent → deterministic order, partial-view linearization, `seq` gap detection.
-  *(Design: [dag-store.md](./dag-store.md). CLI threading waits for persistence, B5.)*
+  *(Design: [dag-store.md](../../design/dag-store.md). CLI threading waits for persistence, B5.)*
 - [x] **B2 · Fan-out & multi-relay.** Resolve recipients → distinct relays → deposit the
   envelope once per relay; relay indexes per recipient device-key; receiver dedups by id.
   *Done when:* 1→N delivery test and cross-relay dedup test pass.
@@ -173,7 +180,7 @@ CLI and the app).
   state + DAG threading, send/recv/fan-out, blob fetch. The app gets a persistent
   device key in its data dir. *Done when:* the CLI runs on `zink-client` with all
   existing e2e tests green, and the app sends + receives a text via Tauri commands.
-  *(Design: [client-core.md](./client-core.md). ✅ 2026-07-11: phone ↔ CLI chat worked
+  *(Design: [client-core.md](../../design/client-core.md). ✅ 2026-07-11: phone ↔ CLI chat worked
   live — two client implementations threading one conversation. No tokio in the lib;
   the A6 WASM spike moved to a wasm-gated module and still builds.)*
 - [x] **C2 · Contacts & QR.** ContactRecord (SPEC §3.6): generate + display your QR
@@ -254,7 +261,7 @@ CLI and the app).
   ✅ *(2026-07-24 — met: a backgrounded phone, untouched for hours, showed the
   notification for an incoming message. See C4c for what remains measured vs
   assumed.)* *(Design:
-  [live-delivery.md](./live-delivery.md) — nudge-and-fetch, outbox, foreground
+  [live-delivery.md](../../design/live-delivery.md) — nudge-and-fetch, outbox, foreground
   service; decisions resolved 2026-07-12. Risk spike: background delivery vs
   Android Doze/battery optimization — the successor to the retired Web Push
   spike, isolated in C4c.)*
@@ -400,7 +407,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   hole (a client without a conversation's genesis cannot reply — noted in B5);
   prerequisite for D3 backfill and D4's backlog serving. *(The peer ALPN + connectivity
   it stands up are the substrate for D1's `who-is-this` and D5 direct delivery too.)*
-  Design: [sync-primitives.md](./sync-primitives.md).
+  Design: [sync-primitives.md](../../design/sync-primitives.md).
   - [x] **D0a · Serve + backward-fill.** `SYNC_ALPN` + sync wire types in
     `zink-protocol`; the client runs an *accepting* router (first time — it's been
     dial-only) serving envelopes at discretion; `Client::backfill(conversation,
@@ -437,7 +444,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
     relayed otherwise) and one backfills from the other **by key alone** — headless e2e
     covers by-key dial via relay rendezvous; the actual cross-NAT holepunch is a
     documented manual run (like C-spike/C4c). Design:
-    [sync-primitives.md](./sync-primitives.md) §4. **Foundation for D0c/D0d, D1's
+    [sync-primitives.md](../../design/sync-primitives.md) §4. **Foundation for D0c/D0d, D1's
     `who-is-this`, and D5.**
     ✅ *(2026-07-18: code complete + headless e2e green — two in-process iroh relay
     servers, A homed to one / B to the other, B backfills by key alone (record carries
@@ -555,7 +562,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   checks, the app ContactsView + QR add. Unbuilt: the networked `who-is-this`,
   ranking, avatars.)* **Overall acceptance — the one-way-add reply hole:** C scanned
   A's QR and messaged A; A resolves C's key through a shared contact, adds C, and
-  replies. Design: [who-is-this.md](./who-is-this.md) — query format, hop limit,
+  replies. Design: [who-is-this.md](../../design/who-is-this.md) — query format, hop limit,
   serving policy, learned-record storage, avatar crypto; decisions resolved
   2026-07-19. Notably: serving stays **contacts-only uniformly** (the D0c note
   anticipated a looser per-op policy for this op; resolved the other way — the
@@ -747,7 +754,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   the CLI keeps one or two thin smoke tests for arg-parsing/output. *(Noted
   2026-07-19 at D2b review.)*
   *(Reframed 2026-07-25 after measuring — see
-  [fast-failure.md](./fast-failure.md). The harness diagnosis holds but is
+  [fast-failure.md](../../design/fast-failure.md). The harness diagnosis holds but is
   **not the dominant cost**: the suite's time is mostly the product's own
   unreachable-peer deadlines, which the tests hit constantly because their
   peers are deliberately offline. Current numbers: groups **9.84 s**,
@@ -765,7 +772,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   (send to an offline recipient 3.7 s, who-is on an offline subject 8 s,
   `send`/`recv` with the relay down ~10 s each), and serial per-relay loops
   make those additive. Diagnosis, measurements and options:
-  [fast-failure.md](./fast-failure.md). Non-goal: shortening the production
+  [fast-failure.md](../../design/fast-failure.md). Non-goal: shortening the production
   `connect_timeout` — direct-delivery.md §5.1 argued that trade and parked it;
   these slices avoid *making* doomed dials rather than giving up on honest
   ones sooner.
@@ -965,7 +972,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   a message with no outbox entries is equally direct-acked or deposited fine.
   The ladder, the attribution rule that stops "sent" being laundered into
   "delivered", and the positive-only rendering rule are recorded in
-  [live-delivery.md](./live-delivery.md) §2 — the durable home, since they
+  [live-delivery.md](../../design/live-delivery.md) §2 — the durable home, since they
   govern every future change to the ledger.
   *Caveat to write down:* blobs keep their relay on the path (D5 §3), so an
   image can be both direct-acked and deposited — `delivered` then means the
@@ -1077,7 +1084,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   add-as-contact or ignore, the user always in control of their own store.
   *Done when:* headless e2e — B adds C to a conversation with A; A's client
   auto-queries, surfaces C with provenance, A adds C and replies to all.
-  Design: [groups.md](./groups.md) (drafted 2026-07-19 — defensive by
+  Design: [groups.md](../../design/groups.md) (drafted 2026-07-19 — defensive by
   construction: membership = the **heads'** participant set, a lens on the
   DAG, never an object; the `send_in` participant-index artifact-fork fix;
   the scoped auto-query with introducing-sender-first responders + a
@@ -1176,7 +1183,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   extension; send-to-self deposits; the parked `keys.first()` fix. *Done
   when:* pair a second device, introduce it, contacts' clients cluster it
   under the person, and it reads old history via re-wrap. Design:
-  [multi-device.md](./multi-device.md) (drafted + sharpened at review
+  [multi-device.md](../../design/multi-device.md) (drafted + sharpened at review
   2026-07-19 — **clustering is the observer's choice**: identity is local
   belief, links are advisory evidence, labels↔keys is many-to-many, and
   **completeness is the owner's responsibility** — my clients include my
@@ -1366,7 +1373,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   forwarding stays deferred** (a version bump with a transitive-privacy
   story, post-MVP; the attester-is-responder rule keeps hop 1 structural
   meanwhile); fork views ride as the tail slice.)* Design:
-  [web-of-trust.md](./web-of-trust.md) (drafted 2026-07-20 — one wire
+  [web-of-trust.md](../../design/web-of-trust.md) (drafted 2026-07-20 — one wire
   *field* (`Known` gains `endorsements`), zero new claim kinds, zero new
   stores; the §4 voiding rule pins cross-kind `Negative` supersession;
   evidence accumulates, nobody arbitrates).
@@ -1493,7 +1500,7 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
   online conversations, and two reachable peers don't need the mailbox. **Depends on
   D0a's peer ALPN + D0b connectivity; off the social-features critical path** (schedule
   when p2p/metadata-minimization is prioritized). Design:
-  [direct-delivery.md](./direct-delivery.md) (⚠️ skip-mailbox-on-direct-ack vs
+  [direct-delivery.md](../../design/direct-delivery.md) (⚠️ skip-mailbox-on-direct-ack vs
   always-deposit — resolve after first on-device test). *Done when:* two CLI clients
   online with the relay unreachable exchange a message directly; killing the receiver
   falls back to a mailbox deposit fetched on its return.
@@ -1591,10 +1598,10 @@ want structured variants once the UI branches on failure kind (✅ resolved — 
 
 **🎉 Stage D complete** (2026-07-24) — D0–D5 all live: sync + peer connectivity,
 identity & name resolution, groups, multi-device, web-of-trust, and p2p delivery.
-Landed since: **De6a–d** (fast failure — [fast-failure.md](./fast-failure.md),
+Landed since: **De6a–d** (fast failure — [fast-failure.md](../../design/fast-failure.md),
 suite 28.5 → 24.7 s), **De7** (the D5 ack, surfaced — 208 tests) and **De8** (the
 SPEC §8 relay-shape correction), all 2026-07-25; the parallel
-[ui-facelift.md](./ui-facelift.md) pass closed 2026-07-26. **De6e** is declined
+[2-ui-facelift](../2-ui-facelift/tracker.md) pass closed 2026-07-26. **De6e** is declined
 as an op with a narrower variant unscheduled, and **De4**'s harness cleanup wants
 re-measuring rather than assuming its original estimate.
 *(Live status: **What's left** at the top of this doc — kept in one place so the
@@ -1746,13 +1753,13 @@ here as the record of what the gate was and how each item was answered.
   Expect to learn by building; keep them small and isolated.
 - **Just-in-time design docs** (🎯): A4 mailbox wire messages ✅, B1 DAG store ✅,
   C1 client-core split ✅, C4 live delivery / foreground service ✅
-  ([live-delivery.md](./live-delivery.md)), D0 sync primitives 📝
-  ([sync-primitives.md](./sync-primitives.md)), D1 identity discovery 📝
-  ([who-is-this.md](./who-is-this.md)), D2 groups 📝 ([groups.md](./groups.md)),
-  D3 multi-device 📝 ([multi-device.md](./multi-device.md)), D4 web-of-trust 📝
-  ([web-of-trust.md](./web-of-trust.md)), D5 direct delivery 📝
-  ([direct-delivery.md](./direct-delivery.md), drafted ahead of D0), De6
-  fast failure 📝 ([fast-failure.md](./fast-failure.md) — a *diagnosis* doc:
+  ([live-delivery.md](../../design/live-delivery.md)), D0 sync primitives 📝
+  ([sync-primitives.md](../../design/sync-primitives.md)), D1 identity discovery 📝
+  ([who-is-this.md](../../design/who-is-this.md)), D2 groups 📝 ([groups.md](../../design/groups.md)),
+  D3 multi-device 📝 ([multi-device.md](../../design/multi-device.md)), D4 web-of-trust 📝
+  ([web-of-trust.md](../../design/web-of-trust.md)), D5 direct delivery 📝
+  ([direct-delivery.md](../../design/direct-delivery.md), drafted ahead of D0), De6
+  fast failure 📝 ([fast-failure.md](../../design/fast-failure.md) — a *diagnosis* doc:
   measurements first, options ranked, one 🎯 wire decision left open). The app
   shell (C3) needed no design doc — it assembled resolved decisions; its
   as-built map lives in `app/README.md`.

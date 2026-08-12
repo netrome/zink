@@ -278,4 +278,4 @@ The drill, end to end — every step an existing primitive plus §3/§4:
 - multi-device.md §1/§8: the repudiation-lag and `Negative` deferrals
   resolve here (D4b).
 - client-core.md: vouch / repudiate APIs, endorsement handling (D4a–b).
-- mvp-build-plan.md: tick sub-slices as they land.
+- ../projects/1-mvp/build-plan.md: tick sub-slices as they land.

@@ -5,15 +5,18 @@ zink is a **small, p2p-first chat protocol and its apps**, built on iroh 1.0. It
 protocol. Optimize for **simplicity, testability, minimal dependencies**, and staying
 true to the design philosophy.
 
-We are **pre-MVP**: the goal right now is a working product. This file is deliberately
-lean and build-focused; richer process (formal feature/refactor/review modes) comes
-*after* the MVP works.
+The **MVP is complete** (2026-07-26): protocol + relay + native Android/desktop client,
+text + images, online and offline, with notifications. Work now proceeds as **post-MVP
+iterations**, each a numbered project. This file is deliberately lean and build-focused.
 
 ## Read these first
+- `docs/README.md` — the **doc map**: how canon / design / decisions / projects fit together.
 - `docs/DESIGN-PHILOSOPHY.md` — the *why*. The nine tenets are binding constraints.
 - `docs/SPEC.md` — the protocol (§11 resolved decisions, §12 phasing).
 - `docs/STYLE.md` — code conventions.
-- `docs/design/*.md` — detailed designs, including `mvp-build-plan.md` (the current task list).
+- `docs/design/*.md` — durable subsystem design rationale ("why the code is shaped this way").
+- `docs/decisions/*.md` — ADRs: cross-cutting architecture decisions, each tied to a tenet.
+- `docs/projects/*/` — time-bound trackers; the current effort is the highest-numbered one.
 - `docs/DEV-SETUP.md` — toolchain setup (core, WASM, Android) for building on a fresh machine.
 - `README.md` — project overview (if present).
 
@@ -44,14 +47,20 @@ lean and build-focused; richer process (formal feature/refactor/review modes) co
 If an invariant or a resolved decision (SPEC §11) must change, **propose the doc change
 and call it out** — never encode it silently in code.
 
-## Current workflow: building the MVP
+## Workflow: post-MVP iterations
 
-We build in **small vertical slices toward a runnable product**, walking-skeleton first.
+We still build in **small vertical slices toward a runnable product**, walking-skeleton
+first. Each iteration is a numbered project under `docs/projects/N-name/`; its tracker is
+the slice checklist for that effort.
 
 - Each slice is the smallest step that ends in **something runnable**, with **focused
   tests** (`// Given / // When / // Then`, per STYLE.md).
-- `docs/design/mvp-build-plan.md` is the slice checklist and shared task tracker. Keep
-  it current: check off finished slices, add follow-ups.
+- The **current project's tracker** (highest number in `docs/projects/`) is the live
+  checklist. Keep it current: check off finished slices, add follow-ups.
+- **Separate the log from the knowledge.** Trackers record *what we did and when*;
+  durable *how-it-works-and-why* graduates out — subsystem rationale to `docs/design/`,
+  cross-cutting architecture decisions to `docs/decisions/` (an ADR), protocol decisions
+  to SPEC §11. Don't leave load-bearing decisions buried in a tracker's slice notes.
 - Scaffolding and dev tooling (e.g. a native CLI test-client) are welcome when they
   speed the loop or de-risk integration — these are dev tools, not shipped clients.
 - No creep beyond the current slice; the invariants above always hold.
@@ -64,7 +73,8 @@ For each slice:
 3. Run: `cargo fmt`; `cargo clippy --all-targets --all-features`; `cargo test`;
    `node --test` (browser/SW modules only); build the WASM target when the client is touched.
 4. Show it running / tests passing.
-5. Update `mvp-build-plan.md` and any docs whose behavior changed.
+5. Update the current tracker, graduate any durable decision to design/decisions/SPEC,
+   and update any docs whose behavior changed.
 
 ## What NOT to do
 - No feature creep or future-proofing. **Explicitly deferred until scheduled:**

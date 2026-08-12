@@ -454,7 +454,7 @@ async fn clear_local_avatar(
 }
 
 /// The person-detail screen's three belief layers for one contact (U4,
-/// ui-facelift.md §4), all read-time (no network): my lens (petname + the
+/// design/ui-design-system.md §1), all read-time (no network): my lens (petname + the
 /// keys I've grouped), their self-claim (`self_name`), and the friends' lens
 /// (vouched names — a friend's label reaches me only via their explicit
 /// vouch, who-is-this.md §6). Keyed by petname; the cluster's first key is

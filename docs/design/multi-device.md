@@ -365,4 +365,4 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 - who-is-this.md §7: resolve "key-set changes wait for D3" as
   explicit-forever, evidence-assisted (D3c).
 - groups.md §5: popup upgrade cross-reference (D3c).
-- mvp-build-plan.md: tick sub-slices as they land.
+- ../projects/1-mvp/build-plan.md: tick sub-slices as they land.

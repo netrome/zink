@@ -47,6 +47,6 @@ wasm32-only.
 The command layer and UI have no automated tests — everything that decides is
 in `zink-client`/`zink-protocol`, which the CLI e2e suite covers
 (`crates/zink-cli/tests/`). Manual acceptance runs per slice are recorded in
-`docs/design/mvp-build-plan.md`. Two desktop instances on one machine need
+`docs/projects/1-mvp/build-plan.md`. Two desktop instances on one machine need
 distinct app identifiers and `--no-watch` on the first, or they fight over the
 state dir.

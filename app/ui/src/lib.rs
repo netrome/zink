@@ -1976,7 +1976,7 @@ fn PeopleView(
     }
 }
 
-/// The person-detail lens (U4, ui-facelift.md §4): one contact rendered as
+/// The person-detail lens (U4, design/ui-design-system.md §1): one contact rendered as
 /// three separated belief layers — my lens (petname + avatar + the keys I've
 /// grouped), their self-claim, and my friends' lens (vouched names only,
 /// never a friend's private petname). Trust actions (vouch / repudiate) and a
