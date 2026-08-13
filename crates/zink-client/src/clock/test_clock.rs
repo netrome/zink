@@ -197,11 +197,15 @@ mod tests {
         // Given
         let wall = TestWallClock::new(2_000);
 
-        // When / Then
+        // When
         wall.set_ms(500);
-        assert_eq!(wall.now_ms(), 500);
+        let rewound = wall.now_ms();
         wall.set_ms(3_000);
-        assert_eq!(wall.now_ms(), 3_000);
+        let advanced = wall.now_ms();
+
+        // Then
+        assert_eq!(rewound, 500);
+        assert_eq!(advanced, 3_000);
     }
 
     #[tokio::test]
@@ -210,7 +214,8 @@ mod tests {
         let clock = TestClock::new();
         let woke = AtomicUsize::new(0);
 
-        // When / Then
+        // When: advance to just short of the deadline, then across it
+        let mut woke_before_deadline = usize::MAX;
         tokio::join!(
             async {
                 clock.sleep(Duration::from_secs(10)).await;
@@ -219,10 +224,13 @@ mod tests {
             async {
                 clock.wait_for_sleepers(1).await;
                 clock.advance(Duration::from_secs(9));
-                assert_eq!(woke.load(SeqCst), 0);
+                woke_before_deadline = woke.load(SeqCst);
                 clock.advance(Duration::from_secs(1));
             },
         );
+
+        // Then
+        assert_eq!(woke_before_deadline, 0);
         assert_eq!(woke.load(SeqCst), 1);
     }
 
