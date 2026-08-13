@@ -63,9 +63,8 @@ pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock> {
     /// Monotonic time, behind a port. `SystemClock` in production; see
     /// `crate::clock`.
     clock: C,
-    /// Wall time, behind its own port: wall and monotonic time move
-    /// independently in the real world (NTP steps, a user resetting the
-    /// date), so tests must be able to drive them apart.
+    /// Wall time, behind its own port: it moves independently of `clock` in
+    /// the real world, so tests can drive them apart.
     wall_clock: W,
     /// The auto-query rate limit (D2b, groups.md §4): (subject, conversation)
     /// pairs already asked this run — a drain loop must not re-broadcast
@@ -4502,7 +4501,7 @@ mod tests {
     #[test]
     fn load_unreachable__should_drop_future_dated_failures_after_a_wall_rewind() {
         // Given: a failure recorded under a wall clock a year ahead of the
-        // one we reopen with (NTP step, dead RTC battery, a date reset)
+        // one we reopen with
         let key_path = temp_key("reachrewind", "a");
         let state = ClientState::open(&key_path);
         let peer = [9u8; 32];
@@ -4515,9 +4514,7 @@ mod tests {
         // When
         let loaded = load_unreachable(&state, &wall);
 
-        // Then: future-dated evidence is untrustworthy and must not suppress
-        // dials — aged with `saturating_sub` it would look fresh (age 0) for
-        // the whole rewound year.
+        // Then: future-dated evidence must not suppress dials
         assert!(loaded.lock().expect("reach lock").is_empty());
 
         let _ = std::fs::remove_dir_all(temp_root("reachrewind"));

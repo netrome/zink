@@ -197,7 +197,7 @@ mod tests {
         // Given
         let wall = TestWallClock::new(2_000);
 
-        // When / Then: backward and forward jumps both land exactly
+        // When / Then
         wall.set_ms(500);
         assert_eq!(wall.now_ms(), 500);
         wall.set_ms(3_000);
@@ -206,9 +206,11 @@ mod tests {
 
     #[tokio::test]
     async fn sleep__should_resolve_only_once_advanced_past_its_deadline() {
-        // Given: a sleep parked well short of its deadline
+        // Given
         let clock = TestClock::new();
         let woke = AtomicUsize::new(0);
+
+        // When / Then
         tokio::join!(
             async {
                 clock.sleep(Duration::from_secs(10)).await;
@@ -216,10 +218,8 @@ mod tests {
             },
             async {
                 clock.wait_for_sleepers(1).await;
-                // Not yet: a partial advance leaves it parked.
                 clock.advance(Duration::from_secs(9));
                 assert_eq!(woke.load(SeqCst), 0);
-                // Crossing the deadline fires it.
                 clock.advance(Duration::from_secs(1));
             },
         );
@@ -228,12 +228,12 @@ mod tests {
 
     #[tokio::test]
     async fn sleep__should_fire_two_concurrent_timers_on_one_advance() {
-        // Given: two timers parked at once (what a parallel fan-out does)
+        // Given
         let clock = TestClock::new();
         let woke = AtomicUsize::new(0);
         let deadline = Duration::from_secs(5);
 
-        // When: one advance crosses both deadlines
+        // When
         tokio::join!(
             async {
                 clock.sleep(deadline).await;
@@ -249,8 +249,8 @@ mod tests {
             },
         );
 
-        // Then: both fired — serial code would have parked only one at a time
-        // and left `wait_for_sleepers(2)` hanging.
+        // Then: serial code would park only one timer at a time and hang
+        // `wait_for_sleepers(2)`.
         assert_eq!(woke.load(SeqCst), 2);
     }
 }
