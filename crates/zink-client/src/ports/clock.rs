@@ -1,9 +1,10 @@
 //! Time behind ports, mirroring the relay's `clock.rs`. `Clock` is monotonic
 //! (elapsed, backoff waits, deadlines); `WallClock` is unix-millisecond wall
-//! time (wire timestamps, cooldowns that outlive a process).
+//! time (wire timestamps, cooldowns that outlive a process). The production
+//! implementation is `crate::adapters::system_clock::SystemClock`.
 
 use std::future::Future;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Monotonic time: elapsed measurement, backoff waits, and deadlines.
 pub trait Clock: Send + Sync + 'static {
@@ -43,30 +44,6 @@ pub struct TimedOut;
 /// Wall time in unix milliseconds: persisted and on-the-wire timestamps.
 pub trait WallClock: Send + Sync + 'static {
     fn now_ms(&self) -> u64;
-}
-
-/// The real clock — implements both ports.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn sleep(&self, dur: Duration) -> impl Future<Output = ()> + Send {
-        n0_future::time::sleep(dur)
-    }
-}
-
-impl WallClock for SystemClock {
-    fn now_ms(&self) -> u64 {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before 1970")
-            .as_millis();
-        u64::try_from(ms).expect("unix time in ms exceeds u64")
-    }
 }
 
 #[cfg(test)]

@@ -16,8 +16,8 @@ use zink_protocol::{
 };
 
 use crate::client::Received;
+use crate::ports::transport::{Accept, Inbound, Respond};
 use crate::state::ClientState;
-use crate::transport::{Accept, Inbound, Respond};
 
 /// Where a directly-delivered message goes after it is stored (D5): the
 /// edge's live-delivery sink, registered once via

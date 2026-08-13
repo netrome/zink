@@ -5,25 +5,25 @@
 //! See `docs/design/client-core.md`.
 
 #[cfg(not(target_family = "wasm"))]
+mod adapters;
+#[cfg(not(target_family = "wasm"))]
 mod blobs;
 #[cfg(not(target_family = "wasm"))]
 mod client;
-#[cfg(not(target_family = "wasm"))]
-mod clock;
 mod error;
 pub mod hex;
 #[cfg(not(target_family = "wasm"))]
 pub mod keystore;
 #[cfg(not(target_family = "wasm"))]
 mod net;
+#[cfg(not(target_family = "wasm"))]
+mod ports;
 #[cfg(target_family = "wasm")]
 mod spike;
 #[cfg(not(target_family = "wasm"))]
 mod state;
 #[cfg(not(target_family = "wasm"))]
 mod sync;
-#[cfg(not(target_family = "wasm"))]
-mod transport;
 
 #[cfg(not(target_family = "wasm"))]
 pub use client::{

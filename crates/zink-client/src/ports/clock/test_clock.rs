@@ -175,7 +175,7 @@ impl WallClock for TestWallClock {
 #[allow(non_snake_case)]
 mod tests {
     use super::{TestClock, TestWallClock};
-    use crate::clock::{Clock, WallClock};
+    use crate::ports::clock::{Clock, WallClock};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::time::Duration;
 

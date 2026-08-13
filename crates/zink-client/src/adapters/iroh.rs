@@ -21,11 +21,11 @@ use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
 use zink_protocol::{DeviceKey, EncryptedBlob, PublicKey, SYNC_ALPN};
 
-use super::{
+use crate::error::Error;
+use crate::ports::transport::{
     Accept, AcceptUni, Close, ConnError, Dial, DialBlobs, DialError, FetchBlob, Home, Inbound,
     InsertRelay, InvalidRelayUrl, Peer, PushBlob, RemoveRelay, Request, Respond,
 };
-use crate::error::Error;
 
 /// One iroh endpoint wearing every port: dialing, blobs, inbound sync
 /// requests, homing, shutdown. Cheap to clone — clones share the endpoint,

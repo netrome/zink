@@ -12,11 +12,12 @@ use zink_protocol::{
     distinct_relays, open_avatar, seal_avatar,
 };
 
-use crate::clock::{Clock, SystemClock, WallClock};
+use crate::adapters::iroh::IrohTransport;
+use crate::adapters::system_clock::SystemClock;
 use crate::error::Error;
+use crate::ports::clock::{Clock, WallClock};
+use crate::ports::transport::{AcceptUni, Peer, Request, Transport};
 use crate::state::ClientState;
-use crate::transport::iroh::IrohTransport;
-use crate::transport::{AcceptUni, Peer, Request, Transport};
 use crate::{blobs, hex, keystore, net};
 
 /// Outbox entries older than this stop being retried (but stay surfaced):
@@ -63,13 +64,13 @@ impl Default for ClientConfig {
 pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock, N: Transport = IrohTransport>
 {
     device: DeviceKey,
-    /// The network, behind ports (`crate::transport`,
+    /// The network, behind ports (`crate::ports::transport`,
     /// `docs/design/transport.md`). `IrohTransport` in production.
     transport: N,
     state: ClientState,
     config: ClientConfig,
     /// Monotonic time, behind a port. `SystemClock` in production; see
-    /// `crate::clock`.
+    /// `crate::ports::clock`.
     clock: C,
     /// Wall time, behind its own port: it moves independently of `clock` in
     /// the real world, so tests can drive them apart.
@@ -1449,9 +1450,9 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
         }
         let entries: Vec<RelayEntry> = relays.iter().map(|s| RelayEntry::from_spec(s)).collect();
         for entry in &entries {
-            crate::transport::iroh::parse_dial(&entry.mailbox)?;
+            crate::adapters::iroh::parse_dial(&entry.mailbox)?;
             if let Some(url) = &entry.relay_url {
-                crate::transport::iroh::parse_relay_url(url)?;
+                crate::adapters::iroh::parse_relay_url(url)?;
             }
         }
         // A rename supersedes the previous name attestation (SPEC §3.2):
@@ -1490,7 +1491,7 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
             .home_relay_entries()
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref())
-            .map(|url| crate::transport::iroh::parse_relay_url(url).map(|url| url.to_string()))
+            .map(|url| crate::adapters::iroh::parse_relay_url(url).map(|url| url.to_string()))
             .collect()
     }
 
@@ -1959,7 +1960,7 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
         if relay_urls.is_empty() {
             return Err(Error::NoRelayUrl);
         }
-        crate::transport::iroh::validated_peer(key, relay_urls)
+        crate::adapters::iroh::validated_peer(key, relay_urls)
     }
 
     /// Ask the network "who is this key?" (D1b, who-is-this.md §5): dial
@@ -2556,7 +2557,7 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     /// to be the id we asked for, and checked to belong to this conversation
     /// before it's stored. Returns the number of newly-stored messages.
     pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, Error> {
-        self.backfill_addr(conversation, crate::transport::iroh::parse_dial(from)?)
+        self.backfill_addr(conversation, crate::adapters::iroh::parse_dial(from)?)
             .await
     }
 
@@ -3033,7 +3034,7 @@ impl Contact {
         let relays: Vec<String> = relay_list.split(',').map(str::to_string).collect();
         for relay in &relays {
             // Validate early, before any network work.
-            crate::transport::iroh::parse_dial(relay)?;
+            crate::adapters::iroh::parse_dial(relay)?;
         }
         Ok(Contact {
             keys: vec![PublicKey(hex::parse32(key_hex)?)],
@@ -3417,7 +3418,7 @@ pub(crate) fn now_ms() -> u64 {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::transport::Home;
+    use crate::ports::transport::Home;
     use zink_protocol::{KeyCommitment, MessageCore};
 
     /// A key path in a per-test temp dir (tests run in parallel, so the dir is
@@ -4438,7 +4439,7 @@ mod tests {
         };
         let key_path = temp_key("twodead", "a");
         keystore::create(&key_path).expect("key");
-        let clock = crate::clock::TestClock::new();
+        let clock = crate::ports::clock::TestClock::new();
         let a = Client::with_device(
             keystore::load(&key_path).expect("load key"),
             &key_path,
@@ -4529,7 +4530,7 @@ mod tests {
         state
             .save_unreachable(&[(peer, 2 * YEAR_MS)])
             .expect("save unreachable");
-        let wall = crate::clock::TestWallClock::new(YEAR_MS);
+        let wall = crate::ports::clock::TestWallClock::new(YEAR_MS);
 
         // When
         let loaded = load_unreachable(&state, &wall);

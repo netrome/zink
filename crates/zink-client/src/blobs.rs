@@ -4,10 +4,10 @@
 
 use zink_protocol::{BlobHash, EncryptedBlob};
 
-use crate::clock::Clock;
 use crate::error::Error;
 use crate::net;
-use crate::transport::{DialBlobs, FetchBlob, PushBlob};
+use crate::ports::clock::Clock;
+use crate::ports::transport::{DialBlobs, FetchBlob, PushBlob};
 
 /// Push each encrypted blob to one relay's cache, confirming every transfer.
 pub(crate) async fn push_blobs<B: DialBlobs>(

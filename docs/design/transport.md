@@ -3,7 +3,7 @@
 Status: **designed 2026-08-13 (P3); iroh adapter landed 2026-08-13 (P4).**
 Project [3-ports-and-adapters](../projects/3-ports-and-adapters/tracker.md).
 The test-double kit lands in P5; this doc is edited in place as it does.
-Companion to the client clock ports (`zink-client/src/clock.rs`).
+Companion to the client clock ports (`zink-client/src/ports/clock.rs`).
 
 ## 1. Why
 
@@ -42,10 +42,14 @@ Three decisions shape the surface:
   fighting the pull surface, the fallback is push-style registration — a
   contract change, revisited here first.
 
-All in `zink-client/src/transport.rs`; the iroh adapter in `transport/iroh.rs`
-(P4), doubles in `transport/test_transport.rs` behind `#[cfg(test)]` (P5).
-**No iroh type appears in any signature.** Async methods are RPITIT
-(`impl Future + Send`), as in `clock.rs`.
+Ports in `zink-client/src/ports/transport.rs`; the iroh adapter in
+`adapters/iroh.rs` (P4); doubles in `ports/transport/test_transport.rs`
+behind `#[cfg(test)]` (P5) — doubles are each port's contract kit and live
+with it, not with the real-world adapters. The `ports`/`adapters` split
+carries the dependency rule in the module tree: **nothing outside `adapters/`
+names an iroh type** (a one-glob audit), and no iroh type appears in any port
+signature. Async methods are RPITIT (`impl Future + Send`), as in
+`ports/clock.rs`.
 
 ```rust
 /// The full network capability, as one bound for `Client`'s type parameter.

@@ -134,5 +134,3 @@ pub struct ConnError(pub String);
 #[derive(Debug, Clone, Error)]
 #[error("{0}")]
 pub struct InvalidRelayUrl(pub String);
-
-pub(crate) mod iroh;

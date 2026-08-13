@@ -146,7 +146,8 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 
 **Tier 1 — Clock port into the client**
 - [x] **P1 · `Clock` port in `zink-client`.** ✅ 2026-08-13. New
-  `crates/zink-client/src/clock.rs` mirrors the relay's `clock.rs`: `Clock`
+  `crates/zink-client/src/ports/clock.rs` (at `clock.rs` until the P4-era
+  `ports`/`adapters` split) mirrors the relay's `clock.rs`: `Clock`
   (monotonic `now` + `sleep`) and `WallClock` (`now_ms`) traits, `SystemClock`
   implementing both. Injected into `Client` as **one generic parameter with a
   default** — `Client<C: Clock + WallClock = SystemClock>` — mirroring the
@@ -171,7 +172,7 @@ re-measured where relevant · this tracker updated · durable bits graduated per
     those is deferred until a slice needs it (would require `ClientState<W>` /
     `SyncHandler<W>`, out of P1's scope).
 - [x] **P2 · `TestClock` + migrate in-proc time waits.** Split into two:
-  - [x] **P2a · Time doubles.** ✅ 2026-08-13. In `clock/test_clock.rs`
+  - [x] **P2a · Time doubles.** ✅ 2026-08-13. In `ports/clock/test_clock.rs`
     (behind `#[cfg(test)]`), **one double per port** — wall and monotonic time
     move independently in the real world, so tests can drive them apart (e.g.
     a wall rewind under monotonic progress). `TestClock` (monotonic): `advance`
@@ -237,8 +238,8 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   added only when logic branches on it. Local addressing fell off the ports
   (CLI-print-only → inherent on `IrohTransport`, production-only impl block).
 - [x] **P4 · Real iroh adapter behind the trait(s).** ✅ 2026-08-13. New
-  `transport.rs` (the ports, verbatim from transport.md) and
-  `transport/iroh.rs`: `IrohTransport` (endpoint + router + inbound queue,
+  `ports/transport.rs` (the ports, verbatim from transport.md) and
+  `adapters/iroh.rs`: `IrohTransport` (endpoint + router + inbound queue,
   cheaply clonable) wears every port; `IrohConn`/`IrohBlobConn`/`IrohReply`
   are the concrete connection objects. The P3 watch-item resolved cleanly —
   the `Router` did **not** fight the pull surface: a small `ForwardHandler`
@@ -300,6 +301,7 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 | Time in transport | No `Duration` params, no timers in adapters; every deadline is a domain-side `clock.timeout` race — the rule that keeps `TestClock` sovereign over all waits. |
 | Accept style | Pull: `accept()` yields `Inbound { peer, frame, reply }` to a domain-owned serve loop; adapter forwards `Router` accepts into the pull surface. |
 | Test doubles | Small composable per-scenario doubles, not one simulator (§4); one double per capability, controls (hold/release/fail/kill), real BORSH frames, loud `Unused` stubs — discipline in transport.md §8. |
+| Module layout | `ports/{clock,transport}.rs` (traits + plain data; doubles as `#[cfg(test)]` submodules of their port — the port's contract kit) vs `adapters/{iroh,system_clock}.rs` (the real world, one file per technology — no per-port nesting, we've sworn off a second transport). The tree carries the dependency direction; "no iroh outside `adapters/`" is a one-glob audit. An adapter as a *child* of its port (the P4 first cut) inverted that story. |
 | Smoke tier | Retained and explicit; never zero real-network tests. |
 | Env knobs | `ZINK_*_MS` decommissioned once the subprocess logic tests are migrated (P6). |
 | De6e | Out of scope — SPEC §11 decision, declined on privacy grounds. |

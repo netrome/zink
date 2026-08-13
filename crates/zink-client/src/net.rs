@@ -4,9 +4,9 @@
 //! exercises (`docs/design/transport.md` §6); every deadline is a
 //! `Clock::timeout` race here — the ports carry no time.
 
-use crate::clock::Clock;
 use crate::error::Error;
-use crate::transport::{Dial, DialBlobs, Peer, Request};
+use crate::ports::clock::Clock;
+use crate::ports::transport::{Dial, DialBlobs, Peer, Request};
 use zink_protocol::{
     MAILBOX_ALPN, MAX_RESPONSE_BYTES, MAX_SYNC_RESPONSE_BYTES, MailboxOp, MailboxRequest,
     MailboxResponse, MailboxResult, MessageEnvelope, SyncOp, SyncRequest, SyncResponse, SyncResult,
@@ -24,7 +24,7 @@ pub(crate) async fn connect<D: Dial>(
     timeout: std::time::Duration,
     clock: &impl Clock,
 ) -> Result<D::Conn, Error> {
-    let to = crate::transport::iroh::parse_dial(relay)?;
+    let to = crate::adapters::iroh::parse_dial(relay)?;
     connect_peer(net, &to, alpn, timeout, clock)
         .await
         .map_err(|e| Error::Unreachable(format!("connect to {relay}: {e}")))
@@ -54,7 +54,7 @@ pub(crate) async fn connect_blobs<B: DialBlobs>(
     timeout: std::time::Duration,
     clock: &impl Clock,
 ) -> Result<B::Conn, Error> {
-    let to = crate::transport::iroh::parse_dial(relay)?;
+    let to = crate::adapters::iroh::parse_dial(relay)?;
     clock
         .timeout(timeout, net.dial_blobs(&to))
         .await
