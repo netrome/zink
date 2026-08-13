@@ -1,4 +1,7 @@
-//! `TestClock`: the controllable test double for the time ports.
+//! Controllable doubles for the time ports — deliberately one per port. Wall
+//! and monotonic time do not move together in the real world (NTP steps, a
+//! user resetting the date), so tests must be able to drive them apart —
+//! e.g. rewind the wall clock while monotonic time advances.
 
 use super::{Clock, WallClock};
 use std::future::Future;
@@ -7,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-/// A hand-driven clock: `now`/`now_ms` move only on `advance`, and `sleep`
+/// A hand-driven monotonic clock: `now` moves only on `advance`, and `sleep`
 /// resolves the moment an `advance` crosses its deadline — never by real
 /// elapsed time. Scoped, not global, so it drives a deadline while real iroh
 /// I/O on the same runtime keeps its own timers. Clones share one timeline.
@@ -16,51 +19,38 @@ pub(crate) struct TestClock(Arc<Mutex<Inner>>);
 
 struct Inner {
     now: Instant,
-    now_ms: u64,
-    sleepers: Vec<Arc<Mutex<Sleeper>>>,
+    next_id: u64,
+    /// The parked sleeps. Whether a sleep has fired is derived
+    /// (`now >= deadline`), never stored.
+    sleepers: Vec<(u64, Instant, Waker)>,
+    /// Wakers parked in `wait_for_sleepers`, woken when a sleeper parks.
     watchers: Vec<Waker>,
-}
-
-struct Sleeper {
-    deadline: Instant,
-    fired: bool,
-    waker: Option<Waker>,
 }
 
 impl TestClock {
     pub(crate) fn new() -> Self {
         TestClock(Arc::new(Mutex::new(Inner {
             now: Instant::now(),
-            now_ms: 1_700_000_000_000,
+            next_id: 0,
             sleepers: Vec::new(),
             watchers: Vec::new(),
         })))
     }
 
-    /// Move time forward, firing every sleeper it reaches.
+    /// Move time forward, waking every sleeper it reaches.
     pub(crate) fn advance(&self, by: Duration) {
         let mut inner = self.0.lock().unwrap();
-        let by_ms = u64::try_from(by.as_millis()).expect("advance exceeds u64 ms");
         inner.now = inner
             .now
             .checked_add(by)
             .expect("advance overflowed Instant");
-        inner.now_ms = inner
-            .now_ms
-            .checked_add(by_ms)
-            .expect("advance overflowed wall ms");
         let now = inner.now;
-        inner.sleepers.retain(|s| {
-            let mut sleeper = s.lock().unwrap();
-            if sleeper.deadline <= now {
-                sleeper.fired = true;
-                if let Some(waker) = sleeper.waker.take() {
-                    waker.wake();
-                }
-                false
-            } else {
-                true
+        inner.sleepers.retain(|(_, deadline, waker)| {
+            let due = *deadline <= now;
+            if due {
+                waker.wake_by_ref();
             }
+            !due
         });
     }
 
@@ -85,24 +75,19 @@ impl Clock for TestClock {
         Sleep {
             inner: self.0.clone(),
             dur,
-            sleeper: None,
+            registration: None,
         }
     }
 }
 
-impl WallClock for TestClock {
-    fn now_ms(&self) -> u64 {
-        self.0.lock().unwrap().now_ms
-    }
-}
-
-/// Registers its deadline on first poll (so a parked sleeper is visible to
-/// `wait_for_sleepers`) and deregisters on drop (so a race's losing timer
-/// stops counting).
+/// Takes its deadline and parks on first poll (so a parked sleeper is
+/// visible to `wait_for_sleepers`) and deregisters on drop (so a race's
+/// losing timer stops counting).
 struct Sleep {
     inner: Arc<Mutex<Inner>>,
     dur: Duration,
-    sleeper: Option<Arc<Mutex<Sleeper>>>,
+    /// `(id, deadline)`, fixed at first poll.
+    registration: Option<(u64, Instant)>,
 }
 
 impl Future for Sleep {
@@ -111,44 +96,36 @@ impl Future for Sleep {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
         let mut inner = this.inner.lock().unwrap();
-        match &this.sleeper {
-            Some(sleeper) => {
-                let mut sleeper = sleeper.lock().unwrap();
-                if sleeper.fired {
-                    return Poll::Ready(());
-                }
-                sleeper.waker = Some(cx.waker().clone());
-                Poll::Pending
-            }
+        let (id, deadline) = *this.registration.get_or_insert_with(|| {
+            let deadline = inner
+                .now
+                .checked_add(this.dur)
+                .expect("sleep deadline overflowed Instant");
+            inner.next_id += 1;
+            (inner.next_id, deadline)
+        });
+        if inner.now >= deadline {
+            inner.sleepers.retain(|(i, ..)| *i != id);
+            return Poll::Ready(());
+        }
+        match inner.sleepers.iter_mut().find(|(i, ..)| *i == id) {
+            Some(parked) => parked.2 = cx.waker().clone(),
             None => {
-                let deadline = inner
-                    .now
-                    .checked_add(this.dur)
-                    .expect("sleep deadline overflowed Instant");
-                if deadline <= inner.now {
-                    return Poll::Ready(());
-                }
-                let sleeper = Arc::new(Mutex::new(Sleeper {
-                    deadline,
-                    fired: false,
-                    waker: Some(cx.waker().clone()),
-                }));
-                inner.sleepers.push(sleeper.clone());
+                inner.sleepers.push((id, deadline, cx.waker().clone()));
                 for watcher in inner.watchers.drain(..) {
                     watcher.wake();
                 }
-                this.sleeper = Some(sleeper);
-                Poll::Pending
             }
         }
+        Poll::Pending
     }
 }
 
 impl Drop for Sleep {
     fn drop(&mut self) {
-        if let Some(sleeper) = &self.sleeper {
+        if let Some((id, _)) = self.registration {
             let mut inner = self.inner.lock().unwrap();
-            inner.sleepers.retain(|s| !Arc::ptr_eq(s, sleeper));
+            inner.sleepers.retain(|(i, ..)| *i != id);
         }
     }
 }
@@ -172,25 +149,59 @@ impl Future for WaitForSleepers {
     }
 }
 
+/// A settable wall clock. `set_ms` is the only control: wall time *jumps* —
+/// forward or backward — rather than flowing, which is exactly how the real
+/// one misbehaves. Clones share the value.
+#[derive(Clone)]
+pub(crate) struct TestWallClock(Arc<Mutex<u64>>);
+
+impl TestWallClock {
+    pub(crate) fn new(now_ms: u64) -> Self {
+        TestWallClock(Arc::new(Mutex::new(now_ms)))
+    }
+
+    pub(crate) fn set_ms(&self, now_ms: u64) {
+        *self.0.lock().unwrap() = now_ms;
+    }
+}
+
+impl WallClock for TestWallClock {
+    fn now_ms(&self) -> u64 {
+        *self.0.lock().unwrap()
+    }
+}
+
+#[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use super::TestClock;
+    use super::{TestClock, TestWallClock};
     use crate::clock::{Clock, WallClock};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::time::Duration;
 
     #[test]
-    fn advance__should_move_both_monotonic_and_wall_time() {
+    fn advance__should_move_monotonic_time() {
         // Given
         let clock = TestClock::new();
-        let (mono, wall) = (clock.now(), clock.now_ms());
+        let before = clock.now();
 
         // When
         clock.advance(Duration::from_secs(90));
 
         // Then
-        assert_eq!(clock.now().duration_since(mono), Duration::from_secs(90));
-        assert_eq!(clock.now_ms() - wall, 90_000);
+        assert_eq!(clock.now().duration_since(before), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn set_ms__should_jump_wall_time_in_either_direction() {
+        // Given
+        let wall = TestWallClock::new(2_000);
+
+        // When / Then: backward and forward jumps both land exactly
+        wall.set_ms(500);
+        assert_eq!(wall.now_ms(), 500);
+        wall.set_ms(3_000);
+        assert_eq!(wall.now_ms(), 3_000);
     }
 
     #[tokio::test]

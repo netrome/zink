@@ -40,7 +40,7 @@ impl WallClock for SystemClock {
     }
 }
 
-// `TestClock`, the controllable double, lives in the submodule; P2b re-exports
-// it here (`pub(crate) use`) once a consumer outside its own tests exists.
 #[cfg(test)]
 mod test_clock;
+#[cfg(test)]
+pub(crate) use test_clock::TestWallClock;

@@ -173,17 +173,37 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 - [~] **P2 · `TestClock` + migrate in-proc time waits.** Split into two:
   - [x] **P2a · `TestClock` primitive.** ✅ 2026-08-13. In its own
     `clock/test_clock.rs` submodule (behind `#[cfg(test)]`): a hand-driven clock
-    implementing both ports — `advance`
-    moves monotonic + wall time together and fires parked `sleep`s; `sleep`
+    — `advance` moves monotonic time and fires parked `sleep`s; `sleep`
     registers on first poll and deregisters on drop (so a race's losing timer
     stops counting); `wait_for_sleepers(n)` resolves once `n` timers are parked.
     **Scoped, not global** — it drives a deadline while real iroh I/O on the
     same runtime keeps its own timers (tokio's `pause()` can't: it needs a
     current-thread runtime and would freeze iroh too; tests here are
-    `rt-multi-thread`). Three unit tests, all deterministic in ~0 ms, incl. the
+    `rt-multi-thread`). Unit tests all deterministic in ~0 ms, incl. the
     archetype "two concurrent sleeps fire on a single advance" (serial code
     parks only one, hanging `wait_for_sleepers(2)` — that *is* the concurrency
     assertion). 232/232 green, clippy clean.
+    - **Revised same day — the doubles are decoupled.** The first cut had one
+      `TestClock` implementing both ports, with `advance` moving monotonic and
+      wall time in lockstep. That coupling exists nowhere in the ports (the
+      *reason* there are two traits is that these are different concepts) and
+      made the idealized condition the only expressible one — a wall-clock
+      rewind under monotonic progress could not be written. Now: `TestClock`
+      is monotonic-only (`advance` + the sleeper machinery); `TestWallClock`
+      is a trivially settable value (`set_ms` — a jump, forward or backward,
+      is how the real wall clock actually misbehaves). `Client` takes **two
+      type parameters** (`Client<C: Clock = SystemClock, W: WallClock =
+      SystemClock>`), so a test injects exactly the half it drives and helpers
+      keep receiving only the capability they need. `TestClock` also lost its
+      internal `fired` flag (resolution is now derived — `now >= deadline` —
+      so the nested `Arc<Mutex<Sleeper>>` collapsed into a flat id→waker
+      registry under the one lock). First consumer: `load_unreachable` now
+      **drops future-dated negative evidence** (`checked_sub` instead of
+      `saturating_sub`) — under a wall rewind the old filter aged persisted
+      failures to 0 ms forever, suppressing dials to reachable peers for the
+      whole rewound span; a `TestWallClock` rewind test pins the fix.
+      234/234 green, clippy clean, wasm unaffected (`client.rs`/`clock.rs`
+      are native-only).
   - [ ] **P2b · Migrate the in-proc time waits.** Route `net::connect_addr`'s
     deadline (`n0_future::time::timeout`) through the injected clock, then
     convert `delivery__should_pay_one_deadline` to the P2a scheduling assertion
@@ -230,7 +250,8 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 |---|---|
 | Layer | Ports live in `zink-client`; `zink-protocol` core stays pure (tenet: I/O at the edges). |
 | Time | A `Clock` port mirroring the relay's, injected into `Client`; `TestClock` advanceable. |
-| Injection mechanism | **Generics with a default type parameter** (`Client<C: Clock + WallClock = SystemClock>`), *not* `dyn`/`Arc<dyn>`. Rationale: no heap allocation, no type erasure, full monomorphization; a default type param means edges keep writing bare `Client` (zero edge churn), exactly as the relay's `InMemoryStore<C = SystemClock>`. `sleep` is `impl Future` (RPITIT), which the generic seam makes free. Decided P1 (2026-08-13). |
+| Injection mechanism | **Generics with default type parameters**, *not* `dyn`/`Arc<dyn>`. Rationale: no heap allocation, no type erasure, full monomorphization; defaults mean edges keep writing bare `Client` (zero edge churn), as the relay's `InMemoryStore<C = SystemClock>`. `sleep` is `impl Future` (RPITIT), which the generic seam makes free. Decided P1; revised P2a (both 2026-08-13): **one parameter per port** (`Client<C: Clock = SystemClock, W: WallClock = SystemClock>`) rather than one `C: Clock + WallClock`. Wall and monotonic time are separate dependencies that move independently in the real world; separate parameters keep them impossible to confuse, let a test inject exactly the half it drives, and stop helpers from receiving capability they don't need. |
+| Test doubles for time | **Decoupled, one per port** (P2a revision): monotonic `TestClock` (advance + parked-sleep registry) and settable `TestWallClock` (`set_ms` — jumps, not flow). Test under adversarial conditions (wall rewind while monotonic advances), not idealized ones; a lockstep double made the rewind inexpressible. Shared-primitive line: share *mechanism* (the waker registry — identical wherever needed, its behavior *is* the port contract), keep *scenario* in each test by how it drives the double. |
 | Wall-clock reach | Two un-asserted wall sites (`state.rs` first-seen, `sync.rs` reach-seen) stay on a `SystemClock`-backed free `now_ms()`; injecting them would need `ClientState<W>`/`SyncHandler<W>` and buys no current test — deferred, not in P1. |
 | Transport | A narrow byte/stream port keyed by pubkey, seam *below* fan-out & reachability. Trait split (send vs accept) decided in P3. |
 | Test doubles | Small composable per-scenario doubles, not one simulator (§4). |
@@ -250,3 +271,12 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 - **Lazy endpoint bind** (fast-failure.md F5 / Option E) — local reads pay a full
   endpoint bind; unscheduled, CLI-only beneficiary.
 - **De6e advisory reach bit** — SPEC §11 decision if ever revisited.
+- **Mid-run wall-rewind exposure.** `load_unreachable` now drops future-dated
+  persisted evidence, but the *in-run* ages still use `saturating_sub` against
+  live wall time (`client.rs` ~807 flush triage, ~2918/2921 `direct_budget`
+  cooldown/known checks): a rewind mid-process makes in-memory failures look
+  fresh (age 0) until wall time catches up. The deeper question is whether
+  in-run evidence ages should be *monotonic* (elapsed-since is a process-local
+  concept; only persistence needs wall). Needs the `Reach` struct to carry an
+  instant or both stamps — a design decision, not a drive-by; revisit when P2b
+  touches this code.
