@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
+use crate::clock::Clock;
 use crate::error::Error;
 use iroh::endpoint::{Connection, presets};
 use iroh::tls::CaTlsConfig;
@@ -111,8 +112,9 @@ pub(crate) async fn connect(
     relay: &str,
     alpn: &[u8],
     timeout: std::time::Duration,
+    clock: &impl Clock,
 ) -> Result<Connection, Error> {
-    connect_addr(endpoint, parse_relay(relay)?, alpn, timeout)
+    connect_addr(endpoint, parse_relay(relay)?, alpn, timeout, clock)
         .await
         .map_err(|e| Error::Unreachable(format!("connect to {relay}: {e}")))
 }
@@ -125,8 +127,10 @@ pub(crate) async fn connect_addr(
     addr: EndpointAddr,
     alpn: &[u8],
     timeout: std::time::Duration,
+    clock: &impl Clock,
 ) -> Result<Connection, Error> {
-    n0_future::time::timeout(timeout, endpoint.connect(addr, alpn))
+    clock
+        .timeout(timeout, endpoint.connect(addr, alpn))
         .await
         .map_err(|_| Error::Unreachable("timed out".to_string()))?
         .map_err(|e| Error::Unreachable(e.to_string()))
@@ -203,13 +207,14 @@ pub(crate) async fn deposit_with_retry(
     relay: &str,
     envelope: &MessageEnvelope,
     timeout: std::time::Duration,
+    clock: &impl Clock,
 ) -> Result<(), Error> {
     let mut last_error = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
             tracing::warn!(relay, attempt, error = %last_error, "deposit failed; retrying");
         }
-        let connection = match connect(endpoint, relay, MAILBOX_ALPN, timeout).await {
+        let connection = match connect(endpoint, relay, MAILBOX_ALPN, timeout, clock).await {
             Ok(connection) => connection,
             Err(error) => return Err(error),
         };

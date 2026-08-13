@@ -9,6 +9,7 @@ use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
 use zink_protocol::{BlobHash, EncryptedBlob};
 
+use crate::clock::Clock;
 use crate::error::Error;
 use crate::net;
 
@@ -19,8 +20,9 @@ pub(crate) async fn push_blobs(
     staging: &MemStore,
     blobs: &[EncryptedBlob],
     timeout: std::time::Duration,
+    clock: &impl Clock,
 ) -> Result<(), Error> {
-    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout).await?;
+    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout, clock).await?;
     for blob in blobs {
         let hash = Hash::from_bytes(blob.hash.0);
         let push = PushRequest::new(hash, ChunkRangesSeq::from_ranges([ChunkRanges::all()]));
@@ -55,9 +57,10 @@ pub(crate) async fn fetch_encrypted(
     relay: &str,
     hash: &BlobHash,
     timeout: std::time::Duration,
+    clock: &impl Clock,
 ) -> Result<Vec<u8>, Error> {
     let store = MemStore::new();
-    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout).await?;
+    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout, clock).await?;
     let blob_hash = Hash::from_bytes(hash.0);
     store
         .remote()

@@ -215,7 +215,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             let _ = self._sync_router.shutdown().await;
             self.endpoint.close().await;
         };
-        if n0_future::time::timeout(deadline, shutdown).await.is_err() {
+        if self.clock.timeout(deadline, shutdown).await.is_err() {
             tracing::debug!("close: endpoint still draining at the deadline; dropping it");
         }
     }
@@ -266,7 +266,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         {
             return Reachable::NoHomeRelay;
         }
-        match n0_future::time::timeout(within, self.endpoint.online()).await {
+        match self.clock.timeout(within, self.endpoint.online()).await {
             Ok(()) => Reachable::ByKey,
             Err(_) => Reachable::NotYet,
         }
@@ -721,52 +721,55 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             }
         }
         let dialed = !targets.is_empty();
-        let pushes = targets.into_iter().map(|(key, addr, timeout)| async move {
-            let connection = match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout).await
-            {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::debug!(%error, "direct: recipient unreachable");
-                    self.note_reach(&key, |reach| reach.failed_ms = now);
-                    return None;
+        let pushes =
+            targets.into_iter().map(|(key, addr, timeout)| async move {
+                let connection =
+                    match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout, &self.clock)
+                        .await
+                    {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            tracing::debug!(%error, "direct: recipient unreachable");
+                            self.note_reach(&key, |reach| reach.failed_ms = now);
+                            return None;
+                        }
+                    };
+                let op = SyncOp::Deliver {
+                    envelope: Box::new(envelope.clone()),
+                };
+                match net::sync_request(&connection, op).await {
+                    // The ack that licenses skipping the mailbox: stored, not
+                    // merely received.
+                    Ok(SyncResult::Stored) => {
+                        self.note_reach(&key, |reach| {
+                            reach.seen_ms = now;
+                            reach.failed_ms = 0;
+                        });
+                        Some(key)
+                    }
+                    Ok(SyncResult::NotHeld) => {
+                        tracing::debug!("direct: recipient declined; falling back to its mailbox");
+                        // Reachable — it answered — so no cooldown: the reasons a
+                        // peer declines are indistinguishable on the wire
+                        // (SPEC §5.2) and some are *per message* (an envelope it
+                        // can't open), so a decline must not suppress the next
+                        // message. Reaching a live peer is cheap; only
+                        // unreachability is worth remembering.
+                        self.note_reach(&key, |reach| reach.seen_ms = now);
+                        None
+                    }
+                    Ok(other) => {
+                        tracing::warn!(?other, "direct: unexpected response");
+                        self.note_reach(&key, |reach| reach.failed_ms = now);
+                        None
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "direct: delivery failed");
+                        self.note_reach(&key, |reach| reach.failed_ms = now);
+                        None
+                    }
                 }
-            };
-            let op = SyncOp::Deliver {
-                envelope: Box::new(envelope.clone()),
-            };
-            match net::sync_request(&connection, op).await {
-                // The ack that licenses skipping the mailbox: stored, not
-                // merely received.
-                Ok(SyncResult::Stored) => {
-                    self.note_reach(&key, |reach| {
-                        reach.seen_ms = now;
-                        reach.failed_ms = 0;
-                    });
-                    Some(key)
-                }
-                Ok(SyncResult::NotHeld) => {
-                    tracing::debug!("direct: recipient declined; falling back to its mailbox");
-                    // Reachable — it answered — so no cooldown: the reasons a
-                    // peer declines are indistinguishable on the wire
-                    // (SPEC §5.2) and some are *per message* (an envelope it
-                    // can't open), so a decline must not suppress the next
-                    // message. Reaching a live peer is cheap; only
-                    // unreachability is worth remembering.
-                    self.note_reach(&key, |reach| reach.seen_ms = now);
-                    None
-                }
-                Ok(other) => {
-                    tracing::warn!(?other, "direct: unexpected response");
-                    self.note_reach(&key, |reach| reach.failed_ms = now);
-                    None
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "direct: delivery failed");
-                    self.note_reach(&key, |reach| reach.failed_ms = now);
-                    None
-                }
-            }
-        });
+            });
         let acked: BTreeSet<PublicKey> = n0_future::join_all(pushes)
             .await
             .into_iter()
@@ -836,8 +839,14 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         encrypted_blobs: &[zink_protocol::EncryptedBlob],
         staging: &iroh_blobs::store::mem::MemStore,
     ) -> Result<(), Error> {
-        net::deposit_with_retry(&self.endpoint, relay, envelope, self.config.connect_timeout)
-            .await?;
+        net::deposit_with_retry(
+            &self.endpoint,
+            relay,
+            envelope,
+            self.config.connect_timeout,
+            &self.clock,
+        )
+        .await?;
         if !encrypted_blobs.is_empty() {
             blobs::push_blobs(
                 &self.endpoint,
@@ -845,6 +854,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
                 staging,
                 encrypted_blobs,
                 self.config.connect_timeout,
+                &self.clock,
             )
             .await?;
         }
@@ -1041,6 +1051,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             relay,
             zink_protocol::MAILBOX_ALPN,
             self.config.connect_timeout,
+            &self.clock,
         )
         .await?;
         net::register(&connection, relay).await?;
@@ -1088,6 +1099,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             relay,
             zink_protocol::MAILBOX_ALPN,
             self.config.connect_timeout,
+            &self.clock,
         )
         .await?;
         net::register(&connection, relay).await?;
@@ -1130,7 +1142,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             tracing::info!(
                 relay,
                 count = received.len(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
+                elapsed = ?self.clock.now().duration_since(started),
                 "drained (nudge)"
             );
             if !received.is_empty() {
@@ -1267,8 +1279,14 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         }
         let mut last_error = String::from("no relay to fetch from");
         for relay in relays {
-            match blobs::fetch_encrypted(&self.endpoint, relay, hash, self.config.connect_timeout)
-                .await
+            match blobs::fetch_encrypted(
+                &self.endpoint,
+                relay,
+                hash,
+                self.config.connect_timeout,
+                &self.clock,
+            )
+            .await
             {
                 Ok(bytes) => {
                     let plaintext = envelope
@@ -1534,6 +1552,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
                     &relay,
                     zink_protocol::MAILBOX_ALPN,
                     self.config.connect_timeout,
+                    &self.clock,
                 )
                 .await?;
                 net::register(&connection, &relay).await?;
@@ -2027,7 +2046,9 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
         let queries = targets.into_iter().map(|(petname, responder, addr)| async move {
             let connection =
-                match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout).await {
+                match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout, &self.clock)
+                    .await
+                {
                     Ok(connection) => connection,
                     Err(error) => {
                         tracing::debug!(%petname, %error, "who-is: contact unreachable");
@@ -2145,6 +2166,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
                 &staging,
                 std::slice::from_ref(&blob),
                 self.config.connect_timeout,
+                &self.clock,
             )
             .await
             {
@@ -2228,6 +2250,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
                 &relay.mailbox,
                 &hash,
                 self.config.connect_timeout,
+                &self.clock,
             )
             .await
             {
@@ -2585,8 +2608,14 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         // bounds the whole walk — the forward pass gets what the backward
         // pass didn't spend.
         const MAX_SYNC_FETCH: usize = 10_000;
-        let connection =
-            net::connect_addr(&self.endpoint, from, SYNC_ALPN, self.config.connect_timeout).await?;
+        let connection = net::connect_addr(
+            &self.endpoint,
+            from,
+            SYNC_ALPN,
+            self.config.connect_timeout,
+            &self.clock,
+        )
+        .await?;
         let backward = self
             .fill_backward(conversation, &connection, MAX_SYNC_FETCH)
             .await?;
@@ -2789,9 +2818,14 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             let Ok(addr) = self.peer_addr_for(device_key, Some(&record)) else {
                 continue;
             };
-            let Ok(connection) =
-                net::connect_addr(&self.endpoint, addr, SYNC_ALPN, self.config.connect_timeout)
-                    .await
+            let Ok(connection) = net::connect_addr(
+                &self.endpoint,
+                addr,
+                SYNC_ALPN,
+                self.config.connect_timeout,
+                &self.clock,
+            )
+            .await
             else {
                 continue;
             };
@@ -4403,14 +4437,15 @@ mod tests {
     #[tokio::test]
     async fn delivery__should_pay_one_deadline_for_two_dead_relays() {
         // Given: a contact whose record names TWO mailboxes on TEST-NET
-        // (packets vanish, so each deposit runs out the full deadline) and no
+        // (packets vanish, so each deposit runs until its deadline) and no
         // relay url, so nothing is dialed directly and the only network cost
-        // in this test is the two deposits.
+        // in this test is the two deposits. The deadlines run on an injected
+        // `TestClock`, so no real time passes.
         //
         // The dial strings carry **real endpoint ids**: the `unused@…` form
-        // the other tests use fails at *parse*, instantly, which would make a
-        // timing assertion here pass without dialing anything.
-        const DEADLINE: Duration = Duration::from_millis(500);
+        // the other tests use fails at *parse*, instantly, which would make
+        // the send complete without parking a single deadline timer.
+        const DEADLINE: Duration = Duration::from_secs(10);
         let dead_mailbox = |host: u8, seed: u8| RelayEntry {
             mailbox: format!(
                 "{}@203.0.113.{host}:1",
@@ -4420,12 +4455,16 @@ mod tests {
         };
         let key_path = temp_key("twodead", "a");
         keystore::create(&key_path).expect("key");
-        let a = Client::open_with(
+        let clock = crate::clock::TestClock::new();
+        let a = Client::with_device(
+            keystore::load(&key_path).expect("load key"),
             &key_path,
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
             },
+            clock.clone(),
+            SystemClock,
         )
         .await
         .expect("open A");
@@ -4438,34 +4477,32 @@ mod tests {
             Some("ghost".to_string()),
         )
         .expect("add the contact");
-        let contact = a.resolve_contact("ghost").expect("resolve");
+        let recipients = [a.resolve_contact("ghost").expect("resolve")];
 
-        // When: one send fans out to both
-        let started = std::time::Instant::now();
-        let result = a.send(&[contact], b"into the void".to_vec(), vec![]).await;
-        let fan_out = started.elapsed();
-
-        // Then: queued for both, and it cost ONE deadline, not two — serially
-        // this was 2 × DEADLINE (De6d)
-        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
-        assert_eq!(a.state.outbox().len(), 2, "both relays still owed");
-        assert!(
-            // Halfway between the two outcomes: parallel lands just over one
-            // DEADLINE, serial at two, so neither side is a coin flip.
-            fan_out < DEADLINE + DEADLINE / 2,
-            "fan-out took {fan_out:?} — one deadline is {DEADLINE:?}, serial would be ≥ {:?}",
-            2 * DEADLINE
+        // When: one send fans out to both, and time moves only after BOTH
+        // deadline timers are parked — serial fan-out would park one at a
+        // time and hang `wait_for_sleepers(2)` (De6d)
+        let (result, ()) = tokio::join!(
+            a.send(&recipients, b"into the void".to_vec(), vec![]),
+            async {
+                clock.wait_for_sleepers(2).await;
+                clock.advance(DEADLINE);
+            },
         );
 
+        // Then: queued for both
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        assert_eq!(a.state.outbox().len(), 2, "both relays still owed");
+
         // And: the outbox flush pays the same way, over the same two entries
-        let started = std::time::Instant::now();
-        let report = a.flush_outbox().await.expect("flush");
-        let flush = started.elapsed();
-        assert_eq!(report.pending, 2, "still nowhere to deliver");
-        assert!(
-            flush < DEADLINE + DEADLINE / 2,
-            "flush took {flush:?} — one deadline is {DEADLINE:?}, serial would be ≥ {:?}",
-            2 * DEADLINE
+        let (report, ()) = tokio::join!(a.flush_outbox(), async {
+            clock.wait_for_sleepers(2).await;
+            clock.advance(DEADLINE);
+        });
+        assert_eq!(
+            report.expect("flush").pending,
+            2,
+            "still nowhere to deliver"
         );
 
         drop(a); // `close()` would wait out iroh's drain (fast-failure.md F6)
@@ -4732,6 +4769,7 @@ mod tests {
             a.endpoint.addr(),
             SYNC_ALPN,
             b.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -5343,6 +5381,7 @@ mod tests {
             a.endpoint.addr(),
             SYNC_ALPN,
             c.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -5366,6 +5405,7 @@ mod tests {
             a.endpoint.addr(),
             SYNC_ALPN,
             c.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -6179,6 +6219,7 @@ mod tests {
             phone.endpoint.addr(),
             SYNC_ALPN,
             alice.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -6203,6 +6244,7 @@ mod tests {
             phone.endpoint.addr(),
             SYNC_ALPN,
             laptop.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -6711,6 +6753,7 @@ mod tests {
             a.endpoint.addr(),
             SYNC_ALPN,
             b.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -6729,6 +6772,7 @@ mod tests {
             a.endpoint.addr(),
             SYNC_ALPN,
             b.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");
@@ -6774,6 +6818,7 @@ mod tests {
             a.endpoint.addr(),
             SYNC_ALPN,
             b.config.connect_timeout,
+            &SystemClock,
         )
         .await
         .expect("connect");

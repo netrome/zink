@@ -170,7 +170,7 @@ re-measured where relevant · this tracker updated · durable bits graduated per
     free `now_ms()` — threading a clock into `ClientState`/`SyncHandler` for
     those is deferred until a slice needs it (would require `ClientState<W>` /
     `SyncHandler<W>`, out of P1's scope).
-- [~] **P2 · `TestClock` + migrate in-proc time waits.** Split into two:
+- [x] **P2 · `TestClock` + migrate in-proc time waits.** Split into two:
   - [x] **P2a · Time doubles.** ✅ 2026-08-13. In `clock/test_clock.rs`
     (behind `#[cfg(test)]`), **one double per port** — wall and monotonic time
     move independently in the real world, so tests can drive them apart (e.g.
@@ -193,16 +193,26 @@ re-measured where relevant · this tracker updated · durable bits graduated per
     whole rewound span; a `TestWallClock` rewind test pins the fix. 234/234
     green, clippy clean, wasm unaffected (`client.rs`/`clock.rs` are
     native-only).
-  - [ ] **P2b · Migrate the in-proc time waits.** Route `net::connect_addr`'s
-    deadline (`n0_future::time::timeout`) through the injected clock, then
-    convert `delivery__should_pay_one_deadline` to the P2a scheduling assertion
-    and retire its wall-clock `elapsed <` checks. **Scope flag:** the deadline
-    is reached via `net::connect`/`connect_addr`/`deposit_with_retry` +
-    `blobs::{fetch,push}`, ~18 call-sites across `net.rs`/`blobs.rs`/`client.rs`
-    — so this makes the `net`/`blobs` layer generic over the clock. Orthogonal
-    to the transport-trait extraction (P4 wraps `endpoint.connect` itself), but
-    it does touch the whole network edge; land it as its own slice.
-  - *Done when:* the client-crate suite has no real-time deadline/backoff waits.
+  - [x] **P2b · Migrate the in-proc time waits.** ✅ 2026-08-13. `Clock` gains
+    a provided `timeout` — raced against `sleep`, so a `TestClock::advance`
+    fires it deterministically — and every production deadline routes through
+    it: `net::{connect, connect_addr, deposit_with_retry}` and
+    `blobs::{push_blobs, fetch_encrypted}` take `&impl Clock`, and `Client`'s
+    `close`/`online` waits use `self.clock`. No `n0_future::time` left in
+    production code. Also fixed a P1 leak: `subscribe_once` logged a
+    `self.clock.now()` start against *real* time via `Instant::elapsed`.
+    `delivery__should_pay_one_deadline_for_two_dead_relays` is the archetype
+    conversion: a `TestClock`-built client, `wait_for_sleepers(2)` as the
+    parallelism assertion, one `advance` past a 10 s (fake) deadline —
+    **1.04 s → 0.04 s**, `elapsed <` checks retired. 234/234 green, clippy
+    clean, wasm unaffected.
+  - *Done when (revised):* the pure-deadline waits are gone. The remaining
+    real-time waits (`who_is` concurrency, `unreachable_peer`, the
+    mailbox-fallback sends, the `online` smoke) each mix a **live** dial with
+    dead ones on one clock — advancing a shared `TestClock` would fire the
+    live dial's deadline too. They migrate with the P5 transport doubles
+    (dead peers modeled in the transport, not on the clock); the `online`
+    smoke stays real-network (P7).
 
 **Tier 2 — Transport seam (design + first cut)**
 - [ ] **P3 🎯 · Design the transport trait(s).** The guarded design slice (§4).
