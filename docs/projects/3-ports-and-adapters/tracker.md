@@ -171,8 +171,9 @@ re-measured where relevant · this tracker updated · durable bits graduated per
     those is deferred until a slice needs it (would require `ClientState<W>` /
     `SyncHandler<W>`, out of P1's scope).
 - [~] **P2 · `TestClock` + migrate in-proc time waits.** Split into two:
-  - [x] **P2a · `TestClock` primitive.** ✅ 2026-08-13. In `clock.rs` (behind
-    `#[cfg(test)]`): a hand-driven clock implementing both ports — `advance`
+  - [x] **P2a · `TestClock` primitive.** ✅ 2026-08-13. In its own
+    `clock/test_clock.rs` submodule (behind `#[cfg(test)]`): a hand-driven clock
+    implementing both ports — `advance`
     moves monotonic + wall time together and fires parked `sleep`s; `sleep`
     registers on first poll and deregisters on drop (so a race's losing timer
     stops counting); `wait_for_sleepers(n)` resolves once `n` timers are parked.
