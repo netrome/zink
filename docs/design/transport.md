@@ -48,87 +48,100 @@ All in `zink-client/src/transport.rs`; the iroh adapter in `transport/iroh.rs`
 (`impl Future + Send`), as in `clock.rs`.
 
 ```rust
-/// A peer: the key that *is* its identity, plus fallible route hints for
-/// reaching it, filled from contact/device records. Plain data; the adapter
-/// maps it to iroh addressing. The handshake pins the key — a stale hint can
-/// slow or fail a dial, never redirect it.
-pub(crate) struct Peer {
-    pub key: PublicKey,           // zink-protocol type — the only identifier
-    pub relays: Vec<String>,      // relay URLs as recorded
-    pub sockets: Vec<SocketAddr>, // explicit ip:port hints (dial strings)
-}
+/// The full network capability, as one bound for `Client`'s type parameter.
+/// Blanket-implemented — nothing implements it by name; helpers take the
+/// narrowest verb they exercise.
+pub trait Transport:
+    Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone {}
+impl<T: Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone>
+    Transport for T {}
 
-pub(crate) trait Dial: Send + Sync + 'static {
+pub trait Dial: Send + Sync + 'static {
     type Conn: Request + AcceptUni;
     /// May stay pending arbitrarily long — race it against a Clock deadline.
+    /// A returned connection is to `to.key`, authenticated by the handshake.
     fn dial(&self, to: &Peer, alpn: &[u8])
         -> impl Future<Output = Result<Self::Conn, DialError>> + Send;
 }
 
 /// One framed request, one length-capped framed response.
-pub(crate) trait Request: Send + Sync + 'static {
+pub trait Request: Send + Sync + 'static {
     fn request(&self, frame: &[u8], max_response: usize)
         -> impl Future<Output = Result<Vec<u8>, ConnError>> + Send;
 }
 
 /// Unsolicited one-way frames from the remote (the nudge path).
-pub(crate) trait AcceptUni: Send + Sync + 'static {
+pub trait AcceptUni: Send + Sync + 'static {
     fn accept_uni(&self, max: usize)
         -> impl Future<Output = Result<Vec<u8>, ConnError>> + Send;
 }
 
-pub(crate) trait DialBlobs: Send + Sync + 'static {
+pub trait DialBlobs: Send + Sync + 'static {
     type Conn: PushBlob + FetchBlob;
     fn dial_blobs(&self, to: &Peer)
         -> impl Future<Output = Result<Self::Conn, DialError>> + Send;
 }
 
-pub(crate) trait PushBlob: Send + Sync + 'static {
+pub trait PushBlob: Send + Sync + 'static {
     /// Resolves only once the remote durably holds the blob.
     fn push(&self, blob: &EncryptedBlob)
         -> impl Future<Output = Result<(), ConnError>> + Send;
 }
 
-pub(crate) trait FetchBlob: Send + Sync + 'static {
+pub trait FetchBlob: Send + Sync + 'static {
     /// Success means the returned bytes hash to `hash`.
     fn fetch(&self, hash: &BlobHash)
         -> impl Future<Output = Result<Vec<u8>, ConnError>> + Send;
 }
 
-/// An inbound request. `peer` is authenticated by the transport handshake.
-pub(crate) struct Inbound<R> {
-    pub peer: PublicKey,
-    pub frame: Vec<u8>,
-    pub reply: R,
-}
-
-pub(crate) trait Accept: Send + Sync + 'static {
+pub trait Accept: Send + Sync + 'static {
     type Reply: Respond;
     /// Next inbound request from any peer; None once the endpoint closes.
     fn accept(&self) -> impl Future<Output = Option<Inbound<Self::Reply>>> + Send;
 }
 
-pub(crate) trait Respond: Send + 'static {
+pub trait Respond: Send + 'static {
     fn respond(self, frame: &[u8])
         -> impl Future<Output = Result<(), ConnError>> + Send;
 }
 
-/// Attachment to home relays: await it, change it.
-pub(crate) trait Home: Send + Sync + 'static {
+/// To home — attach to a home relay, the transition that makes this endpoint
+/// reachable by key.
+pub trait Home: Send + Sync + 'static {
     /// Resolves when a home relay connection is up. May NEVER resolve.
     fn online(&self) -> impl Future<Output = ()> + Send;
+}
+
+pub trait InsertRelay: Send + Sync + 'static {
     fn insert_relay(&self, url: &str)
         -> impl Future<Output = Result<(), InvalidRelayUrl>> + Send;
+}
+
+pub trait RemoveRelay: Send + Sync + 'static {
     fn remove_relay(&self, url: &str) -> impl Future<Output = ()> + Send;
 }
 
-pub(crate) trait Close: Send + Sync + 'static {
+pub trait Close: Send + Sync + 'static {
     /// Graceful drain; the caller races it against a deadline.
     fn close(&self) -> impl Future<Output = ()> + Send;
 }
 
-pub(crate) trait Transport: Dial + DialBlobs + Accept + Home + Close + Clone {}
-impl<T: Dial + DialBlobs + Accept + Home + Close + Clone> Transport for T {}
+/// A peer: the key that *is* its identity, plus fallible route hints for
+/// reaching it, filled from contact/device records. Plain data; the adapter
+/// maps it to iroh addressing. The handshake pins the key — a stale hint can
+/// slow or fail a dial, never redirect it.
+pub struct Peer {
+    pub key: PublicKey,           // zink-protocol type — the only identifier
+    pub relays: Vec<String>,      // relay URLs as recorded
+    pub sockets: Vec<SocketAddr>, // explicit ip:port hints (dial strings)
+}
+
+/// An inbound request. `peer` is authenticated by the transport handshake.
+pub struct Inbound<R> {
+    pub peer: PublicKey,
+    pub frame: Vec<u8>,
+    pub reply: R,
+}
 ```
 
 `Clone` is on the aggregate because background tasks (the serve loop,
@@ -192,8 +205,11 @@ nothing about what the peer saw; success means sent, not processed.
 moment* — a fact, not a lease. It may never resolve (no relay configured,
 relay down — the reason `Reachable::NotYet` exists), so callers always race a
 Clock deadline. `NoHomeRelay` is decided by the domain from the profile and
-never asks the port. `insert_relay`/`remove_relay` affect future dials and
-homing; no promise about existing connections.
+never asks the port.
+
+**`InsertRelay`/`RemoveRelay`** — affect future dials and homing; no promise
+about existing connections. `insert_relay` fails only on an unparseable URL;
+`remove_relay` cannot fail (a URL that never parsed was never inserted).
 
 **`Close::close`** — best-effort drain, arbitrarily slow; race it against a
 deadline. After close, port operations fail and `accept` yields `None`.

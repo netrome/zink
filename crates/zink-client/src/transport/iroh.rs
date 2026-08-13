@@ -23,7 +23,7 @@ use zink_protocol::{DeviceKey, EncryptedBlob, PublicKey, SYNC_ALPN};
 
 use super::{
     Accept, AcceptUni, Close, ConnError, Dial, DialBlobs, DialError, FetchBlob, Home, Inbound,
-    InvalidRelayUrl, Peer, PushBlob, Request, Respond,
+    InsertRelay, InvalidRelayUrl, Peer, PushBlob, RemoveRelay, Request, Respond,
 };
 use crate::error::Error;
 
@@ -327,29 +327,24 @@ impl Home for IrohTransport {
     fn online(&self) -> impl std::future::Future<Output = ()> + Send {
         self.endpoint.online()
     }
+}
 
-    fn insert_relay(
-        &self,
-        url: &str,
-    ) -> impl std::future::Future<Output = Result<(), InvalidRelayUrl>> + Send {
-        let parsed =
-            RelayUrl::from_str(url).map_err(|e| InvalidRelayUrl(format!("relay url {url}: {e}")));
-        async move {
-            let url = parsed?;
-            self.endpoint
-                .insert_relay(url.clone(), Arc::new(relay_config(url)))
-                .await;
-            Ok(())
-        }
+impl InsertRelay for IrohTransport {
+    async fn insert_relay(&self, url: &str) -> Result<(), InvalidRelayUrl> {
+        let url = RelayUrl::from_str(url)
+            .map_err(|e| InvalidRelayUrl(format!("relay url {url}: {e}")))?;
+        self.endpoint
+            .insert_relay(url.clone(), Arc::new(relay_config(url)))
+            .await;
+        Ok(())
     }
+}
 
-    fn remove_relay(&self, url: &str) -> impl std::future::Future<Output = ()> + Send {
+impl RemoveRelay for IrohTransport {
+    async fn remove_relay(&self, url: &str) {
         // A URL that never parsed was never inserted — nothing to remove.
-        let parsed = RelayUrl::from_str(url).ok();
-        async move {
-            if let Some(url) = parsed {
-                self.endpoint.remove_relay(&url).await;
-            }
+        if let Ok(url) = RelayUrl::from_str(url) {
+            self.endpoint.remove_relay(&url).await;
         }
     }
 }

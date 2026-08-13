@@ -11,35 +11,17 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use zink_protocol::{BlobHash, EncryptedBlob, PublicKey};
 
-/// A peer: the key that *is* its identity, plus fallible route hints for
-/// reaching it, filled from contact/device records. Plain data; the adapter
-/// maps it to iroh addressing. The handshake pins the key — a stale hint can
-/// slow or fail a dial, never redirect it.
-#[derive(Debug, Clone)]
-pub struct Peer {
-    pub key: PublicKey,
-    /// Relay URLs as recorded.
-    pub relays: Vec<String>,
-    /// Explicit ip:port hints (dial strings).
-    pub sockets: Vec<SocketAddr>,
+/// The full network capability, as one bound for `Client`'s type parameter.
+/// Blanket-implemented — nothing implements it by name; helpers take the
+/// narrowest verb they exercise.
+pub trait Transport:
+    Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone
+{
 }
-
-/// A dial failed. Opaque on purpose: the domain never branches on failure
-/// taxonomy — a variant is added only when domain logic branches on it.
-#[derive(Debug, Clone, Error)]
-#[error("{0}")]
-pub struct DialError(pub String);
-
-/// An operation on an established connection failed. Says nothing about
-/// whether the remote received or processed anything (transport.md §3).
-#[derive(Debug, Clone, Error)]
-#[error("{0}")]
-pub struct ConnError(pub String);
-
-/// A relay URL the adapter cannot parse.
-#[derive(Debug, Clone, Error)]
-#[error("{0}")]
-pub struct InvalidRelayUrl(pub String);
+impl<T: Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone> Transport
+    for T
+{
+}
 
 pub trait Dial: Send + Sync + 'static {
     type Conn: Request + AcceptUni;
@@ -81,13 +63,6 @@ pub trait FetchBlob: Send + Sync + 'static {
     fn fetch(&self, hash: &BlobHash) -> impl Future<Output = Result<Vec<u8>, ConnError>> + Send;
 }
 
-/// An inbound request. `peer` is authenticated by the transport handshake.
-pub struct Inbound<R> {
-    pub peer: PublicKey,
-    pub frame: Vec<u8>,
-    pub reply: R,
-}
-
 pub trait Accept: Send + Sync + 'static {
     type Reply: Respond;
     /// Next inbound request from any peer; None once the endpoint closes.
@@ -98,12 +73,23 @@ pub trait Respond: Send + 'static {
     fn respond(self, frame: &[u8]) -> impl Future<Output = Result<(), ConnError>> + Send;
 }
 
-/// Attachment to home relays: await it, change it.
+/// To home — attach to a home relay, the transition that makes this endpoint
+/// reachable by key (De6c: "homed").
 pub trait Home: Send + Sync + 'static {
     /// Resolves when a home relay connection is up. May NEVER resolve (no
     /// relay configured, relay down) — always race it against a deadline.
     fn online(&self) -> impl Future<Output = ()> + Send;
+}
+
+pub trait InsertRelay: Send + Sync + 'static {
+    /// Add a home relay; affects future dials and homing. Fails only on an
+    /// unparseable URL.
     fn insert_relay(&self, url: &str) -> impl Future<Output = Result<(), InvalidRelayUrl>> + Send;
+}
+
+pub trait RemoveRelay: Send + Sync + 'static {
+    /// Drop a home relay from future dials and homing; no promise about
+    /// existing connections.
     fn remove_relay(&self, url: &str) -> impl Future<Output = ()> + Send;
 }
 
@@ -112,10 +98,41 @@ pub trait Close: Send + Sync + 'static {
     fn close(&self) -> impl Future<Output = ()> + Send;
 }
 
-/// The full network capability, as one bound for `Client`'s type parameter.
-/// Blanket-implemented — nothing implements it by name; helpers take the
-/// narrowest verb they exercise.
-pub trait Transport: Dial + DialBlobs + Accept + Home + Close + Clone {}
-impl<T: Dial + DialBlobs + Accept + Home + Close + Clone> Transport for T {}
+/// A peer: the key that *is* its identity, plus fallible route hints for
+/// reaching it, filled from contact/device records. Plain data; the adapter
+/// maps it to iroh addressing. The handshake pins the key — a stale hint can
+/// slow or fail a dial, never redirect it.
+#[derive(Debug, Clone)]
+pub struct Peer {
+    pub key: PublicKey,
+    /// Relay URLs as recorded.
+    pub relays: Vec<String>,
+    /// Explicit ip:port hints (dial strings).
+    pub sockets: Vec<SocketAddr>,
+}
+
+/// An inbound request. `peer` is authenticated by the transport handshake.
+pub struct Inbound<R> {
+    pub peer: PublicKey,
+    pub frame: Vec<u8>,
+    pub reply: R,
+}
+
+/// A dial failed. Opaque on purpose: the domain never branches on failure
+/// taxonomy — a variant is added only when domain logic branches on it.
+#[derive(Debug, Clone, Error)]
+#[error("{0}")]
+pub struct DialError(pub String);
+
+/// An operation on an established connection failed. Says nothing about
+/// whether the remote received or processed anything (transport.md §3).
+#[derive(Debug, Clone, Error)]
+#[error("{0}")]
+pub struct ConnError(pub String);
+
+/// A relay URL the adapter cannot parse.
+#[derive(Debug, Clone, Error)]
+#[error("{0}")]
+pub struct InvalidRelayUrl(pub String);
 
 pub(crate) mod iroh;

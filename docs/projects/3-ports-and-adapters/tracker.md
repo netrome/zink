@@ -219,7 +219,8 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   slice — [`docs/design/transport.md`](../../design/transport.md) written and
   checked against every §4 guardrail; no code changed (per DoD). The shape:
   **verb-named capability traits** (`Dial`, `Request`, `AcceptUni`,
-  `DialBlobs`, `PushBlob`, `FetchBlob`, `Accept`, `Respond`, `Home`, `Close`),
+  `DialBlobs`, `PushBlob`, `FetchBlob`, `Accept`, `Respond`, `Home`,
+  `InsertRelay`, `RemoveRelay`, `Close`),
   aggregated by a blanket-impl'd `Transport` supertrait into one `Client`
   parameter (`Client<C, W, N: Transport = IrohTransport>`); connections are
   concrete noun-objects implementing the verbs. **Frame-level, not
@@ -294,7 +295,7 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 | Injection mechanism | **Generics with default type parameters, one parameter per port** (`Client<C: Clock = SystemClock, W: WallClock = SystemClock>`), *not* `dyn`/`Arc<dyn>` and *not* one `C: Clock + WallClock`. No heap allocation or type erasure; defaults mean edges keep writing bare `Client`, as the relay's `InMemoryStore<C = SystemClock>`; `sleep` is `impl Future` (RPITIT), free across a generic seam. Separate parameters because wall and monotonic time are separate dependencies: impossible to confuse, a test injects exactly the half it drives, helpers receive only the capability they need. |
 | Test doubles for time | **One double per port**: monotonic `TestClock` (advance + parked-sleep registry) and settable `TestWallClock` (`set_ms` — jumps, not flow). Test under adversarial conditions (wall rewind while monotonic advances), not idealized ones — a lockstep double makes the rewind inexpressible. Share *mechanism* (the waker registry, whose behavior *is* the port contract); keep *scenario* in each test by how it drives the double. |
 | Wall-clock reach | Two un-asserted wall sites (`state.rs` first-seen, `sync.rs` reach-seen) stay on a `SystemClock`-backed free `now_ms()`; injecting them would need `ClientState<W>`/`SyncHandler<W>` and buys no current test — deferred, not in P1. |
-| Transport | **Resolved in P3** — see [transport.md](../../design/transport.md). Verb-named capability traits (`Dial`/`Request`/`AcceptUni`/`DialBlobs`/`PushBlob`/`FetchBlob`/`Accept`/`Respond`/`Home`/`Close`), frame-level, keyed by `Peer` (the pubkey identity + fallible route hints); seam below fan-out & reachability; one `Client` parameter via a blanket `Transport` supertrait (facets of one endpoint — unlike the two clocks). |
+| Transport | **Resolved in P3** — see [transport.md](../../design/transport.md). Verb-named capability traits (`Dial`/`Request`/`AcceptUni`/`DialBlobs`/`PushBlob`/`FetchBlob`/`Accept`/`Respond`/`Home`/`InsertRelay`/`RemoveRelay`/`Close`), frame-level, keyed by `Peer` (the pubkey identity + fallible route hints); seam below fan-out & reachability; one `Client` parameter via a blanket `Transport` supertrait (facets of one endpoint — unlike the two clocks). |
 | Blob ops | Intent-level (`PushBlob` = durable receipt, `FetchBlob` = hash-verified bytes), not stream-level; iroh-blobs mechanics are adapter detail, real streaming covered by the P7 smoke tier. |
 | Time in transport | No `Duration` params, no timers in adapters; every deadline is a domain-side `clock.timeout` race — the rule that keeps `TestClock` sovereign over all waits. |
 | Accept style | Pull: `accept()` yields `Inbound { peer, frame, reply }` to a domain-owned serve loop; adapter forwards `Router` accepts into the pull surface. |
