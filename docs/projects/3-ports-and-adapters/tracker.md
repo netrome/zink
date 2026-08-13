@@ -215,16 +215,35 @@ re-measured where relevant · this tracker updated · durable bits graduated per
     smoke stays real-network (P7).
 
 **Tier 2 — Transport seam (design + first cut)**
-- [ ] **P3 🎯 · Design the transport trait(s).** The guarded design slice (§4).
-  Produce `docs/design/transport.md`: the trait split (send-to-pubkey vs
-  accept-inbound), the contract (no ordering/no guaranteed-success/dial→
-  success|timeout), seam placement below fan-out & reachability, and the
-  test-double kit shape. *Done when:* the design doc exists and passes the §4
-  guardrails; no code need change yet.
-- [ ] **P4 · Real iroh adapter behind the trait(s).** Extract the iroh usage in
-  `zink-client` behind the P3 trait(s); the production adapter implements them;
-  existing tests pass *through* the adapter (proves the seam is right, no
-  behavior change).
+- [x] **P3 · Design the transport trait(s).** ✅ 2026-08-13. The guarded design
+  slice — [`docs/design/transport.md`](../../design/transport.md) written and
+  checked against every §4 guardrail; no code changed (per DoD). The shape:
+  **verb-named capability traits** (`Dial`, `Request`, `AcceptUni`,
+  `DialBlobs`, `PushBlob`, `FetchBlob`, `Accept`, `Respond`, `Home`, `Close`),
+  aggregated by a blanket-impl'd `Transport` supertrait into one `Client`
+  parameter (`Client<C, W, N: Transport = IrohTransport>`); connections are
+  concrete noun-objects implementing the verbs. **Frame-level, not
+  stream-level** (every mailbox/sync exchange is one framed request per
+  bi-stream — the inventory showed no call site needs raw streams); **blob
+  ops at intent level** (durable-receipt push / hash-verified fetch;
+  iroh-blobs mechanics stay in the adapter — re-modelling bitfields in doubles
+  is the §4 emulator trap); **pull-style inbound** (`accept()` yields
+  `Inbound { peer, frame, reply }` into a domain-owned serve loop); **no time
+  inside the port** — no `Duration` params, no adapter timers, every deadline
+  a domain-side `clock.timeout` race, which is what lets `TestClock` drive
+  transport waits. Errors are variant-free (`DialError`/`ConnError`) — the
+  domain maps failures structurally by which port call failed; a variant is
+  added only when logic branches on it. Local addressing fell off the ports
+  (CLI-print-only → inherent on `IrohTransport`, production-only impl block).
+- [ ] **P4 🎯 · Real iroh adapter behind the trait(s).** Extract the iroh usage
+  in `zink-client` behind the P3 trait(s); the production adapter implements
+  them; existing tests pass *through* the adapter (proves the seam is right,
+  no behavior change). **Watch-items from P3:** the pull-style `Accept`
+  inverts today's `Router`-owned loop — preserve cross-connection concurrency
+  (spawn per `Inbound`); if the `Router` fights the pull surface, the fallback
+  is push-style registration, which changes the contract and goes back through
+  transport.md first. Signature mechanics (error plumbing, `&str` vs a
+  validated relay-URL newtype) may be refined here without a design revisit.
 - [ ] **P5 · Test-double kit + first migration.** Small composable doubles
   (`VecTransport` / `ChannelTransport` / `ControllableTransport`), composed with
   `TestClock`. Migrate a first batch of logic tests (fan-out, who-is resolution,
@@ -252,8 +271,11 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 | Injection mechanism | **Generics with default type parameters, one parameter per port** (`Client<C: Clock = SystemClock, W: WallClock = SystemClock>`), *not* `dyn`/`Arc<dyn>` and *not* one `C: Clock + WallClock`. No heap allocation or type erasure; defaults mean edges keep writing bare `Client`, as the relay's `InMemoryStore<C = SystemClock>`; `sleep` is `impl Future` (RPITIT), free across a generic seam. Separate parameters because wall and monotonic time are separate dependencies: impossible to confuse, a test injects exactly the half it drives, helpers receive only the capability they need. |
 | Test doubles for time | **One double per port**: monotonic `TestClock` (advance + parked-sleep registry) and settable `TestWallClock` (`set_ms` — jumps, not flow). Test under adversarial conditions (wall rewind while monotonic advances), not idealized ones — a lockstep double makes the rewind inexpressible. Share *mechanism* (the waker registry, whose behavior *is* the port contract); keep *scenario* in each test by how it drives the double. |
 | Wall-clock reach | Two un-asserted wall sites (`state.rs` first-seen, `sync.rs` reach-seen) stay on a `SystemClock`-backed free `now_ms()`; injecting them would need `ClientState<W>`/`SyncHandler<W>` and buys no current test — deferred, not in P1. |
-| Transport | A narrow byte/stream port keyed by pubkey, seam *below* fan-out & reachability. Trait split (send vs accept) decided in P3. |
-| Test doubles | Small composable per-scenario doubles, not one simulator (§4). |
+| Transport | **Resolved in P3** — see [transport.md](../../design/transport.md). Verb-named capability traits (`Dial`/`Request`/`AcceptUni`/`DialBlobs`/`PushBlob`/`FetchBlob`/`Accept`/`Respond`/`Home`/`Close`), frame-level, keyed by `Peer` (the pubkey identity + fallible route hints); seam below fan-out & reachability; one `Client` parameter via a blanket `Transport` supertrait (facets of one endpoint — unlike the two clocks). |
+| Blob ops | Intent-level (`PushBlob` = durable receipt, `FetchBlob` = hash-verified bytes), not stream-level; iroh-blobs mechanics are adapter detail, real streaming covered by the P7 smoke tier. |
+| Time in transport | No `Duration` params, no timers in adapters; every deadline is a domain-side `clock.timeout` race — the rule that keeps `TestClock` sovereign over all waits. |
+| Accept style | Pull: `accept()` yields `Inbound { peer, frame, reply }` to a domain-owned serve loop; adapter forwards `Router` accepts into the pull surface. |
+| Test doubles | Small composable per-scenario doubles, not one simulator (§4); one double per capability, controls (hold/release/fail/kill), real BORSH frames, loud `Unused` stubs — discipline in transport.md §8. |
 | Smoke tier | Retained and explicit; never zero real-network tests. |
 | Env knobs | `ZINK_*_MS` decommissioned once the subprocess logic tests are migrated (P6). |
 | De6e | Out of scope — SPEC §11 decision, declined on privacy grounds. |
