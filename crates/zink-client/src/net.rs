@@ -1,139 +1,66 @@
-//! Network edge helpers: relay dialing, mailbox round-trips, retrying
-//! deposits. One request per bi-stream, per the mailbox wire protocol.
-
-use std::net::SocketAddr;
-use std::str::FromStr;
+//! Network edge helpers over the transport ports: relay dialing, mailbox
+//! round-trips, retrying deposits. One request per bi-stream, per the
+//! mailbox wire protocol. Each helper takes the narrowest capability it
+//! exercises (`docs/design/transport.md` §6); every deadline is a
+//! `Clock::timeout` race here — the ports carry no time.
 
 use crate::clock::Clock;
 use crate::error::Error;
-use iroh::endpoint::{Connection, presets};
-use iroh::tls::CaTlsConfig;
-use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
-};
+use crate::transport::{Dial, DialBlobs, Peer, Request};
 use zink_protocol::{
-    DeviceKey, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MAX_SYNC_RESPONSE_BYTES, MailboxOp,
-    MailboxRequest, MailboxResponse, MailboxResult, MessageEnvelope, PublicKey, SyncOp,
-    SyncRequest, SyncResponse, SyncResult,
+    MAILBOX_ALPN, MAX_RESPONSE_BYTES, MAX_SYNC_RESPONSE_BYTES, MailboxOp, MailboxRequest,
+    MailboxResponse, MailboxResult, MessageEnvelope, SyncOp, SyncRequest, SyncResponse, SyncResult,
 };
 
-/// The endpoint key IS the device key: mailbox auth is the connection.
-///
-/// `home_relays` are the iroh relay URLs of this device's own relay services
-/// (D0b): with any set, the endpoint homes to them (`RelayMode::Custom`) and
-/// stays reachable by key across NATs — iroh holepunches to a direct path
-/// when it can and falls back to relaying the (encrypted) QUIC when it
-/// can't. With none set, the endpoint is dial-only + directly-dialable,
-/// exactly as before; relay changes take effect on the next bind (app
-/// restart) — iroh's relay transport is fixed at bind time.
-pub(crate) async fn bind_endpoint(
-    device: &DeviceKey,
-    home_relays: &[RelayUrl],
-) -> Result<Endpoint, Error> {
-    let map: RelayMap = home_relays.iter().cloned().map(relay_config).collect();
-    Endpoint::builder(presets::Minimal)
-        .secret_key(SecretKey::from_bytes(&device.seed()))
-        // The relay transport is ALWAYS bound — with an empty map when no
-        // profile exists yet (De5). Without it, a freshly-set-up client
-        // could not use relay URLs in either direction until the next
-        // open: no dialing peers by key (the field bug — who-is dead on a
-        // new install) and no homing. With the transport present, peers'
-        // relay URLs dial immediately, and `Client::set_profile` homes
-        // the *running* endpoint via `insert_relay` — restart-to-apply is
-        // gone.
-        .relay_mode(RelayMode::Custom(map))
-        // The relay serves QAD with a self-signed cert (De2) — webpki
-        // roots would put a CA in the trust path, which zink relays
-        // deliberately don't have. Nothing security-relevant rides on
-        // this TLS: iroh connections authenticate by endpoint key, and
-        // a QAD man-in-the-middle can at most misreport our observed
-        // address (degraded holepunching — today's baseline anyway).
-        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-        .bind()
-        .await
-        .map_err(|e| Error::Transport(format!("bind endpoint: {e}")))
-}
-
-/// One home relay's client-side config. Same-port convention (De2): the
-/// relay serves QUIC address discovery on UDP at the relay URL's own port
-/// number (TCP for HTTP relaying and UDP for QAD coexist at one number, and
-/// distinct URLs get distinct QAD ports — multi-relay on one host stays
-/// collision-free). A URL with no explicit port keeps iroh's default QAD
-/// port (7842), which is exactly the convention standard iroh relays use.
-pub(crate) fn relay_config(url: RelayUrl) -> RelayConfig {
-    let port = url.port();
-    let mut config = RelayConfig::from(url);
-    if let (Some(port), Some(quic)) = (port, config.quic.as_mut()) {
-        quic.port = port;
-    }
-    config
-}
-
-/// Parse an iroh relay URL from a `RelayEntry.relay_url` value.
-pub(crate) fn parse_relay_url(url: &str) -> Result<RelayUrl, Error> {
-    RelayUrl::from_str(url).map_err(|e| Error::InvalidInput(format!("relay url {url}: {e}")))
-}
-
-/// A peer address from its device key + its relay URLs (from its
-/// ContactRecord): iroh routes initial signaling via the peer's relay, then
-/// holepunches to a direct path or falls back to relaying. The device key
-/// IS the endpoint key, so no lookup service is involved.
-pub(crate) fn peer_addr(key: &PublicKey, relay_urls: &[RelayUrl]) -> Result<EndpointAddr, Error> {
-    let id = EndpointId::from_bytes(&key.0)
-        .map_err(|e| Error::InvalidInput(format!("peer endpoint id: {e}")))?;
-    let mut addr = EndpointAddr::new(id);
-    for url in relay_urls {
-        addr = addr.with_relay_url(url.clone());
-    }
-    Ok(addr)
-}
-
-/// `<endpoint-id>@<ip:port>`, as printed by `zink-relay`. Tolerates the
-/// full relay spec `<endpoint-id>@<ip:port>#<relay-url>` — mailbox dialing
-/// only needs the part before the `#`.
-pub(crate) fn parse_relay(spec: &str) -> Result<EndpointAddr, Error> {
-    let spec = spec.split_once('#').map_or(spec, |(dial, _)| dial);
-    let (id, sock) = spec
-        .split_once('@')
-        .ok_or_else(|| Error::InvalidInput("relay must be <endpoint-id>@<ip:port>".into()))?;
-    let id = EndpointId::from_str(id)
-        .map_err(|e| Error::InvalidInput(format!("relay endpoint id: {e}")))?;
-    let sock = SocketAddr::from_str(sock)
-        .map_err(|e| Error::InvalidInput(format!("relay socket addr: {e}")))?;
-    Ok(EndpointAddr::new(id).with_ip_addr(sock))
-}
-
-/// Bounded connect: an unreachable relay must fail a send in bounded time,
-/// not hang it — graceful failure is what the outbox turns into delivery
-/// later. The deadline is `ClientConfig::connect_timeout`, injected by the
-/// edge (iroh itself keeps probing an unreachable address far longer).
-pub(crate) async fn connect(
-    endpoint: &Endpoint,
+/// Bounded connect to a relay by its dial spec: an unreachable relay must
+/// fail a send in bounded time, not hang it — graceful failure is what the
+/// outbox turns into delivery later. The deadline is
+/// `ClientConfig::connect_timeout`, injected by the edge (iroh itself keeps
+/// probing an unreachable address far longer).
+pub(crate) async fn connect<D: Dial>(
+    net: &D,
     relay: &str,
     alpn: &[u8],
     timeout: std::time::Duration,
     clock: &impl Clock,
-) -> Result<Connection, Error> {
-    connect_addr(endpoint, parse_relay(relay)?, alpn, timeout, clock)
+) -> Result<D::Conn, Error> {
+    let to = crate::transport::iroh::parse_dial(relay)?;
+    connect_peer(net, &to, alpn, timeout, clock)
         .await
         .map_err(|e| Error::Unreachable(format!("connect to {relay}: {e}")))
 }
 
-/// Connect to an already-resolved `EndpointAddr` — used for peer sync, where a
-/// dial string is parsed once and where a locally-bound peer advertises
-/// several addresses (loopback/LAN/public) and iroh should try them all.
-pub(crate) async fn connect_addr(
-    endpoint: &Endpoint,
-    addr: EndpointAddr,
+/// Connect to an already-resolved `Peer` — used for peer sync, where a dial
+/// string is parsed once and where a locally-bound peer advertises several
+/// addresses (loopback/LAN/public) and iroh should try them all.
+pub(crate) async fn connect_peer<D: Dial>(
+    net: &D,
+    to: &Peer,
     alpn: &[u8],
     timeout: std::time::Duration,
     clock: &impl Clock,
-) -> Result<Connection, Error> {
+) -> Result<D::Conn, Error> {
     clock
-        .timeout(timeout, endpoint.connect(addr, alpn))
+        .timeout(timeout, net.dial(to, alpn))
         .await
         .map_err(|_| Error::Unreachable("timed out".to_string()))?
         .map_err(|e| Error::Unreachable(e.to_string()))
+}
+
+/// Bounded connect on the blobs ALPN, same deadline discipline as `connect`.
+pub(crate) async fn connect_blobs<B: DialBlobs>(
+    net: &B,
+    relay: &str,
+    timeout: std::time::Duration,
+    clock: &impl Clock,
+) -> Result<B::Conn, Error> {
+    let to = crate::transport::iroh::parse_dial(relay)?;
+    clock
+        .timeout(timeout, net.dial_blobs(&to))
+        .await
+        .map_err(|_| Error::Unreachable("timed out".to_string()))
+        .and_then(|dialed| dialed.map_err(|e| Error::Unreachable(e.to_string())))
+        .map_err(|e| Error::Unreachable(format!("connect to {relay}: {e}")))
 }
 
 /// Register at a relay, surfacing a **refusal** rather than walking past it.
@@ -142,7 +69,7 @@ pub(crate) async fn connect_addr(
 /// was never going to fill, forever, with no clue why. A refusal is operator
 /// policy (SPEC §5.3) and terminal for this relay, so it belongs in the
 /// error channel where the subscription loop and the CLI can report it.
-pub(crate) async fn register(connection: &Connection, relay: &str) -> Result<(), Error> {
+pub(crate) async fn register(connection: &impl Request, relay: &str) -> Result<(), Error> {
     match request(connection, MailboxOp::Register).await? {
         MailboxResult::Registered => Ok(()),
         MailboxResult::Error {
@@ -155,22 +82,13 @@ pub(crate) async fn register(connection: &Connection, relay: &str) -> Result<(),
 }
 
 pub(crate) async fn request(
-    connection: &Connection,
+    connection: &impl Request,
     op: MailboxOp,
 ) -> Result<MailboxResult, Error> {
-    let (mut send, mut recv) = connection
-        .open_bi()
+    let bytes = connection
+        .request(&MailboxRequest::new(op).to_bytes(), MAX_RESPONSE_BYTES)
         .await
-        .map_err(|e| Error::Transport(format!("open stream: {e}")))?;
-    send.write_all(&MailboxRequest::new(op).to_bytes())
-        .await
-        .map_err(|e| Error::Transport(format!("send request: {e}")))?;
-    send.finish()
-        .map_err(|e| Error::Transport(format!("finish stream: {e}")))?;
-    let bytes = recv
-        .read_to_end(MAX_RESPONSE_BYTES)
-        .await
-        .map_err(|e| Error::Transport(format!("read response: {e}")))?;
+        .map_err(|e| Error::Transport(e.to_string()))?;
     Ok(MailboxResponse::try_from_bytes(&bytes)
         .map_err(Error::Decode)?
         .result)
@@ -178,20 +96,14 @@ pub(crate) async fn request(
 
 /// One peer sync round-trip on `SYNC_ALPN` (same one-request-per-bi-stream
 /// framing as the mailbox). The connection is to a *peer*, not a relay.
-pub(crate) async fn sync_request(connection: &Connection, op: SyncOp) -> Result<SyncResult, Error> {
-    let (mut send, mut recv) = connection
-        .open_bi()
+pub(crate) async fn sync_request(
+    connection: &impl Request,
+    op: SyncOp,
+) -> Result<SyncResult, Error> {
+    let bytes = connection
+        .request(&SyncRequest::new(op).to_bytes(), MAX_SYNC_RESPONSE_BYTES)
         .await
-        .map_err(|e| Error::Transport(format!("open stream: {e}")))?;
-    send.write_all(&SyncRequest::new(op).to_bytes())
-        .await
-        .map_err(|e| Error::Transport(format!("send request: {e}")))?;
-    send.finish()
-        .map_err(|e| Error::Transport(format!("finish stream: {e}")))?;
-    let bytes = recv
-        .read_to_end(MAX_SYNC_RESPONSE_BYTES)
-        .await
-        .map_err(|e| Error::Transport(format!("read response: {e}")))?;
+        .map_err(|e| Error::Transport(e.to_string()))?;
     Ok(SyncResponse::try_from_bytes(&bytes)
         .map_err(Error::Decode)?
         .result)
@@ -202,8 +114,8 @@ pub(crate) async fn sync_request(connection: &Connection, op: SyncOp) -> Result<
 /// An *unreachable* relay is not retried here at all — that won't heal in
 /// seconds, and healing over time is the outbox's job (live-delivery.md §2);
 /// in-attempt retries are for transient post-connect stream errors only.
-pub(crate) async fn deposit_with_retry(
-    endpoint: &Endpoint,
+pub(crate) async fn deposit_with_retry<D: Dial>(
+    net: &D,
     relay: &str,
     envelope: &MessageEnvelope,
     timeout: std::time::Duration,
@@ -214,7 +126,7 @@ pub(crate) async fn deposit_with_retry(
         if attempt > 0 {
             tracing::warn!(relay, attempt, error = %last_error, "deposit failed; retrying");
         }
-        let connection = match connect(endpoint, relay, MAILBOX_ALPN, timeout, clock).await {
+        let connection = match connect(net, relay, MAILBOX_ALPN, timeout, clock).await {
             Ok(connection) => connection,
             Err(error) => return Err(error),
         };

@@ -1,10 +1,9 @@
 # Transport ports
 
-Status: **designed, 2026-08-13.** Project
-[3-ports-and-adapters](../projects/3-ports-and-adapters/tracker.md), slice P3.
-No code yet: the iroh adapter lands in P4, the test-double kit in P5; this doc
-is edited in place as they do. Companion to the client clock ports
-(`zink-client/src/clock.rs`).
+Status: **designed 2026-08-13 (P3); iroh adapter landed 2026-08-13 (P4).**
+Project [3-ports-and-adapters](../projects/3-ports-and-adapters/tracker.md).
+The test-double kit lands in P5; this doc is edited in place as it does.
+Companion to the client clock ports (`zink-client/src/clock.rs`).
 
 ## 1. Why
 
@@ -68,13 +67,13 @@ pub(crate) trait Dial: Send + Sync + 'static {
 
 /// One framed request, one length-capped framed response.
 pub(crate) trait Request: Send + Sync + 'static {
-    fn request(&self, frame: &[u8], max_response: u64)
+    fn request(&self, frame: &[u8], max_response: usize)
         -> impl Future<Output = Result<Vec<u8>, ConnError>> + Send;
 }
 
 /// Unsolicited one-way frames from the remote (the nudge path).
 pub(crate) trait AcceptUni: Send + Sync + 'static {
-    fn accept_uni(&self, max: u64)
+    fn accept_uni(&self, max: usize)
         -> impl Future<Output = Result<Vec<u8>, ConnError>> + Send;
 }
 
@@ -118,8 +117,9 @@ pub(crate) trait Respond: Send + 'static {
 pub(crate) trait Home: Send + Sync + 'static {
     /// Resolves when a home relay connection is up. May NEVER resolve.
     fn online(&self) -> impl Future<Output = ()> + Send;
-    fn insert_relay(&self, url: &str) -> Result<(), InvalidRelayUrl>;
-    fn remove_relay(&self, url: &str);
+    fn insert_relay(&self, url: &str)
+        -> impl Future<Output = Result<(), InvalidRelayUrl>> + Send;
+    fn remove_relay(&self, url: &str) -> impl Future<Output = ()> + Send;
 }
 
 pub(crate) trait Close: Send + Sync + 'static {
@@ -222,7 +222,8 @@ Below fan-out, reachability, and delivery decisions; nothing enters
 policy, not transport); drain loops and cross-relay dedup; `subscribe`'s
 backoff loop; all BORSH encode/decode including hostile input (size *caps* are
 enforced by the adapter via `max_response`, using the domain's `MAX_*_BYTES`
-constants; *parsing* stays domain and keeps its never-panic tests); every
+constants — the inbound-request cap is fixed at adapter construction;
+*parsing* stays domain and keeps its never-panic tests); every
 deadline race; the serve loop over `Accept`, spawning per `Inbound` to keep
 cross-connection concurrency.
 

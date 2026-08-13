@@ -1,105 +1,46 @@
-//! Blob transfer: push encrypted blobs to relay caches (observe-confirmed —
-//! iroh-blobs 0.103 pushes carry no in-band ack) and fetch + decrypt them.
+//! Blob transfer over the transport ports: push encrypted blobs to relay
+//! caches (the port's `push` resolves only on confirmed receipt) and fetch
+//! their ciphertext back. The iroh-blobs mechanics live in the adapter.
 
-use iroh::Endpoint;
-use iroh::endpoint::Connection;
-use iroh_blobs::Hash;
-use iroh_blobs::protocol::{ChunkRanges, ChunkRangesSeq, ObserveRequest, PushRequest};
-use iroh_blobs::store::mem::MemStore;
-use n0_future::StreamExt;
 use zink_protocol::{BlobHash, EncryptedBlob};
 
 use crate::clock::Clock;
 use crate::error::Error;
 use crate::net;
+use crate::transport::{DialBlobs, FetchBlob, PushBlob};
 
 /// Push each encrypted blob to one relay's cache, confirming every transfer.
-pub(crate) async fn push_blobs(
-    endpoint: &Endpoint,
+pub(crate) async fn push_blobs<B: DialBlobs>(
+    net: &B,
     relay: &str,
-    staging: &MemStore,
     blobs: &[EncryptedBlob],
     timeout: std::time::Duration,
     clock: &impl Clock,
 ) -> Result<(), Error> {
-    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout, clock).await?;
+    let connection = net::connect_blobs(net, relay, timeout, clock).await?;
     for blob in blobs {
-        let hash = Hash::from_bytes(blob.hash.0);
-        let push = PushRequest::new(hash, ChunkRangesSeq::from_ranges([ChunkRanges::all()]));
-        staging
-            .remote()
-            .execute_push(connection.clone(), push)
+        connection
+            .push(blob)
             .await
-            .map_err(|e| Error::Transport(format!("push blob to {relay}: {e}")))?;
-        await_blob_complete(staging, &connection, hash).await?;
+            .map_err(|e| Error::Transport(format!("blob to {relay}: {e}")))?;
     }
     Ok(())
-}
-
-/// Stage encrypted blobs in a local in-memory store, ready for pushing.
-pub(crate) async fn stage(blobs: &[EncryptedBlob]) -> Result<MemStore, Error> {
-    let staging = MemStore::new();
-    for blob in blobs {
-        staging
-            .add_bytes(blob.bytes.clone())
-            .await
-            .map_err(|e| Error::Storage(format!("stage blob: {e}")))?;
-    }
-    Ok(staging)
 }
 
 /// Fetch one blob's *ciphertext* from a relay's cache. The caller verifies
 /// and decrypts against the envelope that references it (`open_blob`) —
 /// and may cache the ciphertext, which stays exactly as untrusted as the
 /// relay it came from.
-pub(crate) async fn fetch_encrypted(
-    endpoint: &Endpoint,
+pub(crate) async fn fetch_encrypted<B: DialBlobs>(
+    net: &B,
     relay: &str,
     hash: &BlobHash,
     timeout: std::time::Duration,
     clock: &impl Clock,
 ) -> Result<Vec<u8>, Error> {
-    let store = MemStore::new();
-    let connection = net::connect(endpoint, relay, iroh_blobs::ALPN, timeout, clock).await?;
-    let blob_hash = Hash::from_bytes(hash.0);
-    store
-        .remote()
-        .fetch(connection, blob_hash)
+    let connection = net::connect_blobs(net, relay, timeout, clock).await?;
+    connection
+        .fetch(hash)
         .await
-        .map_err(|e| Error::Transport(format!("fetch blob: {e}")))?;
-    store
-        .blobs()
-        .get_bytes(blob_hash)
-        .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| Error::Transport(format!("read fetched blob: {e}")))
-}
-
-/// Push completion is not acknowledged in-band (iroh-blobs 0.103), so
-/// confirm via an Observe request: wait until the relay reports the blob
-/// complete. Returning right after the push would race the transfer.
-///
-/// The observe stream sends one initial bitfield and then *diffs*, so the
-/// items must be accumulated — no single diff ever looks complete.
-async fn await_blob_complete(
-    store: &MemStore,
-    connection: &Connection,
-    hash: Hash,
-) -> Result<(), Error> {
-    let mut bitfields = std::pin::pin!(
-        store
-            .remote()
-            .observe(connection.clone(), ObserveRequest::new(hash))
-    );
-    let mut current = iroh_blobs::api::proto::Bitfield::empty();
-    while let Some(item) = bitfields.next().await {
-        let item = item.map_err(|e| Error::Transport(format!("observe blob: {e}")))?;
-        current.update(&item);
-        if current.is_complete() {
-            return Ok(());
-        }
-    }
-    Err(Error::Transport(
-        "relay never confirmed the blob upload".to_string(),
-    ))
+        .map_err(|e| Error::Transport(e.to_string()))
 }

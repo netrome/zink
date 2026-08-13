@@ -9,17 +9,15 @@
 //! Since D5 it also *accepts* messages: `Deliver` makes this device its own
 //! mailbox while it is online (`docs/design/direct-delivery.md`).
 
-use iroh::Endpoint;
-use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use rand_core::OsRng;
 use zink_protocol::{
-    ContactRecord, DeviceKey, MAX_GET_KEYS_IDS, MAX_SYNC_REQUEST_BYTES, MessageEnvelope, MessageId,
-    PublicKey, SYNC_ALPN, SyncErrorCode, SyncOp, SyncRequest, SyncResponse, SyncResult,
+    ContactRecord, DeviceKey, MAX_GET_KEYS_IDS, MessageEnvelope, MessageId, PublicKey,
+    SyncErrorCode, SyncOp, SyncRequest, SyncResponse, SyncResult,
 };
 
 use crate::client::Received;
 use crate::state::ClientState;
+use crate::transport::{Accept, Inbound, Respond};
 
 /// Where a directly-delivered message goes after it is stored (D5): the
 /// edge's live-delivery sink, registered once via
@@ -66,7 +64,7 @@ pub(crate) struct Reach {
 /// the discretion: a caller whose key is not in the contact store (and isn't
 /// us) gets answers indistinguishable from "don't hold it" — declining and
 /// not-having look the same on the wire. Client policy, not protocol.
-struct SyncHandler {
+pub(crate) struct SyncHandler {
     state: ClientState,
     /// This device's key: identifies "us" for the gate's self-allowance
     /// (self-dial is trivially "us"; D3 own-device sync rides the same
@@ -77,6 +75,22 @@ struct SyncHandler {
     sink: DirectSink,
     /// Peers that reached us are reachable (D5) — the send side reads this.
     reach: ReachMap,
+}
+
+impl SyncHandler {
+    pub(crate) fn new(
+        state: ClientState,
+        device: DeviceKey,
+        sink: DirectSink,
+        reach: ReachMap,
+    ) -> Self {
+        Self {
+            state,
+            device,
+            sink,
+            reach,
+        }
+    }
 }
 
 /// Hand-written because `DeviceKey` is secret material — deliberately
@@ -228,9 +242,12 @@ impl SyncHandler {
     }
 }
 
-impl ProtocolHandler for SyncHandler {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let caller = PublicKey(*connection.remote_id().as_bytes());
+impl SyncHandler {
+    /// Answer one inbound request. The caller's key is authenticated by the
+    /// transport (`Inbound::peer`); the contacts-only gate resolves against
+    /// it per request, so a peer added as a contact is served immediately.
+    async fn handle<R: Respond>(&self, inbound: Inbound<R>) {
+        let caller = inbound.peer;
         let serves = self.serves(caller);
         if !serves {
             tracing::debug!("sync request from a non-contact; serving nothing");
@@ -240,72 +257,56 @@ impl ProtocolHandler for SyncHandler {
             // peers we serve — a stranger's connection is not our business.
             reach.entry(caller.0).or_default().seen_ms = crate::client::now_ms();
         }
-        // One request per bi-stream; serve until the peer closes.
-        loop {
-            let Ok((mut send, mut recv)) = connection.accept_bi().await else {
-                break;
-            };
-            let request = match recv.read_to_end(MAX_SYNC_REQUEST_BYTES).await {
-                Ok(bytes) => SyncRequest::try_from_bytes(&bytes).ok(),
-                Err(_) => None,
-            };
-            let result = match request.map(|r| r.op) {
-                Some(SyncOp::Get { id }) => match serves.then(|| self.state.find_envelope(id)) {
-                    Some(Some(envelope)) => SyncResult::Envelope {
-                        envelope: Box::new(envelope),
-                    },
-                    _ => SyncResult::NotHeld,
+        let request = SyncRequest::try_from_bytes(&inbound.frame).ok();
+        let result = match request.map(|r| r.op) {
+            Some(SyncOp::Get { id }) => match serves.then(|| self.state.find_envelope(id)) {
+                Some(Some(envelope)) => SyncResult::Envelope {
+                    envelope: Box::new(envelope),
                 },
-                Some(SyncOp::GetSuccessors { id }) => SyncResult::Successors {
-                    ids: if serves {
-                        self.state.successors(id)
-                    } else {
-                        Vec::new()
-                    },
+                _ => SyncResult::NotHeld,
+            },
+            Some(SyncOp::GetSuccessors { id }) => SyncResult::Successors {
+                ids: if serves {
+                    self.state.successors(id)
+                } else {
+                    Vec::new()
                 },
-                Some(SyncOp::WhoIs { key }) => match serves.then(|| self.who_is(key)).flatten() {
-                    Some(record) => SyncResult::Known {
-                        record: Box::new(record),
-                        // This device's OWN issued claims about the
-                        // subject (D4a) — never anything learned or
-                        // relayed: hop limit 1 is structural.
-                        endorsements: self.state.vouch_for(&key).into_iter().collect(),
-                    },
-                    None => SyncResult::NotHeld,
+            },
+            Some(SyncOp::WhoIs { key }) => match serves.then(|| self.who_is(key)).flatten() {
+                Some(record) => SyncResult::Known {
+                    record: Box::new(record),
+                    // This device's OWN issued claims about the
+                    // subject (D4a) — never anything learned or
+                    // relayed: hop limit 1 is structural.
+                    endorsements: self.state.vouch_for(&key).into_iter().collect(),
                 },
-                Some(SyncOp::GetKeys { ids }) => self.get_keys(caller, &ids),
-                Some(SyncOp::Deliver { envelope }) => self.accept_delivery(serves, *envelope),
-                None => SyncResult::Error {
-                    code: SyncErrorCode::Malformed,
-                },
-            };
-            send.write_all(&SyncResponse::new(result).to_bytes())
-                .await
-                .map_err(AcceptError::from_err)?;
-            send.finish().map_err(AcceptError::from_err)?;
+                None => SyncResult::NotHeld,
+            },
+            Some(SyncOp::GetKeys { ids }) => self.get_keys(caller, &ids),
+            Some(SyncOp::Deliver { envelope }) => self.accept_delivery(serves, *envelope),
+            None => SyncResult::Error {
+                code: SyncErrorCode::Malformed,
+            },
+        };
+        if let Err(error) = inbound
+            .reply
+            .respond(&SyncResponse::new(result).to_bytes())
+            .await
+        {
+            tracing::debug!(%error, "sync response failed to send");
         }
-        Ok(())
     }
 }
 
-/// Start serving `SYNC_ALPN` on `endpoint`. The returned `Router` keeps the
-/// serve loop alive for as long as the client holds it.
-pub(crate) fn spawn_sync_router(
-    endpoint: Endpoint,
-    state: ClientState,
-    device: DeviceKey,
-    sink: DirectSink,
-    reach: ReachMap,
-) -> Router {
-    Router::builder(endpoint)
-        .accept(
-            SYNC_ALPN,
-            SyncHandler {
-                state,
-                device,
-                sink,
-                reach,
-            },
-        )
-        .spawn()
+/// The client's serving side, as a loop over the `Accept` port: pull each
+/// inbound request, answer it on its own task — requests from different
+/// connections must not serialize behind one slow store write, which is the
+/// concurrency the router gave the pre-port handler. Ends when the
+/// transport closes (`accept` yields `None`).
+pub(crate) async fn serve<A: Accept>(accept: A, handler: SyncHandler) {
+    let handler = std::sync::Arc::new(handler);
+    while let Some(inbound) = accept.accept().await {
+        let handler = handler.clone();
+        n0_future::task::spawn(async move { handler.handle(inbound).await });
+    }
 }

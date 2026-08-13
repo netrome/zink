@@ -235,20 +235,43 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   domain maps failures structurally by which port call failed; a variant is
   added only when logic branches on it. Local addressing fell off the ports
   (CLI-print-only → inherent on `IrohTransport`, production-only impl block).
-- [ ] **P4 🎯 · Real iroh adapter behind the trait(s).** Extract the iroh usage
-  in `zink-client` behind the P3 trait(s); the production adapter implements
-  them; existing tests pass *through* the adapter (proves the seam is right,
-  no behavior change). **Watch-items from P3:** the pull-style `Accept`
-  inverts today's `Router`-owned loop — preserve cross-connection concurrency
-  (spawn per `Inbound`); if the `Router` fights the pull surface, the fallback
-  is push-style registration, which changes the contract and goes back through
-  transport.md first. Signature mechanics (error plumbing, `&str` vs a
-  validated relay-URL newtype) may be refined here without a design revisit.
-- [ ] **P5 · Test-double kit + first migration.** Small composable doubles
-  (`VecTransport` / `ChannelTransport` / `ControllableTransport`), composed with
-  `TestClock`. Migrate a first batch of logic tests (fan-out, who-is resolution,
-  offline-then-arrive) off subprocess/real-iroh to in-process. *Done when:* the
-  archetype scenario (§4) runs in-process in ms.
+- [x] **P4 · Real iroh adapter behind the trait(s).** ✅ 2026-08-13. New
+  `transport.rs` (the ports, verbatim from transport.md) and
+  `transport/iroh.rs`: `IrohTransport` (endpoint + router + inbound queue,
+  cheaply clonable) wears every port; `IrohConn`/`IrohBlobConn`/`IrohReply`
+  are the concrete connection objects. The P3 watch-item resolved cleanly —
+  the `Router` did **not** fight the pull surface: a small `ForwardHandler`
+  reads one request per bi-stream and forwards `(peer, frame, reply)` into a
+  bounded mpsc that `accept()` pulls (tokio's `sync` feature added as a
+  direct native dep — already compiled into every build via iroh; justified
+  in Cargo.toml). `net.rs`/`blobs.rs` are now port-generic domain helpers
+  taking the narrowest verb (`connect(&impl Dial, …)`,
+  `push_blobs(&impl DialBlobs, …)`); `sync.rs` keeps `SyncHandler` as domain
+  logic over `Inbound` frames, with `serve()` a domain-owned pull loop
+  spawning per request (cross-connection concurrency preserved). `Client` is
+  `Client<C, W, N: Transport = IrohTransport>`; **zero iroh types remain in
+  the production code of `client.rs`/`net.rs`/`blobs.rs`/`sync.rs`** — the
+  dial-spec/relay-URL parsers live in the adapter as plain functions (their
+  string formats embed iroh's id/url encodings). Local addressing landed as
+  designed: `sync_address` is adapter-inherent, surfaced by a production-only
+  `impl<C, W> Client<C, W, IrohTransport>` block. **Proof: 234/234 through
+  the adapter**, clippy clean, `wasm32` compiles, suite wall time unchanged
+  (`groups` 5.96 s). Deliberate micro-changes, none test-visible: the serving
+  gate + inbound reach note resolve per *request* rather than per connection
+  (a mid-connection contact add now serves immediately; a connection that
+  never sends a request leaves no reach evidence); requests within one
+  connection may overlap (requesters are serial per connection in practice);
+  the nudge accept now reads the zero-length uni frame (64-byte backstop
+  cap); blob staging is per-push inside the adapter (no shared `MemStore` —
+  `restage_owed` became the synchronous `reload_owed`); `set_profile`'s relay
+  diff compares parser-normalized URL strings.
+- [ ] **P5 🎯 · Test-double kit + first migration.** Small composable doubles
+  per capability (`ScriptedDial` / `TestConn` / `MemBlobs` / `ChannelAccept` /
+  `TestHome`, composed via a delegating `TestTransport` with loud `Unused`
+  stubs — transport.md §7), driven together with `TestClock`. Migrate a first
+  batch of logic tests (fan-out, who-is resolution, offline-then-arrive) off
+  subprocess/real-iroh to in-process. *Done when:* the archetype scenario (§4)
+  runs in-process in ms.
 
 **Tier 3 — Complete the migration + smoke tier**
 - [ ] **P6 · Migrate remaining logic assertions.** Groups grow/shrink,

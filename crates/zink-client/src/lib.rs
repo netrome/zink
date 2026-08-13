@@ -22,6 +22,8 @@ mod spike;
 mod state;
 #[cfg(not(target_family = "wasm"))]
 mod sync;
+#[cfg(not(target_family = "wasm"))]
+mod transport;
 
 #[cfg(not(target_family = "wasm"))]
 pub use client::{

@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use iroh::Endpoint;
 use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, BlobDraft, BlobHash, BlobRef, Claim, ContactRecord, DeviceKey, EncryptedBlob,
@@ -16,6 +15,8 @@ use zink_protocol::{
 use crate::clock::{Clock, SystemClock, WallClock};
 use crate::error::Error;
 use crate::state::ClientState;
+use crate::transport::iroh::IrohTransport;
+use crate::transport::{AcceptUni, Peer, Request, Transport};
 use crate::{blobs, hex, keystore, net};
 
 /// Outbox entries older than this stop being retried (but stay surfaced):
@@ -29,6 +30,10 @@ const OUTBOX_GIVE_UP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// cache, then staged), and a long backlog of images fanned out without limit
 /// would spike memory where the serial version never did.
 const FLUSH_CONCURRENCY: usize = 8;
+
+/// A nudge is a zero-length uni stream (live-delivery.md §3); the cap is a
+/// backstop against a hostile relay streaming into the signal.
+const MAX_NUDGE_BYTES: usize = 64;
 
 /// Tuning the edges inject at construction; `Default` fits production.
 #[derive(Debug, Clone)]
@@ -55,9 +60,12 @@ impl Default for ClientConfig {
     }
 }
 
-pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock> {
+pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock, N: Transport = IrohTransport>
+{
     device: DeviceKey,
-    endpoint: Endpoint,
+    /// The network, behind ports (`crate::transport`,
+    /// `docs/design/transport.md`). `IrohTransport` in production.
+    transport: N,
     state: ClientState,
     config: ClientConfig,
     /// Monotonic time, behind a port. `SystemClock` in production; see
@@ -70,10 +78,10 @@ pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock> {
     /// pairs already asked this run — a drain loop must not re-broadcast
     /// interest in a key. In-memory on purpose; the manual trigger re-asks.
     queried: std::sync::Mutex<BTreeSet<([u8; 32], [u8; 32])>>,
-    /// The client is also a server: this router serves `SYNC_ALPN` (peer
-    /// history sync, D0; direct delivery, D5) for as long as the client
-    /// lives. Held, not called.
-    _sync_router: iroh::protocol::Router,
+    /// The client is also a server: this task pulls inbound sync requests
+    /// (peer history sync, D0; direct delivery, D5) off the transport for as
+    /// long as the client lives. Aborted on drop.
+    _serve_task: n0_future::task::AbortOnDropHandle<()>,
     /// The edge's sink for directly-delivered messages (D5), shared with the
     /// router's handler. Registered after open via `on_direct_delivery`.
     direct_sink: crate::sync::DirectSink,
@@ -115,7 +123,10 @@ impl Client<SystemClock, SystemClock> {
     }
 }
 
-impl<C: Clock, W: WallClock> Client<C, W> {
+/// Constructors that bind the real network: they build an `IrohTransport`
+/// from the profile's home relays, fixing `N` while staying generic over the
+/// clocks (tests inject `TestClock`s and still dial real iroh).
+impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
     async fn with_device(
         device: DeviceKey,
         key_path: &str,
@@ -123,43 +134,42 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         clock: C,
         wall_clock: W,
     ) -> Result<Self, Error> {
-        // State first: the endpoint homes to the profile's relay URLs (D0b),
-        // and iroh fixes the relay transport at bind time — so a relay added
-        // to the profile takes effect for the peer layer on the next open.
+        // State first: the endpoint homes to the profile's relay URLs (D0b).
         let state = ClientState::open(key_path);
-        let home_relays: Vec<iroh::RelayUrl> = state
+        let home_relays: Vec<String> = state
             .home_relay_entries()
             .iter()
-            .filter_map(|entry| entry.relay_url.as_deref())
-            .map(net::parse_relay_url)
-            .collect::<Result<_, _>>()?;
-        let endpoint = net::bind_endpoint(&device, &home_relays).await?;
-        // Serve peer history sync on our own endpoint (D0). The endpoint is a
-        // cheap handle to clone; the router keeps the serve loop alive.
-        // Contacts-only serving gate (D0c); serves fresh self-records for
-        // `who-is-this` (D1a), so it needs signing — its own key instance,
-        // rebuilt from the seed, since `DeviceKey` is deliberately not
-        // `Clone`.
+            .filter_map(|entry| entry.relay_url.as_deref().map(str::to_string))
+            .collect();
+        let transport =
+            IrohTransport::bind(&device, &home_relays, zink_protocol::MAX_SYNC_REQUEST_BYTES)
+                .await?;
+        // Serve peer history sync on our own transport (D0): contacts-only
+        // gate (D0c); serves fresh self-records for `who-is-this` (D1a), so
+        // the handler needs signing — its own key instance, rebuilt from the
+        // seed, since `DeviceKey` is deliberately not `Clone`.
         let direct_sink = crate::sync::DirectSink::default();
         // Negative reach evidence survives the process (De6b): without it a
         // fresh process re-pays the dial deadline for every peer that is
         // simply offline, which the app does on every start and the one-shot
         // CLI on every command.
         let reach = load_unreachable(&state, &wall_clock);
-        let sync_router = crate::sync::spawn_sync_router(
-            endpoint.clone(),
+        let handler = crate::sync::SyncHandler::new(
             state.clone(),
             DeviceKey::from_seed(device.seed()),
             direct_sink.clone(),
             reach.clone(),
         );
+        let serve_task = n0_future::task::AbortOnDropHandle::new(n0_future::task::spawn(
+            crate::sync::serve(transport.clone(), handler),
+        ));
         Ok(Self {
             device,
-            endpoint,
+            transport,
             state,
             config,
             queried: std::sync::Mutex::default(),
-            _sync_router: sync_router,
+            _serve_task: serve_task,
             direct_sink,
             reach,
             clock,
@@ -167,6 +177,16 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         })
     }
 
+    /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
+    /// device reaches us on `SYNC_ALPN` to backfill history when it knows
+    /// our address explicitly (same-LAN / dev tooling). The deployment path
+    /// is dial-by-key via our home relay (`backfill_by_key`, D0b).
+    pub fn sync_address(&self) -> Result<String, Error> {
+        self.transport.sync_address()
+    }
+}
+
+impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     /// Register the edge's sink for **directly delivered** messages (D5):
     /// messages a peer handed us over the sync ALPN, with no mailbox and so
     /// no nudge to drain. It is the direct-path sibling of `subscribe`'s
@@ -211,26 +231,14 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     /// deadline the endpoint is dropped and iroh's abort warning accepted.
     pub async fn close(self) {
         let deadline = self.config.close_deadline;
-        let shutdown = async {
-            let _ = self._sync_router.shutdown().await;
-            self.endpoint.close().await;
-        };
-        if self.clock.timeout(deadline, shutdown).await.is_err() {
+        if self
+            .clock
+            .timeout(deadline, self.transport.close())
+            .await
+            .is_err()
+        {
             tracing::debug!("close: endpoint still draining at the deadline; dropping it");
         }
-    }
-
-    /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
-    /// device reaches us on `SYNC_ALPN` to backfill history when it knows
-    /// our address explicitly (same-LAN / dev tooling). The deployment path
-    /// is dial-by-key via our home relay (`backfill_by_key`, D0b).
-    pub fn sync_address(&self) -> Result<String, Error> {
-        let addr = self.endpoint.addr();
-        let sock = addr
-            .ip_addrs()
-            .next()
-            .ok_or_else(|| Error::Transport("no bound address yet".into()))?;
-        Ok(format!("{}@{}", self.endpoint.id(), sock))
     }
 
     pub fn public_key(&self) -> PublicKey {
@@ -266,7 +274,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         {
             return Reachable::NoHomeRelay;
         }
-        match self.clock.timeout(within, self.endpoint.online()).await {
+        match self.clock.timeout(within, self.transport.online()).await {
             Ok(()) => Reachable::ByKey,
             Err(_) => Reachable::NotYet,
         }
@@ -611,7 +619,6 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             blobs.is_empty() && !here.is_empty() && here.iter().all(|key| direct.contains(*key))
         };
 
-        let staging = blobs::stage(blobs).await?;
         // Concurrent per relay (De6d): relays are independent, and serially
         // an unreachable one made every *other* relay wait out its deadline
         // first — n down relays cost n × `connect_timeout` instead of one.
@@ -632,11 +639,8 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         // filter's side effects (skip logging, outbox clearing) belong to
         // this synchronous pass, not to the concurrent one.
         let deliveries: Vec<&String> = deliveries.collect();
-        // One staging store shared by reference across the concurrent pushes
-        // — each reads its own blobs out of it, nothing mutates it here.
-        let staging = &staging;
         let outcomes = n0_future::join_all(deliveries.into_iter().map(|relay| async move {
-            match self.deliver_to_relay(relay, envelope, blobs, staging).await {
+            match self.deliver_to_relay(relay, envelope, blobs).await {
                 Ok(()) => {
                     self.state.clear_outbox(id, relay);
                     None
@@ -721,55 +725,54 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             }
         }
         let dialed = !targets.is_empty();
-        let pushes =
-            targets.into_iter().map(|(key, addr, timeout)| async move {
-                let connection =
-                    match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout, &self.clock)
-                        .await
-                    {
-                        Ok(connection) => connection,
-                        Err(error) => {
-                            tracing::debug!(%error, "direct: recipient unreachable");
-                            self.note_reach(&key, |reach| reach.failed_ms = now);
-                            return None;
-                        }
-                    };
-                let op = SyncOp::Deliver {
-                    envelope: Box::new(envelope.clone()),
-                };
-                match net::sync_request(&connection, op).await {
-                    // The ack that licenses skipping the mailbox: stored, not
-                    // merely received.
-                    Ok(SyncResult::Stored) => {
-                        self.note_reach(&key, |reach| {
-                            reach.seen_ms = now;
-                            reach.failed_ms = 0;
-                        });
-                        Some(key)
-                    }
-                    Ok(SyncResult::NotHeld) => {
-                        tracing::debug!("direct: recipient declined; falling back to its mailbox");
-                        // Reachable — it answered — so no cooldown: the reasons a
-                        // peer declines are indistinguishable on the wire
-                        // (SPEC §5.2) and some are *per message* (an envelope it
-                        // can't open), so a decline must not suppress the next
-                        // message. Reaching a live peer is cheap; only
-                        // unreachability is worth remembering.
-                        self.note_reach(&key, |reach| reach.seen_ms = now);
-                        None
-                    }
-                    Ok(other) => {
-                        tracing::warn!(?other, "direct: unexpected response");
-                        self.note_reach(&key, |reach| reach.failed_ms = now);
-                        None
-                    }
+        let pushes = targets.into_iter().map(|(key, addr, timeout)| async move {
+            let connection =
+                match net::connect_peer(&self.transport, &addr, SYNC_ALPN, timeout, &self.clock)
+                    .await
+                {
+                    Ok(connection) => connection,
                     Err(error) => {
-                        tracing::debug!(%error, "direct: delivery failed");
+                        tracing::debug!(%error, "direct: recipient unreachable");
                         self.note_reach(&key, |reach| reach.failed_ms = now);
-                        None
+                        return None;
                     }
+                };
+            let op = SyncOp::Deliver {
+                envelope: Box::new(envelope.clone()),
+            };
+            match net::sync_request(&connection, op).await {
+                // The ack that licenses skipping the mailbox: stored, not
+                // merely received.
+                Ok(SyncResult::Stored) => {
+                    self.note_reach(&key, |reach| {
+                        reach.seen_ms = now;
+                        reach.failed_ms = 0;
+                    });
+                    Some(key)
                 }
-            });
+                Ok(SyncResult::NotHeld) => {
+                    tracing::debug!("direct: recipient declined; falling back to its mailbox");
+                    // Reachable — it answered — so no cooldown: the reasons a
+                    // peer declines are indistinguishable on the wire
+                    // (SPEC §5.2) and some are *per message* (an envelope it
+                    // can't open), so a decline must not suppress the next
+                    // message. Reaching a live peer is cheap; only
+                    // unreachability is worth remembering.
+                    self.note_reach(&key, |reach| reach.seen_ms = now);
+                    None
+                }
+                Ok(other) => {
+                    tracing::warn!(?other, "direct: unexpected response");
+                    self.note_reach(&key, |reach| reach.failed_ms = now);
+                    None
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "direct: delivery failed");
+                    self.note_reach(&key, |reach| reach.failed_ms = now);
+                    None
+                }
+            }
+        });
         let acked: BTreeSet<PublicKey> = n0_future::join_all(pushes)
             .await
             .into_iter()
@@ -837,10 +840,9 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         relay: &str,
         envelope: &MessageEnvelope,
         encrypted_blobs: &[zink_protocol::EncryptedBlob],
-        staging: &iroh_blobs::store::mem::MemStore,
     ) -> Result<(), Error> {
         net::deposit_with_retry(
-            &self.endpoint,
+            &self.transport,
             relay,
             envelope,
             self.config.connect_timeout,
@@ -849,9 +851,8 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         .await?;
         if !encrypted_blobs.is_empty() {
             blobs::push_blobs(
-                &self.endpoint,
+                &self.transport,
                 relay,
-                staging,
                 encrypted_blobs,
                 self.config.connect_timeout,
                 &self.clock,
@@ -891,16 +892,16 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         for chunk in owed.chunks(FLUSH_CONCURRENCY) {
             let mut ready = Vec::with_capacity(chunk.len());
             for entry in chunk {
-                match self.restage_owed(entry).await? {
-                    Some(staged) => ready.push((entry, staged)),
+                match self.reload_owed(entry)? {
+                    Some(loaded) => ready.push((entry, loaded)),
                     // No stored envelope — nothing a retry could ever send.
                     None => continue,
                 }
             }
             let outcomes = n0_future::join_all(ready.iter().map(
-                |(entry, (envelope, encrypted, staging))| async move {
+                |(entry, (envelope, encrypted))| async move {
                     match self
-                        .deliver_to_relay(&entry.relay, envelope, encrypted, staging)
+                        .deliver_to_relay(&entry.relay, envelope, encrypted)
                         .await
                     {
                         Ok(()) => {
@@ -926,22 +927,15 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         Ok(report)
     }
 
-    /// Reload what one owed delivery needs: the stored envelope and its blobs
-    /// re-staged from the local cache (put there at send). `None` = the
-    /// envelope is gone, so no retry could ever fulfil this entry and it is
-    /// dropped from the ledger.
+    /// Reload what one owed delivery needs: the stored envelope and its blob
+    /// bytes from the local cache (put there at send). `None` = the envelope
+    /// is gone, so no retry could ever fulfil this entry and it is dropped
+    /// from the ledger.
     #[allow(clippy::type_complexity)]
-    async fn restage_owed(
+    fn reload_owed(
         &self,
         entry: &crate::state::OutboxEntry,
-    ) -> Result<
-        Option<(
-            MessageEnvelope,
-            Vec<zink_protocol::EncryptedBlob>,
-            iroh_blobs::store::mem::MemStore,
-        )>,
-        Error,
-    > {
+    ) -> Result<Option<(MessageEnvelope, Vec<zink_protocol::EncryptedBlob>)>, Error> {
         let envelope = match self.state.load_envelope(entry.conversation, entry.message) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -965,8 +959,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
                 })
             })
             .collect();
-        let staging = blobs::stage(&encrypted).await?;
-        Ok(Some((envelope, encrypted, staging)))
+        Ok(Some((envelope, encrypted)))
     }
 
     /// Drain every relay: register, then fetch page-by-page, dedup by
@@ -1047,7 +1040,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         seen: &std::sync::Mutex<BTreeSet<[u8; 32]>>,
     ) -> Result<Vec<Received>, Error> {
         let connection = net::connect(
-            &self.endpoint,
+            &self.transport,
             relay,
             zink_protocol::MAILBOX_ALPN,
             self.config.connect_timeout,
@@ -1095,7 +1088,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         backoff: &mut Duration,
     ) -> Result<(), Error> {
         let connection = net::connect(
-            &self.endpoint,
+            &self.transport,
             relay,
             zink_protocol::MAILBOX_ALPN,
             self.config.connect_timeout,
@@ -1130,9 +1123,10 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         let _ = self.flush_outbox().await;
         loop {
             // A nudge is a zero-length uni stream — accepting it IS the
-            // signal; a failed accept means the connection is gone.
+            // signal; a failed accept means the connection is gone. The cap
+            // is a backstop against a hostile relay streaming into it.
             connection
-                .accept_uni()
+                .accept_uni(MAX_NUDGE_BYTES)
                 .await
                 .map_err(|e| Error::Transport(format!("connection lost: {e}")))?;
             let started = self.clock.now();
@@ -1163,7 +1157,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     async fn drain_connection(
         &self,
         relay: &str,
-        connection: &iroh::endpoint::Connection,
+        connection: &impl Request,
         seen: &std::sync::Mutex<BTreeSet<[u8; 32]>>,
     ) -> Result<Vec<Received>, Error> {
         let mut received = Vec::new();
@@ -1280,7 +1274,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         let mut last_error = String::from("no relay to fetch from");
         for relay in relays {
             match blobs::fetch_encrypted(
-                &self.endpoint,
+                &self.transport,
                 relay,
                 hash,
                 self.config.connect_timeout,
@@ -1455,9 +1449,9 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         }
         let entries: Vec<RelayEntry> = relays.iter().map(|s| RelayEntry::from_spec(s)).collect();
         for entry in &entries {
-            net::parse_relay(&entry.mailbox)?;
+            crate::transport::iroh::parse_dial(&entry.mailbox)?;
             if let Some(url) = &entry.relay_url {
-                net::parse_relay_url(url)?;
+                crate::transport::iroh::parse_relay_url(url)?;
             }
         }
         // A rename supersedes the previous name attestation (SPEC §3.2):
@@ -1477,26 +1471,26 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         // a profile save no longer needs a restart to take effect.
         let next = self.home_relay_urls()?;
         for url in next.iter().filter(|url| !previous.contains(url)) {
-            self.endpoint
-                .insert_relay(
-                    url.clone(),
-                    std::sync::Arc::new(net::relay_config(url.clone())),
-                )
-                .await;
+            self.transport
+                .insert_relay(url)
+                .await
+                .map_err(|e| Error::InvalidInput(e.to_string()))?;
         }
         for url in previous.iter().filter(|url| !next.contains(url)) {
-            self.endpoint.remove_relay(url).await;
+            self.transport.remove_relay(url).await;
         }
         Ok(())
     }
 
-    /// The profile's parsed home-relay URLs (entries without one skipped).
-    fn home_relay_urls(&self) -> Result<Vec<iroh::RelayUrl>, Error> {
+    /// The profile's home-relay URLs (entries without one skipped),
+    /// normalized through the parser so `set_profile`'s diff compares the
+    /// way the endpoint's relay map does — not raw string spellings.
+    fn home_relay_urls(&self) -> Result<Vec<String>, Error> {
         self.state
             .home_relay_entries()
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref())
-            .map(net::parse_relay_url)
+            .map(|url| crate::transport::iroh::parse_relay_url(url).map(|url| url.to_string()))
             .collect()
     }
 
@@ -1548,7 +1542,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             .into_iter()
             .map(|relay| async move {
                 let connection = net::connect(
-                    &self.endpoint,
+                    &self.transport,
                     &relay,
                     zink_protocol::MAILBOX_ALPN,
                     self.config.connect_timeout,
@@ -1956,21 +1950,16 @@ impl<C: Clock, W: WallClock> Client<C, W> {
 
     /// The dialable peer address for a person: their key, routed via the
     /// relay URLs their records resolve to at read time.
-    fn peer_addr_for(
-        &self,
-        key: PublicKey,
-        stored: Option<&ContactRecord>,
-    ) -> Result<iroh::EndpointAddr, Error> {
-        let relay_urls: Vec<iroh::RelayUrl> = self
+    fn peer_addr_for(&self, key: PublicKey, stored: Option<&ContactRecord>) -> Result<Peer, Error> {
+        let relay_urls: Vec<String> = self
             .effective_relays(key, stored)
             .iter()
-            .filter_map(|entry| entry.relay_url.as_deref())
-            .map(net::parse_relay_url)
-            .collect::<Result<_, _>>()?;
+            .filter_map(|entry| entry.relay_url.as_deref().map(str::to_string))
+            .collect();
         if relay_urls.is_empty() {
             return Err(Error::NoRelayUrl);
         }
-        net::peer_addr(&key, &relay_urls)
+        crate::transport::iroh::validated_peer(key, relay_urls)
     }
 
     /// Ask the network "who is this key?" (D1b, who-is-this.md §5): dial
@@ -2046,7 +2035,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
         let queries = targets.into_iter().map(|(petname, responder, addr)| async move {
             let connection =
-                match net::connect_addr(&self.endpoint, addr, SYNC_ALPN, timeout, &self.clock)
+                match net::connect_peer(&self.transport, &addr, SYNC_ALPN, timeout, &self.clock)
                     .await
                 {
                     Ok(connection) => connection,
@@ -2155,15 +2144,11 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             return 0;
         };
         let blob = EncryptedBlob { hash, bytes };
-        let Ok(staging) = blobs::stage(std::slice::from_ref(&blob)).await else {
-            return 0;
-        };
         let mut pushed = 0;
         for relay in self.state.home_relays() {
             match blobs::push_blobs(
-                &self.endpoint,
+                &self.transport,
                 &relay,
-                &staging,
                 std::slice::from_ref(&blob),
                 self.config.connect_timeout,
                 &self.clock,
@@ -2246,7 +2231,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
         }
         for relay in relays {
             match blobs::fetch_encrypted(
-                &self.endpoint,
+                &self.transport,
                 &relay.mailbox,
                 &hash,
                 self.config.connect_timeout,
@@ -2571,7 +2556,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     /// to be the id we asked for, and checked to belong to this conversation
     /// before it's stored. Returns the number of newly-stored messages.
     pub async fn backfill(&self, conversation: MessageId, from: &str) -> Result<usize, Error> {
-        self.backfill_addr(conversation, net::parse_relay(from)?)
+        self.backfill_addr(conversation, crate::transport::iroh::parse_dial(from)?)
             .await
     }
 
@@ -2599,18 +2584,14 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     /// API parses into, and the one tests use to dial a locally-bound peer's
     /// full multi-address `EndpointAddr` (a bare public socket isn't reliably
     /// self-reachable on one host).
-    async fn backfill_addr(
-        &self,
-        conversation: MessageId,
-        from: iroh::EndpointAddr,
-    ) -> Result<usize, Error> {
+    async fn backfill_addr(&self, conversation: MessageId, from: Peer) -> Result<usize, Error> {
         // A hostile peer could feed an unbounded fake chain; one budget
         // bounds the whole walk — the forward pass gets what the backward
         // pass didn't spend.
         const MAX_SYNC_FETCH: usize = 10_000;
-        let connection = net::connect_addr(
-            &self.endpoint,
-            from,
+        let connection = net::connect_peer(
+            &self.transport,
+            &from,
             SYNC_ALPN,
             self.config.connect_timeout,
             &self.clock,
@@ -2631,7 +2612,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     async fn fill_backward(
         &self,
         conversation: MessageId,
-        connection: &iroh::endpoint::Connection,
+        connection: &impl Request,
         budget: usize,
     ) -> Result<usize, Error> {
         let mut fetched = 0usize;
@@ -2668,7 +2649,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     async fn fill_forward(
         &self,
         conversation: MessageId,
-        connection: &iroh::endpoint::Connection,
+        connection: &impl Request,
         budget: usize,
     ) -> Result<usize, Error> {
         let mut fetched = 0usize;
@@ -2715,7 +2696,7 @@ impl<C: Clock, W: WallClock> Client<C, W> {
     /// claim* rather than parents read from envelopes we already verified.
     async fn fetch_one(
         &self,
-        connection: &iroh::endpoint::Connection,
+        connection: &impl Request,
         id: MessageId,
         conversation: MessageId,
     ) -> Result<bool, Error> {
@@ -2818,9 +2799,9 @@ impl<C: Clock, W: WallClock> Client<C, W> {
             let Ok(addr) = self.peer_addr_for(device_key, Some(&record)) else {
                 continue;
             };
-            let Ok(connection) = net::connect_addr(
-                &self.endpoint,
-                addr,
+            let Ok(connection) = net::connect_peer(
+                &self.transport,
+                &addr,
                 SYNC_ALPN,
                 self.config.connect_timeout,
                 &self.clock,
@@ -3051,7 +3032,8 @@ impl Contact {
         })?;
         let relays: Vec<String> = relay_list.split(',').map(str::to_string).collect();
         for relay in &relays {
-            net::parse_relay(relay)?; // validate early, before any network work
+            // Validate early, before any network work.
+            crate::transport::iroh::parse_dial(relay)?;
         }
         Ok(Contact {
             keys: vec![PublicKey(hex::parse32(key_hex)?)],
@@ -3435,6 +3417,7 @@ pub(crate) fn now_ms() -> u64 {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use crate::transport::Home;
     use zink_protocol::{KeyCommitment, MessageCore};
 
     /// A key path in a per-test temp dir (tests run in parallel, so the dir is
@@ -3714,7 +3697,7 @@ mod tests {
         // address — a locally-bound peer's bare public socket isn't reliably
         // self-reachable on one host; the string API is exercised separately)
         let fetched = b
-            .backfill_addr(conversation, a.endpoint.addr())
+            .backfill_addr(conversation, a.transport.peer())
             .await
             .expect("backfill");
 
@@ -3830,7 +3813,7 @@ mod tests {
 
         // When
         let started = std::time::Instant::now();
-        client.endpoint.online().await;
+        client.transport.online().await;
         let elapsed = started.elapsed();
 
         // Then: nowhere near the 3 s probe timeout (bound leaves CI headroom;
@@ -3901,7 +3884,7 @@ mod tests {
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.endpoint.online().await; // homed before A rendezvouses via its relay
+        b.transport.online().await; // homed before A rendezvouses via its relay
         // The live sink is the *only* signal for a direct arrival: no
         // mailbox means no nudge to drain.
         let live: std::sync::Arc<std::sync::Mutex<Vec<Received>>> = Default::default();
@@ -4075,7 +4058,7 @@ mod tests {
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.endpoint.online().await;
+        b.transport.online().await;
 
         // When
         let receipt = a
@@ -4317,7 +4300,7 @@ mod tests {
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.endpoint.online().await;
+        b.transport.online().await;
         let first = a
             .send(
                 &[a.resolve_contact("b").expect("resolve")],
@@ -4573,7 +4556,7 @@ mod tests {
             Some("a".to_string()),
         )
         .expect("B adds A");
-        b.endpoint.online().await;
+        b.transport.online().await;
         let carol = DeviceKey::from_seed([42; 32]).public();
         // One shared mailbox string for both — what a shared relay looks like.
         let mailbox = format!("{}@203.0.113.9:1", hex::encode(&b.public_key().0));
@@ -4631,7 +4614,7 @@ mod tests {
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.endpoint.online().await;
+        b.transport.online().await;
         let for_b = sealed_for(&a.device, b.public_key(), b"psst");
 
         // When
@@ -4664,7 +4647,7 @@ mod tests {
             Some("a".to_string()),
         )
         .expect("B adds A");
-        b.endpoint.online().await;
+        b.transport.online().await;
         let elsewhere = DeviceKey::from_seed([43; 32]).public();
         let for_carol = sealed_for(&a.device, elsewhere, b"not for you");
 
@@ -4695,7 +4678,7 @@ mod tests {
         let a = open_homed("bykey", "server", &url_a).await;
         let b = open_homed("bykey", "client", &url_b).await;
         befriend(&a, &b); // the D0c gate serves contacts only
-        a.endpoint.online().await; // A must be homed before B rendezvouses via its relay
+        a.transport.online().await; // A must be homed before B rendezvouses via its relay
 
         let author = DeviceKey::from_seed([5; 32]);
         let msgs = chain(&author, b.public_key(), 3);
@@ -4757,16 +4740,16 @@ mod tests {
         // When: the stranger backfills — the answers must be
         // indistinguishable from a peer that holds nothing
         let fetched = b
-            .backfill_addr(conversation, a.endpoint.addr())
+            .backfill_addr(conversation, a.transport.peer())
             .await
             .expect("gate declines, not errors");
 
         // Then: nothing served, and the successor view is empty too
         assert_eq!(fetched, 0, "a non-contact is served nothing");
         assert!(b.state.load_dag(conversation).is_err());
-        let connection = net::connect_addr(
-            &b.endpoint,
-            a.endpoint.addr(),
+        let connection = net::connect_peer(
+            &b.transport,
+            &a.transport.peer(),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -4790,7 +4773,7 @@ mod tests {
         // When: A stores B's record — B is now a contact and gets served
         befriend(&a, &b);
         let fetched = b
-            .backfill_addr(conversation, a.endpoint.addr())
+            .backfill_addr(conversation, a.transport.peer())
             .await
             .expect("backfill as a contact");
 
@@ -4823,7 +4806,7 @@ mod tests {
 
         // When
         let fetched = b
-            .backfill_addr(conversation, a.endpoint.addr())
+            .backfill_addr(conversation, a.transport.peer())
             .await
             .expect("sync");
 
@@ -4847,7 +4830,7 @@ mod tests {
         let a = open_homed("autosync", "server", &url_a).await;
         let b = open_homed("autosync", "client", &url_b).await;
         befriend(&a, &b);
-        a.endpoint.online().await;
+        a.transport.online().await;
 
         let msgs = chain(&a.device, b.public_key(), 3);
         let conversation = msgs[0].id();
@@ -4951,7 +4934,7 @@ mod tests {
         );
         a.add_contact(&b_record, Some("bob".to_string()))
             .expect("add bob");
-        b.endpoint.online().await;
+        b.transport.online().await;
         let contacts_dir =
             std::path::PathBuf::from(format!("{}.state", temp_key("learn", "asker")))
                 .join("contacts");
@@ -5007,7 +4990,7 @@ mod tests {
         );
         a.add_contact(&stale, Some("carol".to_string()))
             .expect("add carol");
-        c.endpoint.online().await;
+        c.transport.online().await;
 
         // When
         let answers = a.who_is(c.public_key()).await.expect("who_is").answers;
@@ -5306,7 +5289,7 @@ mod tests {
 
         // When: B pulls as a stranger
         let refused = b
-            .backfill_addr(conv_a, a.endpoint.addr())
+            .backfill_addr(conv_a, a.transport.peer())
             .await
             .expect("declined, not an error");
 
@@ -5321,7 +5304,7 @@ mod tests {
         ))
         .expect("recognize");
         let served = b
-            .backfill_addr(conv_a, a.endpoint.addr())
+            .backfill_addr(conv_a, a.transport.peer())
             .await
             .expect("served");
 
@@ -5331,7 +5314,7 @@ mod tests {
 
         // …while the reverse direction stays closed
         let reverse = a
-            .backfill_addr(conv_b, b.endpoint.addr())
+            .backfill_addr(conv_b, b.transport.peer())
             .await
             .expect("declined");
         assert_eq!(reverse, 0, "recognition moved nothing the other way");
@@ -5344,7 +5327,7 @@ mod tests {
         ))
         .expect("recognize back");
         let reverse = a
-            .backfill_addr(conv_b, b.endpoint.addr())
+            .backfill_addr(conv_b, b.transport.peer())
             .await
             .expect("served");
 
@@ -5376,9 +5359,9 @@ mod tests {
         a.recognize_device(&laptop_record).expect("recognize");
 
         // When: a stranger asks about the laptop's key
-        let connection = net::connect_addr(
-            &c.endpoint,
-            a.endpoint.addr(),
+        let connection = net::connect_peer(
+            &c.transport,
+            &a.transport.peer(),
             SYNC_ALPN,
             c.config.connect_timeout,
             &SystemClock,
@@ -5400,9 +5383,9 @@ mod tests {
         // When: the same requester asks as a contact (fresh connection —
         // the gate resolves per connection)
         befriend(&a, &c);
-        let connection = net::connect_addr(
-            &c.endpoint,
-            a.endpoint.addr(),
+        let connection = net::connect_peer(
+            &c.transport,
+            &a.transport.peer(),
             SYNC_ALPN,
             c.config.connect_timeout,
             &SystemClock,
@@ -6031,7 +6014,7 @@ mod tests {
         // When: the phone repudiates the lost laptop; alice's next
         // freshness pull on the phone brings the fresh record
         phone.repudiate(laptop.public()).expect("repudiate");
-        phone.endpoint.online().await;
+        phone.transport.online().await;
         let outcome = alice.who_is(phone.public_key()).await.expect("pull");
         assert!(!outcome.answers.is_empty());
 
@@ -6073,7 +6056,7 @@ mod tests {
         let carol_record = signed_record(&carol, "Carol", 0, mailbox_only("cc@203.0.113.9:9"));
         b.add_contact(&carol_record, Some("Carrie".to_string()))
             .expect("add carol");
-        b.endpoint.online().await;
+        b.transport.online().await;
 
         // When: A asks before B has vouched
         let outcome = a.who_is(carol.public()).await.expect("who_is");
@@ -6152,7 +6135,7 @@ mod tests {
                 }],
             ))
             .expect("recognize back");
-        phone.endpoint.online().await;
+        phone.transport.online().await;
 
         // When: the D2a-style full flow — the laptop holds only the tip,
         // backfills the skeleton by key, then pulls re-wraps
@@ -6214,9 +6197,9 @@ mod tests {
         befriend(&phone, &alice);
 
         // When: the contact asks for re-wraps
-        let connection = net::connect_addr(
-            &alice.endpoint,
-            phone.endpoint.addr(),
+        let connection = net::connect_peer(
+            &alice.transport,
+            &phone.transport.peer(),
             SYNC_ALPN,
             alice.config.connect_timeout,
             &SystemClock,
@@ -6239,9 +6222,9 @@ mod tests {
                 mailbox_only("ll@203.0.113.5:5"),
             ))
             .expect("recognize");
-        let connection = net::connect_addr(
-            &laptop.endpoint,
-            phone.endpoint.addr(),
+        let connection = net::connect_peer(
+            &laptop.transport,
+            &phone.transport.peer(),
             SYNC_ALPN,
             laptop.config.connect_timeout,
             &SystemClock,
@@ -6353,7 +6336,7 @@ mod tests {
             )
             .expect("add offline contact");
         }
-        b.endpoint.online().await;
+        b.transport.online().await;
 
         // When: asking about B's key (B answers with its self-record)
         let started = std::time::Instant::now();
@@ -6396,7 +6379,7 @@ mod tests {
             Some("bob".to_string()),
         )
         .expect("add bob");
-        b.endpoint.online().await;
+        b.transport.online().await;
 
         // When: who-is BEFORE any profile exists — outbound dial-by-key
         // needs only the relay transport, which is now always bound
@@ -6418,7 +6401,7 @@ mod tests {
             .expect("profile");
 
         // Then: the endpoint homes with no reopen — restart-to-apply is gone
-        n0_future::time::timeout(Duration::from_secs(5), a.endpoint.online())
+        n0_future::time::timeout(Duration::from_secs(5), a.transport.online())
             .await
             .expect("homed at runtime");
 
@@ -6457,7 +6440,7 @@ mod tests {
             Some("bob".to_string()),
         )
         .expect("add bob");
-        b.endpoint.online().await;
+        b.transport.online().await;
         let genesis = message(
             &b.device,
             vec![a.public_key(), carol.public()],
@@ -6748,9 +6731,9 @@ mod tests {
         a.state.save_contact("carol", &carol_record).expect("save");
 
         // When: a stranger asks about a key A demonstrably holds
-        let connection = net::connect_addr(
-            &b.endpoint,
-            a.endpoint.addr(),
+        let connection = net::connect_peer(
+            &b.transport,
+            &a.transport.peer(),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -6767,9 +6750,9 @@ mod tests {
         // When: the same requester asks as a contact (fresh connection —
         // the gate is resolved per connection)
         befriend(&a, &b);
-        let connection = net::connect_addr(
-            &b.endpoint,
-            a.endpoint.addr(),
+        let connection = net::connect_peer(
+            &b.transport,
+            &a.transport.peer(),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -6813,9 +6796,9 @@ mod tests {
             .await
             .expect("open B");
         befriend(&a, &b);
-        let connection = net::connect_addr(
-            &b.endpoint,
-            a.endpoint.addr(),
+        let connection = net::connect_peer(
+            &b.transport,
+            &a.transport.peer(),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -6908,7 +6891,7 @@ mod tests {
 
         // When: B backfills from a peer that serves nothing
         let fetched = b
-            .backfill_addr(conversation, a.endpoint.addr())
+            .backfill_addr(conversation, a.transport.peer())
             .await
             .expect("backfill returns Ok even with nothing to fetch");
 
