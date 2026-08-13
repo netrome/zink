@@ -32,10 +32,11 @@ impl Clock for SystemClock {
 
 impl WallClock for SystemClock {
     fn now_ms(&self) -> u64 {
-        SystemTime::now()
+        let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before 1970")
-            .as_millis() as u64
+            .as_millis();
+        u64::try_from(ms).expect("unix time in ms exceeds u64")
     }
 }
 

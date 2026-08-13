@@ -40,8 +40,15 @@ impl TestClock {
     /// Move time forward, firing every sleeper it reaches.
     pub(crate) fn advance(&self, by: Duration) {
         let mut inner = self.0.lock().unwrap();
-        inner.now += by;
-        inner.now_ms += by.as_millis() as u64;
+        let by_ms = u64::try_from(by.as_millis()).expect("advance exceeds u64 ms");
+        inner.now = inner
+            .now
+            .checked_add(by)
+            .expect("advance overflowed Instant");
+        inner.now_ms = inner
+            .now_ms
+            .checked_add(by_ms)
+            .expect("advance overflowed wall ms");
         let now = inner.now;
         inner.sleepers.retain(|s| {
             let mut sleeper = s.lock().unwrap();
@@ -114,7 +121,10 @@ impl Future for Sleep {
                 Poll::Pending
             }
             None => {
-                let deadline = inner.now + this.dur;
+                let deadline = inner
+                    .now
+                    .checked_add(this.dur)
+                    .expect("sleep deadline overflowed Instant");
                 if deadline <= inner.now {
                     return Poll::Ready(());
                 }
