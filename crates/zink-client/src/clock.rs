@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_concurrent_sleeps__should_fire_on_a_single_advance() {
+    async fn sleep__should_fire_two_concurrent_timers_on_one_advance() {
         // Given: two timers parked at once (what a parallel fan-out does)
         let clock = TestClock::new();
         let woke = AtomicUsize::new(0);
