@@ -170,11 +170,29 @@ re-measured where relevant · this tracker updated · durable bits graduated per
     free `now_ms()` — threading a clock into `ClientState`/`SyncHandler` for
     those is deferred until a slice needs it (would require `ClientState<W>` /
     `SyncHandler<W>`, out of P1's scope).
-- [ ] **P2 · `TestClock` + migrate in-proc time waits.** Advanceable clock;
-  the `zink-client` lib tests that currently wait real backoff/deadline advance
-  mock time instead. Convert `delivery__should_pay_one_deadline` to assert
-  *scheduling* (two concurrent timers, clock advanced once), not wall-clock.
-  *Done when:* the client-crate suite has no real-time waits.
+- [~] **P2 · `TestClock` + migrate in-proc time waits.** Split into two:
+  - [x] **P2a · `TestClock` primitive.** ✅ 2026-08-13. In `clock.rs` (behind
+    `#[cfg(test)]`): a hand-driven clock implementing both ports — `advance`
+    moves monotonic + wall time together and fires parked `sleep`s; `sleep`
+    registers on first poll and deregisters on drop (so a race's losing timer
+    stops counting); `wait_for_sleepers(n)` resolves once `n` timers are parked.
+    **Scoped, not global** — it drives a deadline while real iroh I/O on the
+    same runtime keeps its own timers (tokio's `pause()` can't: it needs a
+    current-thread runtime and would freeze iroh too; tests here are
+    `rt-multi-thread`). Three unit tests, all deterministic in ~0 ms, incl. the
+    archetype "two concurrent sleeps fire on a single advance" (serial code
+    parks only one, hanging `wait_for_sleepers(2)` — that *is* the concurrency
+    assertion). 232/232 green, clippy clean.
+  - [ ] **P2b · Migrate the in-proc time waits.** Route `net::connect_addr`'s
+    deadline (`n0_future::time::timeout`) through the injected clock, then
+    convert `delivery__should_pay_one_deadline` to the P2a scheduling assertion
+    and retire its wall-clock `elapsed <` checks. **Scope flag:** the deadline
+    is reached via `net::connect`/`connect_addr`/`deposit_with_retry` +
+    `blobs::{fetch,push}`, ~18 call-sites across `net.rs`/`blobs.rs`/`client.rs`
+    — so this makes the `net`/`blobs` layer generic over the clock. Orthogonal
+    to the transport-trait extraction (P4 wraps `endpoint.connect` itself), but
+    it does touch the whole network edge; land it as its own slice.
+  - *Done when:* the client-crate suite has no real-time deadline/backoff waits.
 
 **Tier 2 — Transport seam (design + first cut)**
 - [ ] **P3 🎯 · Design the transport trait(s).** The guarded design slice (§4).
