@@ -196,12 +196,21 @@ crates/zink-client/src/
   **Proof:** 238/238 (was 235: −3 moved, +6 in `reach.rs`), clippy clean,
   `wasm32` compiles; `client.rs` 7,696 → 7,490, `sync.rs` 312 → 285; zero
   reach `.lock()` outside `reach.rs`, `ReachMap` gone.
-- [ ] **M2 · `client/test_kit.rs`.** The ~25 shared helpers graduate out of
-  `mod tests` into a `#[cfg(test)]` kit module (the pattern the transport
-  doubles set: the contract kit lives beside what it tests). `mod tests`
-  shrinks to tests. This is the enabler for every Tier-2 slice moving its
-  tests along. Standing rule from project 3's kit sweep applies: anything
-  unexercised after the moves is deleted, not kept warm.
+- [x] **M2 · `client/test_kit.rs`.** ✅ 2026-08-14. The 24 shared helpers
+  graduated out of `mod tests` into a `#[cfg(test)] mod test_kit` (393
+  lines) — bodies verbatim, `pub(crate)`, grouped by concern: temp-dir
+  plumbing · envelope builders (`chain`/`sealed_chain`/`message`/
+  `sealed_for`) · record shapes (`routed_record`/`signed_record`/…) ·
+  mailbox-frame scripting for the doubles (`script_drain`/
+  `deposited_envelopes`/…) · client constructors (`spawn_test_relay`/
+  `open_homed*`/`loop_client`) · probes (`summary`/`dir_bytes`). They had
+  drifted into six bands interleaved with tests; the kit is one discoverable
+  module, and this plants the `client/` directory the Tier-2 carves grow
+  into (root-file + dir, no `mod.rs`). One comment repair: `record_with_
+  dead_mailbox`'s doc was stranded above `sealed_for`'s — reunited. Kit
+  sweep: all 24 exercised (zero dead-code warnings), nothing kept warm.
+  **Proof:** 238/238, clippy clean, `wasm32` compiles; `client.rs`
+  7,490 → 7,111; `mod tests` now opens with its first test.
 
 **Tier 2 — carve the impl, cluster by cluster** (each slice: move the impl
 block + its types + its tests, prune comments per §4; standing rule: a moved
