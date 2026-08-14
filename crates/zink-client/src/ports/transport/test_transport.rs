@@ -82,10 +82,11 @@ impl Home for TestTransport {
 
 impl InsertRelay for TestTransport {
     async fn insert_relay(&self, url: &str) -> Result<(), InvalidRelayUrl> {
-        self.relays
-            .lock()
-            .expect("relays lock")
-            .push(url.to_string());
+        let mut relays = self.relays.lock().expect("relays lock");
+        // The real endpoint's map keys by URL: re-inserting is a no-op.
+        if !relays.iter().any(|held| held == url) {
+            relays.push(url.to_string());
+        }
         Ok(())
     }
 }
@@ -466,7 +467,11 @@ impl Home for TestHome {
             if state.online {
                 return Poll::Ready(());
             }
-            state.parked.push(cx.waker().clone());
+            // Re-polls of the same task replace nothing — one registration
+            // per awaiter, as `Sleep` keeps in the clock double.
+            if !state.parked.iter().any(|held| held.will_wake(cx.waker())) {
+                state.parked.push(cx.waker().clone());
+            }
             Poll::Pending
         })
     }

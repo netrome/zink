@@ -299,7 +299,11 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   multi-device carry, `recv` partial-failure → in-process transport + clock.
   Delete the pure-logic subprocess e2e they replace. **Decommission
   `ZINK_CONNECT_TIMEOUT_MS` / `ZINK_CLOSE_DEADLINE_MS`** (production reads and
-  harness sets).
+  harness sets). From the P5 review: subscribe-loop migrations put dials in
+  *spawned* tasks, where an unscripted-dial panic hangs instead of failing —
+  see transport.md §7 before writing those; and **delete any kit control
+  still `#[allow(dead_code)]` when this slice closes** (built to §7's design,
+  not to a proven need — they don't get to linger).
 - [ ] **P7 · Define the real-network smoke tier.** The minimal, explicitly
   labelled set that stays on real iroh (§4 list). *Done when:* the real-network
   tests are few, named as smokes, and everything else is in-process.

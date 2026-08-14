@@ -283,7 +283,12 @@ Small, per-capability, composable — never a network model. Landed in P5 as
 
 1. **One double per capability**, composed through `TestTransport
    { dial, blobs, accept, home }` (one `Clone`-shared handle scripts and
-   inspects everything).
+   inspects everything). The kit's reach stops at `Client`-level tests:
+   helpers take the narrowest verb, so a helper test with odd needs
+   hand-rolls a five-line double rather than growing the kit. Per-test
+   variation must stay in the *scripts* (data); a variant that needs to
+   inspect a request to choose its reply is the double reimplementing
+   protocol logic — that test gets a bespoke double instead.
 2. **Controls, not simulation**: hold (never resolves — the caller's deadline
    drops it), connect-after-hold (the next attempt succeeds: "down, then came
    back"), fail (a dial refused; a request that breaks mid-operation). No
@@ -298,7 +303,12 @@ Small, per-capability, composable — never a network model. Landed in P5 as
    the test acts, exactly as a quiet network would — while an **unscripted
    domain-initiated action panics** (a returned error would vanish into the
    domain's best-effort handling; silence would hang the test instead of
-   failing it).
+   failing it). Caveat: a panic fails loudly only while transport calls run
+   in the test's own task tree — true today (fan-out is in-task `join_all`;
+   the serve loop never dials). A migration that puts dials inside a
+   *spawned* task (the subscribe loop, P6) turns that panic into a silently
+   aborted task and a hanging test: script everything such a task touches,
+   or extend the kit with an erroring control first.
 5. **Two-client wiring is wiring**: P6's tests need two in-process clients
    talking; a loopback joining one side's `Dial` to the other's `Accept` is
    channel plumbing. The moment it grows behavior (ordering, timing, loss), it

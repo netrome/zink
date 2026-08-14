@@ -36,6 +36,12 @@ const FLUSH_CONCURRENCY: usize = 8;
 /// backstop against a hostile relay streaming into the signal.
 const MAX_NUDGE_BYTES: usize = 64;
 
+/// A who-is query is a burst of speculative dials for display/freshness —
+/// it never inherits a send's patience. Effective deadline is
+/// `min(connect_timeout, cap)`, so edge tunings only tighten it.
+/// Module-level so the tests that fire it reference the same number.
+const WHO_IS_DIAL_CAP: Duration = Duration::from_secs(5);
+
 /// Tuning the edges inject at construction; `Default` fits production.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -2034,10 +2040,6 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
         subject: PublicKey,
         responders: &[PublicKey],
     ) -> Result<WhoIsOutcome, Error> {
-        /// A query is a burst of speculative dials for display/freshness —
-        /// it never inherits a send's patience. Effective deadline is
-        /// `min(connect_timeout, cap)`, so edge tunings only tighten it.
-        const WHO_IS_DIAL_CAP: Duration = Duration::from_secs(5);
         enum Query {
             Answer(WhoIsAnswer),
             Nothing,
@@ -6479,7 +6481,7 @@ mod tests {
         // parked together
         let (outcome, ()) = tokio::join!(a.who_is(responder), async {
             clock.wait_for_sleepers(3).await;
-            clock.advance(Duration::from_secs(5)); // WHO_IS_DIAL_CAP
+            clock.advance(WHO_IS_DIAL_CAP);
         });
 
         // Then: the answer arrived and the three dead dials are counted
