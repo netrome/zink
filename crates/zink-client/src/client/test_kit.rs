@@ -7,7 +7,7 @@
 use super::*;
 use crate::ports::clock::TestClock;
 use crate::ports::transport::{Loopback, ScriptedConn, TestTransport};
-use zink_protocol::{KeyCommitment, MessageCore};
+use zink_protocol::{KeyCommitment, MessageCore, MessageDraft};
 
 /// A key path in a per-test temp dir (tests run in parallel, so the dir is
 /// namespaced by `test` — a shared root would let one test's cleanup delete

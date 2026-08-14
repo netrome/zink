@@ -223,9 +223,29 @@ test that binds a real endpoint without asserting a real-network property —
 the project 3 §7 residue, ~0.1–0.3 s each — converts to loopback/doubles
 opportunistically, as its own commit)
 
-- [ ] **M3 · `client/send.rs` + `client/outbox.rs`.** The send/stage/deliver
-  paths and the flush/reload machinery. `deliver_direct` now reads as
-  ledger calls. `OUTBOX_GIVE_UP_MS`/`FLUSH_CONCURRENCY` ride along.
+- [x] **M3 · `client/send.rs` + `client/outbox.rs`.** ✅ 2026-08-14.
+  `send.rs` (1,478 lines): `StagedSend`/`SendReceipt`/`ReplyContacts` first
+  (types above the impl, per STYLE), the eleven send/stage/deliver methods,
+  and the thirteen send-subject tests (`send__`/`send_in__`/
+  `send_to_self__`/`stage_send__`/`deliver__`/`delivery__`/
+  `unreachable_peer__`, incl. both real-network smokes). `outbox.rs`
+  (214 lines): `OUTBOX_GIVE_UP_MS`/`FLUSH_CONCURRENCY`, `FlushReport`,
+  `flush_outbox`/`reload_owed`, and the §4-archetype recovery test. The
+  clusters were contiguous, so the move is byte-exact `sed` extraction —
+  **one visibility change**: `deliver_to_relay` is the only cross-cluster
+  seam (flush retries ride the same delivery path as sends) and became
+  `pub(super)`; everything else stayed private to its file. **One prune**,
+  the kind M1 itself created: `deliver_direct`'s three-bullet budget-tier
+  table restated what `reach.rs`'s `dial_budget` now documents — replaced
+  with a pointer; all other docs moved verbatim (a 1,700-line relocation
+  reviewable as a relocation beats pruning in the same diff — the broader
+  Kevlin-lean pass continues per carve). Root sheds `BlobDraft`/
+  `MessageDraft`/`distinct_relays` imports; the kit gained its own
+  `MessageDraft` import instead of leaning on root's via `use super::*`.
+  Deliberately left in root for later assignment: `history__should_report_
+  no_confirmation…` and `add_acks__…` (confirmation *read*-side — M6
+  decides), the recv/drain tests (M4). **Proof:** 238/238 (~1.1 s wall),
+  clippy clean, `wasm32` compiles; `client.rs` 7,116 → 5,492.
 - [ ] **M4 · `client/recv.rs`.** recv/drain/subscribe/after_direct +
   `Received` (re-exported where `sync.rs` needs it) + `MAX_NUDGE_BYTES`.
 - [ ] **M5 · `client/contacts.rs` + `client/who_is.rs`.** The trust/identity
