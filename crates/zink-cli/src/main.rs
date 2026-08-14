@@ -100,7 +100,9 @@ const USAGE: &str = "usage:
 (<relay> = <endpoint-id>@<ip:port>[#<relay-url>] as printed by zink-relay;
  <peer-addr> = <endpoint-id>@<ip:port> as printed by `listen`. A petname or
  key backfills by key via the relay url in the stored contact record. recv
- and listen default to the home relays set via my-record)";
+ and listen default to the home relays set via my-record. Any command that
+ opens a client also takes --connect-timeout-ms <ms> and
+ --close-deadline-ms <ms> to tighten the network deadlines)";
 
 fn keygen(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or(USAGE)?;
@@ -945,26 +947,27 @@ fn blob_drafts(flags: &[(String, String)]) -> Result<Vec<BlobDraft>, String> {
     }
 }
 
-/// Open the client at `--key`, honoring dev/test knobs from the
-/// environment — the config edge the lib deliberately doesn't have:
-/// `ZINK_CONNECT_TIMEOUT_MS` shrinks the relay-connect deadline (the e2e
-/// suite sets it so down-relay tests fail in milliseconds, not the
-/// production 10 s). `ZINK_CLOSE_DEADLINE_MS` shortens the graceful-shutdown
-/// wait: after a direct dial that got nowhere (D5), iroh takes ~3 s to settle,
-/// which a one-shot command pays per invocation — the e2e suite trades that
-/// for iroh's ungraceful-abort warning, interactive use keeps the clean log.
+/// Open the client at `--key`, with `ClientConfig`'s edge-injected tuning
+/// exposed as real flags (any command that opens a client takes them):
+/// `--connect-timeout-ms` shrinks the relay-connect deadline (down-relay
+/// paths fail in milliseconds instead of the production 10 s);
+/// `--close-deadline-ms` shortens the graceful-shutdown wait — after a
+/// direct dial that got nowhere (D5), iroh takes ~3 s to settle, which a
+/// one-shot command pays per invocation; shortening trades that for iroh's
+/// ungraceful-abort warning on stderr. These replace the `ZINK_*_MS` env
+/// back-channel (project 3, P6): tuning is an interface, not a side door.
 async fn open_client(flags: &[(String, String)]) -> Result<Client, String> {
     let mut config = ClientConfig::default();
-    if let Ok(ms) = std::env::var("ZINK_CONNECT_TIMEOUT_MS") {
+    if let Some(ms) = optional(flags, "--connect-timeout-ms")? {
         let ms: u64 = ms
             .parse()
-            .map_err(|e| format!("ZINK_CONNECT_TIMEOUT_MS: {e}"))?;
+            .map_err(|e| format!("--connect-timeout-ms: {e}"))?;
         config.connect_timeout = std::time::Duration::from_millis(ms);
     }
-    if let Ok(ms) = std::env::var("ZINK_CLOSE_DEADLINE_MS") {
+    if let Some(ms) = optional(flags, "--close-deadline-ms")? {
         let ms: u64 = ms
             .parse()
-            .map_err(|e| format!("ZINK_CLOSE_DEADLINE_MS: {e}"))?;
+            .map_err(|e| format!("--close-deadline-ms: {e}"))?;
         config.close_deadline = std::time::Duration::from_millis(ms);
     }
     Ok(Client::open_with(&single(flags, "--key")?, config).await?)

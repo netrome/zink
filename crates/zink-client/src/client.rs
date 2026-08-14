@@ -3457,7 +3457,7 @@ pub(crate) fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::ports::clock::{TestClock, TestWallClock};
-    use crate::ports::transport::{Home, TestTransport};
+    use crate::ports::transport::{Home, Loopback, ScriptedConn, TestTransport};
     use zink_protocol::{KeyCommitment, MessageCore, SyncResponse};
 
     /// A key path in a per-test temp dir (tests run in parallel, so the dir is
@@ -3916,6 +3916,93 @@ mod tests {
             id: MessageId([0; 32]),
         })
         .to_bytes()
+    }
+
+    fn registered_frame() -> Vec<u8> {
+        zink_protocol::MailboxResponse::new(MailboxResult::Registered).to_bytes()
+    }
+
+    fn acked_frame() -> Vec<u8> {
+        zink_protocol::MailboxResponse::new(MailboxResult::Acked).to_bytes()
+    }
+
+    fn envelopes_frame(envelopes: Vec<MessageEnvelope>) -> Vec<u8> {
+        let items = envelopes
+            .into_iter()
+            .zip(1u64..)
+            .map(|(envelope, cursor)| zink_protocol::MailboxItem { cursor, envelope })
+            .collect();
+        zink_protocol::MailboxResponse::new(MailboxResult::Envelopes { items }).to_bytes()
+    }
+
+    /// The envelopes a scripted mailbox conn took as deposits — the test
+    /// shuttles them into the recipient's next drain. The test IS the
+    /// relay's storage, visibly (transport.md §7).
+    fn deposited_envelopes(conn: &ScriptedConn) -> Vec<MessageEnvelope> {
+        conn.requests()
+            .iter()
+            .filter_map(|frame| {
+                match zink_protocol::MailboxRequest::try_from_bytes(frame)
+                    .ok()?
+                    .op
+                {
+                    MailboxOp::Deposit { envelope } => Some(*envelope),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Script one full drain on `conn`: register, one page of `envelopes`,
+    /// ack, empty page (just the empty page when there is nothing waiting).
+    fn script_drain(conn: &ScriptedConn, envelopes: Vec<MessageEnvelope>) {
+        conn.reply(registered_frame());
+        if envelopes.is_empty() {
+            conn.reply(envelopes_frame(vec![]));
+            return;
+        }
+        conn.reply(envelopes_frame(envelopes));
+        conn.reply(acked_frame());
+        conn.reply(envelopes_frame(vec![]));
+    }
+
+    /// A record naming `key`, mailboxed at `relay` and dialable by key.
+    fn routed_record(key: PublicKey, relay: &PublicKey) -> ContactRecord {
+        ContactRecord::new(
+            vec![key],
+            vec![],
+            vec![RelayEntry {
+                mailbox: mailbox_spec(relay),
+                relay_url: Some("http://203.0.113.1:1".to_string()),
+            }],
+        )
+    }
+
+    /// A loopback-wired client: dialable by its device key, dialing other
+    /// wired clients — both ends run their real handlers (transport.md §7).
+    fn loop_client(
+        test: &str,
+        name: &str,
+        wire: &Loopback,
+    ) -> (
+        Client<TestClock, SystemClock, TestTransport>,
+        TestTransport,
+        TestClock,
+    ) {
+        let key_path = temp_key(test, name);
+        keystore::create(&key_path).expect("key");
+        let device = keystore::load(&key_path).expect("load key");
+        let net = wire.transport(device.public());
+        let clock = TestClock::new();
+        let client = Client::with_transport(
+            device,
+            &key_path,
+            ClientConfig::default(),
+            clock.clone(),
+            SystemClock,
+            net.clone(),
+        );
+        (client, net, clock)
     }
 
     #[tokio::test]
@@ -4637,6 +4724,513 @@ mod tests {
         assert!(a.state.outbox().is_empty(), "the debt is settled");
 
         let _ = std::fs::remove_dir_all(temp_root("recover"));
+    }
+
+    #[tokio::test]
+    async fn recv__should_drain_the_healthy_relay_when_another_is_unreachable() {
+        // Given: a mailbox on two relays, mail waiting on the SECOND only —
+        // and the first held silent. Before De6a a `?` in recv's per-relay
+        // loop aborted the pass on the first unreachable relay, so this mail
+        // stayed invisible until an unrelated relay came back.
+        let dead = DeviceKey::from_seed([91; 32]).public();
+        let healthy = DeviceKey::from_seed([92; 32]).public();
+        let key_path = temp_key("recvpartial", "b");
+        keystore::create(&key_path).expect("key");
+        let clock = TestClock::new();
+        let net = TestTransport::new();
+        let b = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
+            &key_path,
+            ClientConfig::default(),
+            clock.clone(),
+            SystemClock,
+            net.clone(),
+        );
+        let sender = DeviceKey::from_seed([93; 32]);
+        let mail = sealed_for(&sender, b.public_key(), b"mail on the relay that stayed up");
+        net.dial.hold(&dead);
+        script_drain(&net.dial.connect(&healthy), vec![mail]);
+        let dead_spec = mailbox_spec(&dead);
+
+        // When: draining both, the dead one first (the abort order that
+        // used to lose the mail)
+        let relays = [dead_spec.clone(), mailbox_spec(&healthy)];
+        let (report, ()) = tokio::join!(b.recv(&relays), async {
+            clock.wait_for_sleepers(1).await;
+            clock.advance(ClientConfig::default().connect_timeout);
+        });
+
+        // Then: the healthy relay's mail arrived, and the failure is
+        // reported rather than swallowed — a partial view that says so
+        let report = report.expect("partial drain succeeds");
+        assert_eq!(report.received.len(), 1);
+        assert!(report.received[0].body.is_ok());
+        assert_eq!(report.failed.len(), 1, "the dead relay is named");
+        assert_eq!(report.failed[0].relay, dead_spec);
+
+        // When: both relays dead — nothing can be drained anywhere
+        net.dial.hold(&dead);
+        net.dial.hold(&healthy);
+        let (result, ()) = tokio::join!(b.recv(&relays), async {
+            clock.wait_for_sleepers(2).await;
+            clock.advance(ClientConfig::default().connect_timeout);
+        },);
+
+        // Then: an error — "best-effort per relay" is not "silently
+        // succeed with nothing"
+        assert!(result.is_err(), "a drain reaching no relay must fail");
+
+        let _ = std::fs::remove_dir_all(temp_root("recvpartial"));
+    }
+
+    #[tokio::test]
+    async fn groups__should_grow_thread_and_shrink_through_the_dag() {
+        // Given: alice knows bob + carol; bob knows only alice (carol is his
+        // non-contact group member); carol knows nobody (receive-only, so
+        // the D5 gate declines every direct push to her — her mailbox is the
+        // only way in, and the test shuttles it visibly). All three run real
+        // handlers over the loopback.
+        let wire = Loopback::new();
+        let (a, a_net, _a_clock) = loop_client("groups", "alice", &wire);
+        let (b, b_net, _b_clock) = loop_client("groups", "bob", &wire);
+        let (c, c_net, _c_clock) = loop_client("groups", "carol", &wire);
+        let relay_b = DeviceKey::from_seed([101; 32]).public();
+        let relay_c = DeviceKey::from_seed([102; 32]).public();
+        let relay_a = DeviceKey::from_seed([103; 32]).public();
+        a.add_contact(&routed_record(b.public_key(), &relay_b), Some("Bob".into()))
+            .expect("alice adds bob");
+        a.add_contact(
+            &routed_record(c.public_key(), &relay_c),
+            Some("Carol".into()),
+        )
+        .expect("alice adds carol");
+        b.add_contact(
+            &routed_record(a.public_key(), &relay_a),
+            Some("Alice".into()),
+        )
+        .expect("bob adds alice");
+
+        // When: a 1:1 becomes a group — alice replies with carol added.
+        // Bob acks directly (discharging his relay); carol declines the
+        // stranger's push, so her copy goes through her mailbox.
+        let first = a
+            .send(
+                &[a.resolve_contact("Bob").expect("resolve")],
+                b"hi bob".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("first send");
+        let conv = first.conversation;
+        let rc_welcome = a_net.dial.connect(&relay_c);
+        rc_welcome.reply(deposited_frame());
+        let mut contacts = a.reply_contacts(conv).expect("reply contacts").contacts;
+        contacts.push(a.resolve_contact("Carol").expect("resolve"));
+        a.send_in(conv, &contacts, b"welcome carol".to_vec(), vec![])
+            .await
+            .expect("grow the group");
+
+        // Then: bob has it (direct), carol drains it, and the derived join
+        // delta names carol
+        let bob_history = b.history(conv).expect("bob history");
+        assert_eq!(bob_history.len(), 2);
+        assert_eq!(
+            bob_history[1].body.as_deref(),
+            Ok(b"welcome carol".as_slice())
+        );
+        assert_eq!(bob_history[1].joined, vec![c.public_key()]);
+        script_drain(
+            &c_net.dial.connect(&relay_c),
+            deposited_envelopes(&rc_welcome),
+        );
+        let carol_got = c.recv(&[mailbox_spec(&relay_c)]).await.expect("carol recv");
+        assert_eq!(carol_got.received.len(), 1);
+        assert!(carol_got.received[0].body.is_ok());
+
+        // When: the §3 regression — the adder sends BY NAME to the grown set
+        let rc_thread = a_net.dial.connect(&relay_c);
+        rc_thread.reply(deposited_frame());
+        a.send(
+            &[
+                a.resolve_contact("Bob").expect("resolve"),
+                a.resolve_contact("Carol").expect("resolve"),
+            ],
+            b"threading check".to_vec(),
+            vec![],
+        )
+        .await
+        .expect("send by name");
+
+        // Then: still exactly one conversation on both ends
+        let a_convs = a.conversations().expect("alice conversations");
+        assert_eq!((a_convs.len(), a_convs[0].id), (1, conv));
+        let b_convs = b.conversations().expect("bob conversations");
+        assert_eq!((b_convs.len(), b_convs[0].id), (1, conv));
+
+        // When: bob replies with no record for carol — she has no route yet
+        // (membership holds; nothing is deposited anywhere: alice acks
+        // directly and an unscripted dial to carol's relay would panic)
+        let pre_route = b.reply_contacts(conv).expect("bob reply contacts");
+        assert_eq!(pre_route.unknown, vec![c.public_key()]);
+        b.send_in(
+            conv,
+            &pre_route.contacts,
+            b"from bob, pre-route".to_vec(),
+            vec![],
+        )
+        .await
+        .expect("pre-route reply");
+
+        // …and bob learns carol's record from alice (who-is over the wire;
+        // alice's real handler serves her user-added contact)
+        let learned = b.who_is(c.public_key()).await.expect("who-is");
+        assert_eq!(learned.answers.len(), 1);
+
+        // Then: the reply reaches the non-contact member through the
+        // learned route — address, don't trust (groups.md §2)
+        let rc_learned = b_net.dial.connect(&relay_c);
+        rc_learned.reply(deposited_frame());
+        let via_learned = b.reply_contacts(conv).expect("bob reply contacts");
+        assert!(via_learned.unknown.is_empty(), "carol resolves now");
+        b.send_in(
+            conv,
+            &via_learned.contacts,
+            b"carol via learned route".to_vec(),
+            vec![],
+        )
+        .await
+        .expect("learned-route reply");
+        script_drain(
+            &c_net.dial.connect(&relay_c),
+            deposited_envelopes(&rc_learned),
+        );
+        let carol_got = c.recv(&[mailbox_spec(&relay_c)]).await.expect("carol recv");
+        let bodies: Vec<_> = carol_got
+            .received
+            .iter()
+            .filter_map(|received| received.body.as_deref().ok())
+            .collect();
+        assert_eq!(bodies, vec![b"carol via learned route".as_slice()]);
+        assert!(
+            !b.state
+                .contacts()
+                .expect("bob contacts")
+                .iter()
+                .any(|(_, record)| record.keys.contains(&c.public_key())),
+            "carol must not have been promoted"
+        );
+
+        // When: alice stops including carol — a plain send to bob threads
+        // (the {alice,bob} mapping predates the group) and its head shrinks
+        // membership, so the next reply-all no longer reaches carol
+        a.send(
+            &[a.resolve_contact("Bob").expect("resolve")],
+            b"just us".to_vec(),
+            vec![],
+        )
+        .await
+        .expect("stop-include send");
+        let shrunk = a.reply_contacts(conv).expect("alice reply contacts");
+        a.send_in(
+            conv,
+            &shrunk.contacts,
+            b"current members only".to_vec(),
+            vec![],
+        )
+        .await
+        .expect("post-shrink reply");
+
+        // Then: membership shrank through the DAG; bob got both, carol got
+        // neither (her relay took no new deposit — unscripted dials panic)
+        let members = a.membership(conv).expect("membership");
+        assert_eq!(
+            members,
+            BTreeSet::from([a.public_key(), b.public_key()]),
+            "stop-include must shrink membership"
+        );
+        let a_convs = a.conversations().expect("alice conversations");
+        assert_eq!((a_convs.len(), a_convs[0].id), (1, conv), "no fork");
+        let bob_bodies: Vec<_> = b
+            .history(conv)
+            .expect("bob history")
+            .into_iter()
+            .filter_map(|message| message.body.ok())
+            .collect();
+        assert!(bob_bodies.contains(&b"just us".to_vec()));
+        assert!(bob_bodies.contains(&b"current members only".to_vec()));
+
+        let _ = std::fs::remove_dir_all(temp_root("groups"));
+    }
+
+    #[tokio::test]
+    async fn auto_query__should_learn_an_added_members_record_during_recv() {
+        // Given: alice↔bob mutual contacts; bob knows carol; alice's copy of
+        // bob's messages goes through her mailbox (bob's record of alice is
+        // mailbox-only), so the scoped auto-query fires inside her drain.
+        let wire = Loopback::new();
+        let (a, a_net, _a_clock) = loop_client("autoquery", "alice", &wire);
+        let (b, b_net, _b_clock) = loop_client("autoquery", "bob", &wire);
+        let (c, c_net, _c_clock) = loop_client("autoquery", "carol", &wire);
+        let relay_a = DeviceKey::from_seed([111; 32]).public();
+        let relay_b = DeviceKey::from_seed([112; 32]).public();
+        let relay_c = DeviceKey::from_seed([113; 32]).public();
+        a.add_contact(&routed_record(b.public_key(), &relay_b), Some("Bob".into()))
+            .expect("alice adds bob");
+        b.add_contact(
+            &ContactRecord::new(
+                vec![a.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: mailbox_spec(&relay_a),
+                    relay_url: None,
+                }],
+            ),
+            Some("Alice".into()),
+        )
+        .expect("bob adds alice, mailbox-only");
+        b.add_contact(
+            &routed_record(c.public_key(), &relay_c),
+            Some("Carol".into()),
+        )
+        .expect("bob adds carol");
+
+        // …bob starts the 1:1 and grows it by replying with carol added
+        let ra_hi = b_net.dial.connect(&relay_a);
+        ra_hi.reply(deposited_frame());
+        let first = b
+            .send(
+                &[b.resolve_contact("Alice").expect("resolve")],
+                b"hi alice".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("bob sends");
+        let conv = first.conversation;
+        let ra_welcome = b_net.dial.connect(&relay_a);
+        ra_welcome.reply(deposited_frame());
+        let rc_welcome = b_net.dial.connect(&relay_c);
+        rc_welcome.reply(deposited_frame());
+        let mut contacts = b.reply_contacts(conv).expect("reply contacts").contacts;
+        contacts.push(b.resolve_contact("Carol").expect("resolve"));
+        b.send_in(conv, &contacts, b"welcome carol".to_vec(), vec![])
+            .await
+            .expect("bob grows the group");
+
+        // When: alice drains — the scoped auto-query fires inside recv
+        // (bob authored, so the conversation is legitimate; carol is an
+        // unknown member; bob is the only dialable participant, and his
+        // real handler serves carol's record)
+        let mut mail = deposited_envelopes(&ra_hi);
+        mail.extend(deposited_envelopes(&ra_welcome));
+        script_drain(&a_net.dial.connect(&relay_a), mail);
+        let report = a.recv(&[mailbox_spec(&relay_a)]).await.expect("alice recv");
+        assert!(
+            report
+                .received
+                .iter()
+                .any(|received| received.body.as_deref() == Ok(b"welcome carol".as_slice()))
+        );
+
+        // Then: carol's record was learned with zero manual identity work
+        assert!(
+            !a.state.learned(&c.public_key()).is_empty(),
+            "the auto-query should have learned carol's record from bob"
+        );
+
+        // …and reply-to-all reaches carol through the auto-learned route
+        let rc_reply = a_net.dial.connect(&relay_c);
+        rc_reply.reply(deposited_frame());
+        let reply = a.reply_contacts(conv).expect("alice reply contacts");
+        assert!(
+            reply.unknown.is_empty(),
+            "carol resolves via the learned record"
+        );
+        a.send_in(conv, &reply.contacts, b"hello everyone".to_vec(), vec![])
+            .await
+            .expect("alice replies to all");
+        script_drain(
+            &c_net.dial.connect(&relay_c),
+            deposited_envelopes(&rc_reply),
+        );
+        let carol_got = c.recv(&[mailbox_spec(&relay_c)]).await.expect("carol recv");
+        assert!(
+            carol_got
+                .received
+                .iter()
+                .any(|received| received.body.as_deref() == Ok(b"hello everyone".as_slice()))
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("autoquery"));
+    }
+
+    #[tokio::test]
+    async fn send_to_self__should_carry_a_paired_device_into_a_conversation() {
+        // Given: alice ↔ phone mutual contacts; the laptop pairs with the
+        // phone (two one-way recognize acts — the laptop first, so the
+        // record the phone stores and serves carries the reverse vouch).
+        let wire = Loopback::new();
+        let (alice, a_net, a_clock) = loop_client("multidevice", "alice", &wire);
+        let (phone, p_net, p_clock) = loop_client("multidevice", "phone", &wire);
+        let (laptop, l_net, l_clock) = loop_client("multidevice", "laptop", &wire);
+        let relay_a = DeviceKey::from_seed([121; 32]).public();
+        let relay_p = DeviceKey::from_seed([122; 32]).public();
+        let relay_l = DeviceKey::from_seed([123; 32]).public();
+        let spec = |relay: &PublicKey| format!("{}#http://203.0.113.1:1", mailbox_spec(relay));
+        alice
+            .set_profile("Alice", &[spec(&relay_a)])
+            .await
+            .expect("alice profile");
+        phone
+            .set_profile("mårten phone", &[spec(&relay_p)])
+            .await
+            .expect("phone profile");
+        laptop
+            .set_profile("mårten laptop", &[spec(&relay_l)])
+            .await
+            .expect("laptop profile");
+        let record_p = phone.my_record().expect("phone record");
+        alice
+            .add_contact(&record_p, Some("mårten phone".into()))
+            .expect("alice adds phone");
+        phone
+            .add_contact(
+                &alice.my_record().expect("alice record"),
+                Some("Alice".into()),
+            )
+            .expect("phone adds alice");
+        laptop
+            .recognize_device(&record_p)
+            .expect("laptop recognizes phone");
+        let record_l = laptop.my_record().expect("laptop record");
+        phone
+            .recognize_device(&record_l)
+            .expect("phone recognizes laptop");
+        // The laptop reports what its own device stored directly (D5).
+        let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel();
+        laptop.on_direct_delivery(move |batch| {
+            let _ = direct_tx.send(batch);
+        });
+
+        // When: the phone's next organic message to alice — alice held
+        // unreachable (her copy takes her mailbox), the laptop acked
+        // directly from its first inclusion (the signed recipients ARE the
+        // announcement)
+        p_net.dial.hold(&alice.public_key());
+        let ra_hi = p_net.dial.connect(&relay_a);
+        ra_hi.reply(deposited_frame());
+        let to_alice = [phone.resolve_contact("Alice").expect("resolve")];
+        let (receipt, ()) =
+            tokio::join!(phone.send(&to_alice, b"hi alice".to_vec(), vec![]), async {
+                p_clock.wait_for_sleepers(1).await;
+                p_clock.advance(Duration::from_millis(600));
+            },);
+        let receipt = receipt.expect("phone sends");
+        let conv = receipt.conversation;
+        assert_eq!(receipt.direct_recipients, 1, "the laptop acked");
+
+        // …the fresh laptop — empty contact store — bootstraps alice's
+        // record through its sibling (the after-direct healing seam)
+        let arrived = direct_rx.recv().await.expect("the laptop's direct copy");
+        laptop.after_direct(&arrived).await;
+        assert!(
+            !laptop.state.learned(&alice.public_key()).is_empty(),
+            "the sibling should have answered the scoped auto-query"
+        );
+
+        // …alice drains: the signed recipients announce the laptop key; her
+        // client auto-learns its record from the phone (the D3b mirror rule)
+        script_drain(&a_net.dial.connect(&relay_a), deposited_envelopes(&ra_hi));
+        let alice_got = alice.recv(&[mailbox_spec(&relay_a)]).await.expect("recv");
+        assert!(
+            alice_got.received[0].body.as_deref() == Ok(b"hi alice".as_slice()),
+            "alice's copy came through her mailbox"
+        );
+        assert!(
+            !alice.state.learned(&laptop.public_key()).is_empty(),
+            "the phone should have served its recognized device's record"
+        );
+
+        // …alice accepts the offer — one explicit act, nothing auto-adopts
+        alice
+            .add_contact(&record_l, Some("mårten laptop".into()))
+            .expect("alice promotes the laptop");
+
+        // When: the phone goes OFFLINE — everything from here on must work
+        // without it. Alice replies once; both devices' mailboxes take a
+        // copy (the laptop declines her direct push: she is no contact of
+        // the fresh device).
+        a_net.dial.hold(&phone.public_key());
+        let a_rp = a_net.dial.connect(&relay_p);
+        a_rp.reply(deposited_frame());
+        let a_rl = a_net.dial.connect(&relay_l);
+        a_rl.reply(deposited_frame());
+        let reply = alice.reply_contacts(conv).expect("alice reply contacts");
+        let (replied, ()) = tokio::join!(
+            alice.send_in(conv, &reply.contacts, b"hello both".to_vec(), vec![]),
+            async {
+                a_clock.wait_for_sleepers(1).await;
+                a_clock.advance(Duration::from_millis(600));
+            },
+        );
+        replied.expect("alice replies");
+
+        // Then: BOTH of the person's devices receive the contact's reply
+        script_drain(&l_net.dial.connect(&relay_l), deposited_envelopes(&a_rl));
+        let laptop_got = laptop.recv(&[mailbox_spec(&relay_l)]).await.expect("recv");
+        assert!(
+            laptop_got
+                .received
+                .iter()
+                .any(|received| received.body.as_deref() == Ok(b"hello both".as_slice()))
+        );
+
+        // When: the new device replies — empty contact store, routes
+        // learned entirely through its sibling, the sibling still offline
+        l_net.dial.hold(&phone.public_key());
+        let l_rp = l_net.dial.connect(&relay_p);
+        l_rp.reply(deposited_frame());
+        let laptop_reply = laptop.reply_contacts(conv).expect("laptop reply contacts");
+        let (replied, ()) = tokio::join!(
+            laptop.send_in(
+                conv,
+                &laptop_reply.contacts,
+                b"from the new device".to_vec(),
+                vec![],
+            ),
+            async {
+                l_clock.wait_for_sleepers(1).await;
+                l_clock.advance(Duration::from_secs(3));
+            },
+        );
+
+        // Then: the reply reached alice DIRECTLY (she promoted the laptop,
+        // so her handler stores and acks it), and the sibling's mailbox got
+        // its copy for when the phone returns
+        assert_eq!(
+            replied.expect("laptop replies").direct_recipients,
+            1,
+            "alice took the new device's reply peer-to-peer"
+        );
+        let alice_bodies: Vec<_> = alice
+            .history(conv)
+            .expect("alice history")
+            .into_iter()
+            .filter_map(|message| message.body.ok())
+            .collect();
+        assert!(alice_bodies.contains(&b"from the new device".to_vec()));
+        let mut phone_mail = deposited_envelopes(&a_rp);
+        phone_mail.extend(deposited_envelopes(&l_rp));
+        script_drain(&p_net.dial.connect(&relay_p), phone_mail);
+        let phone_got = phone.recv(&[mailbox_spec(&relay_p)]).await.expect("recv");
+        let phone_bodies: Vec<_> = phone_got
+            .received
+            .iter()
+            .filter_map(|received| received.body.as_deref().ok())
+            .collect();
+        assert!(phone_bodies.contains(&b"hello both".as_slice()));
+        assert!(phone_bodies.contains(&b"from the new device".as_slice()));
+
+        let _ = std::fs::remove_dir_all(temp_root("multidevice"));
     }
 
     #[test]

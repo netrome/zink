@@ -138,4 +138,4 @@ pub struct InvalidRelayUrl(pub String);
 #[cfg(test)]
 mod test_transport;
 #[cfg(test)]
-pub(crate) use test_transport::TestTransport;
+pub(crate) use test_transport::{Loopback, ScriptedConn, TestTransport};

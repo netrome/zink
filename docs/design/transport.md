@@ -1,7 +1,7 @@
 # Transport ports
 
 Status: **designed 2026-08-13 (P3); iroh adapter 2026-08-13 (P4); double kit
-2026-08-14 (P5).** Project
+2026-08-14 (P5); loopback + e2e migrations 2026-08-14 (P6).** Project
 [3-ports-and-adapters](../projects/3-ports-and-adapters/tracker.md).
 Companion to the client clock ports (`zink-client/src/ports/clock.rs`).
 
@@ -291,9 +291,10 @@ Small, per-capability, composable — never a network model. Landed in P5 as
    protocol logic — that test gets a bespoke double instead.
 2. **Controls, not simulation**: hold (never resolves — the caller's deadline
    drops it), connect-after-hold (the next attempt succeeds: "down, then came
-   back"), fail (a dial refused; a request that breaks mid-operation). No
-   latency or loss models — the test is the scenario. Connection death
-   mid-await (`kill`) arrives with the subscribe-loop migrations (P6).
+   back"), and the loopback (below). No latency or loss models — the test is
+   the scenario. Refuse/fail/kill controls were built in P5 and **deleted at
+   P6's close unexercised** — the standing rule: a control that no migrated
+   test drives comes out, and returns with the first test that needs it.
 3. **Doubles speak real frames**: scripted replies are exact
    `MailboxResponse`/`SyncResponse` BORSH bytes built with `zink-protocol`
    (pure, available to tests). Doubles script *which* frame comes back; they
@@ -306,21 +307,28 @@ Small, per-capability, composable — never a network model. Landed in P5 as
    failing it). Caveat: a panic fails loudly only while transport calls run
    in the test's own task tree — true today (fan-out is in-task `join_all`;
    the serve loop never dials). A migration that puts dials inside a
-   *spawned* task (the subscribe loop, P6) turns that panic into a silently
-   aborted task and a hanging test: script everything such a task touches,
-   or extend the kit with an erroring control first.
-5. **Two-client wiring is wiring**: P6's tests need two in-process clients
-   talking; a loopback joining one side's `Dial` to the other's `Accept` is
-   channel plumbing. The moment it grows behavior (ordering, timing, loss), it
-   has become the forbidden simulator.
+   *spawned* task (the subscribe loop, if it ever migrates) turns that panic
+   into a silently aborted task and a hanging test: script everything such a
+   task touches, or add an erroring control first.
+5. **Two-client wiring is wiring** — landed in P6 as `Loopback`: a dial to a
+   registered key yields a connection whose requests land in that client's
+   accept queue as `Inbound { peer: caller, … }`, so both ends run their real
+   handlers (the D5 gate, verification, storage, real acks). Scripts take
+   precedence over wiring — holding a wired key is how a loopback peer goes
+   offline. The registry resolves keys and moves frames, nothing more; the
+   moment it grows behavior (ordering, timing, loss), it has become the
+   forbidden simulator. Peers a client has no trust path to (a stranger's
+   direct push is declined) receive via scripted mailbox conns instead, with
+   the test shuttling deposited envelopes into drains — the test IS the
+   relay's storage, visibly.
 
-The kit: `ScriptedDial` (per-key outcome queues: connect / refuse / hold,
-plus a `dialed` counter — `dialed == 0` is the assertion that evidence
-suppressed a dial entirely), `TestConn` (`Request + AcceptUni`: exact-frame
-replies with fail/hold controls, a sent-request recorder, a uni-frame
-sender), `ScriptedDialBlobs`/`TestBlobConn` (push recorder, `serve`d
-fetches), `ChannelAccept` (inject an inbound request, await the served
-response), `TestHome` (`set_online`). The archetype (tracker §4), landed as
+The kit: `ScriptedDial` (per-key connect/hold queues, plus a `dialed` counter
+— `dialed == 0` is the assertion that evidence suppressed a dial entirely),
+`ScriptedConn` (exact-frame replies, a sent-request recorder),
+`Loopback`/`LoopConn` (the wiring), `ChannelAccept` (inject an inbound
+request, await the served response), `TestHome` (pends — the online smoke
+stays real-network), `ScriptedDialBlobs` (panics until the first blob
+migration). The archetype (tracker §4), landed as
 `delivery__should_recover_when_a_dead_relay_returns`, 7 ms:
 
 ```rust

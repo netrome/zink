@@ -295,16 +295,35 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   subprocess e2e — P6's target).
 
 **Tier 3 — Complete the migration + smoke tier**
-- [ ] **P6 🎯 · Migrate remaining logic assertions.** Groups grow/shrink,
-  multi-device carry, `recv` partial-failure → in-process transport + clock.
-  Delete the pure-logic subprocess e2e they replace. **Decommission
-  `ZINK_CONNECT_TIMEOUT_MS` / `ZINK_CLOSE_DEADLINE_MS`** (production reads and
-  harness sets). From the P5 review: subscribe-loop migrations put dials in
-  *spawned* tasks, where an unscripted-dial panic hangs instead of failing —
-  see transport.md §7 before writing those; and **delete any kit control
-  still `#[allow(dead_code)]` when this slice closes** (built to §7's design,
-  not to a proven need — they don't get to linger).
-- [ ] **P7 · Define the real-network smoke tier.** The minimal, explicitly
+- [x] **P6 · Migrate remaining logic assertions.** ✅ 2026-08-14. The kit
+  gained **`Loopback`** (transport.md §7): dials to registered keys route
+  into the target client's accept queue, so two in-process clients run both
+  ends' *real* handlers — the D5 gate declining strangers, verification,
+  storage, real `Stored` acks. Peers with no trust path receive via scripted
+  mailbox conns, the test shuttling deposited envelopes into drains
+  (`deposited_envelopes`/`script_drain` — the test IS the relay's storage,
+  visibly). Migrated, each running MORE real logic than its subprocess
+  original (membership asserted on `membership()` directly, not through
+  stdout): **groups grow/thread/shrink 5.96 s → 0.22 s** ·
+  **multi-device carry 3.66 s → 0.11 s** (pairing, send-to-self, the D3b
+  mirror rule via `after_direct`, promote, reply-to-both with the sibling
+  held offline, the new device replying direct) · **auto-query during recv
+  3.84 s → 0.06 s** · **recv partial-failure 1.45 s → 0.02 s**. Deleted
+  `groups.rs`, `multi_device.rs`, and fanout's partial-drain e2e (fanout
+  keeps its two live-path tests). **Deliberately not migrated** — they
+  assert real-network properties the loopback would fake:
+  `send__should_keep_delivering_after_the_relays_disappear` (an established
+  QUIC path surviving relay shutdown) and
+  `send__should_fall_back_to_the_mailbox_when_the_peer_is_offline` (a real
+  dial failing); P7 labels them smoke. **Env knobs decommissioned**: no
+  production env reads — the CLI gained real `--connect-timeout-ms` /
+  `--close-deadline-ms` flags (in USAGE; tuning is an interface, not a side
+  door), and the harness passes them per invocation. **Kit sweep** per the
+  P5-review rule: refuse/fail/hold-reply/uni-sender/`set_online`/blob
+  scripting/`home_relays()` all deleted unexercised (§7 records the standing
+  rule). Suite: **237/237, wall ~2.4 s (was ~6.0 s)** — the tail is now the
+  `who_is` e2e at 2.4 s; clippy clean; wasm unaffected.
+- [ ] **P7 🎯 · Define the real-network smoke tier.** The minimal, explicitly
   labelled set that stays on real iroh (§4 list). *Done when:* the real-network
   tests are few, named as smokes, and everything else is in-process.
 - [ ] **P8 · Re-measure + graduate.** Update §3’s table; land the design doc,

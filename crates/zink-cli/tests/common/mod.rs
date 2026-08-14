@@ -123,15 +123,14 @@ pub fn spawn_homed_listener(key: &str) -> Listener {
 pub fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_zink-cli"))
         .args(args)
-        // Down-relay tests should fail in milliseconds, not the production
-        // 10 s connect deadline. In-process relays answer in single-digit ms,
-        // so 500 ms has plenty of headroom for loaded CI.
-        .env("ZINK_CONNECT_TIMEOUT_MS", "500")
-        // Don't wait out iroh's ~3 s post-failed-dial drain on every one-shot
-        // command (D5): ~30 invocations per test made that the suite's
-        // dominant cost. The price is iroh's ungraceful-abort line on stderr,
-        // which these tests ignore.
-        .env("ZINK_CLOSE_DEADLINE_MS", "200")
+        // Edge tuning as real flags (the ZINK_*_MS env back-channel is
+        // gone — project 3, P6). Down-relay paths fail in 500 ms instead of
+        // the production 10 s (in-process relays answer in single-digit ms,
+        // so plenty of headroom for loaded CI), and one-shot commands skip
+        // iroh's ~3 s post-failed-dial drain at the price of its
+        // ungraceful-abort line on stderr, which these tests ignore.
+        // Commands that open no client ignore the flags.
+        .args(["--connect-timeout-ms", "500", "--close-deadline-ms", "200"])
         .output()
         .expect("run zink-cli")
 }

@@ -1,6 +1,6 @@
 //! B2 end to end: 1→N fan-out on one relay, and cross-relay dedup by id.
-//! Plus De6a: a drain is best-effort *per relay* — one unreachable relay
-//! costs its own mail, never another relay's.
+//! (The De6a partial-drain assertion moved in-process in project 3, P6 —
+//! `recv__should_drain_the_healthy_relay_when_another_is_unreachable`.)
 
 mod common;
 
@@ -71,66 +71,6 @@ async fn fanout__should_dedup_by_id_when_deposited_to_two_relays() {
         "recv", "--key", &key_b, "--relay", &dial_1, "--relay", &dial_2,
     ]));
     assert_eq!(drained, "no new messages");
-
-    std::fs::remove_dir_all(&dir).expect("clean up temp dir");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(non_snake_case)]
-async fn recv__should_drain_the_healthy_relay_when_another_is_unreachable() {
-    // Given: bob's mailbox on two relays, one message waiting on the SECOND
-    // one only — then the first relay goes down. Before De6a a `?` in recv's
-    // per-relay loop aborted the pass on the first unreachable relay, so
-    // this mail stayed invisible until an unrelated relay came back.
-    let (router_1, dial_1) = spawn_relay().await;
-    let (router_2, dial_2) = spawn_relay().await;
-    let dir = temp_dir("recv-partial");
-    let key_a = key_path(&dir, "a.key");
-    let key_b = key_path(&dir, "b.key");
-    cli(&["keygen", &key_a]);
-    let pubkey_b = stdout_of(&cli(&["keygen", &key_b]));
-    cli(&[
-        "recv", "--key", &key_b, "--relay", &dial_1, "--relay", &dial_2,
-    ]);
-    let text = "mail on the relay that stayed up";
-    let to_b = format!("{pubkey_b}@{dial_2}");
-    stdout_of(&cli(&["send", "--key", &key_a, "--to", &to_b, text]));
-    drop(router_1);
-
-    // When: bob drains both, the dead one FIRST (the abort order that used
-    // to lose the mail)
-    let output = cli(&[
-        "recv", "--key", &key_b, "--relay", &dial_1, "--relay", &dial_2,
-    ]);
-
-    // Then: the healthy relay's mail arrives, and the failure is reported
-    // rather than swallowed — a partial view that says it is partial
-    let stdout = stdout_of(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.contains(text), "got: {stdout}");
-    assert!(
-        stderr.contains(&format!("{dial_1} not drained")),
-        "the dead relay should be named; got: {stderr}"
-    );
-    assert!(
-        !stderr.contains(&format!("{dial_2} not drained")),
-        "the healthy relay must not be reported failed; got: {stderr}"
-    );
-
-    // When: the second relay goes down too — nothing can be drained anywhere
-    drop(router_2);
-    let output = cli(&[
-        "recv", "--key", &key_b, "--relay", &dial_1, "--relay", &dial_2,
-    ]);
-
-    // Then: still an error. "Best-effort per relay" is not "silently succeed
-    // with nothing" — a caller that asked for mail and reached no relay at
-    // all must see why.
-    assert!(
-        !output.status.success(),
-        "a drain reaching no relay must fail: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
 
     std::fs::remove_dir_all(&dir).expect("clean up temp dir");
 }
