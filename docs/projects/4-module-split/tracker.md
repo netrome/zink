@@ -207,10 +207,15 @@ crates/zink-client/src/
   drifted into six bands interleaved with tests; the kit is one discoverable
   module, and this plants the `client/` directory the Tier-2 carves grow
   into (root-file + dir, no `mod.rs`). One comment repair: `record_with_
-  dead_mailbox`'s doc was stranded above `sealed_for`'s — reunited. Kit
-  sweep: all 24 exercised (zero dead-code warnings), nothing kept warm.
-  **Proof:** 238/238, clippy clean, `wasm32` compiles; `client.rs`
-  7,490 → 7,111; `mod tests` now opens with its first test.
+  dead_mailbox`'s doc was stranded above `sealed_for`'s — reunited.
+  **Imported explicitly, not by glob** (see the decisions log) — which
+  immediately taught something: three frame builders (`registered_frame`/
+  `acked_frame`/`envelopes_frame`) turned out to be `script_drain`
+  internals no test calls directly, so they demoted to kit-private; 21
+  helpers are the actual surface. Kit sweep: all exercised (zero dead-code
+  warnings), nothing kept warm. **Proof:** 238/238, clippy clean, `wasm32`
+  compiles; `client.rs` 7,490 → 7,116; `mod tests` opens with its imports
+  and first test.
 
 **Tier 2 — carve the impl, cluster by cluster** (each slice: move the impl
 block + its types + its tests, prune comments per §4; standing rule: a moved
@@ -258,6 +263,7 @@ opportunistically, as its own commit)
 | Time & I/O in the ledger | Neither: every method takes `now` as data (the transport-port rule applied to state — keeps it unit-testable with fabricated timestamps, no doubles), and persistence stays with the caller (`restore` takes rows, `unreachable_snapshot` returns rows). |
 | The queried mutex | Same medicine, smaller dose: `AskedOnce`, private to `who_is.rs`, one atomic test-and-set method. It exists because `Client` sits behind `Arc` at the edges and drains can overlap — the mutex is right, the raw `Mutex<BTreeSet<([u8;32],[u8;32])>>` field wasn't. Stays in-memory on purpose (the manual trigger re-asks). |
 | Principle to graduate | **Share handles, not collections**: shared mutability isn't the smell — anonymous shared mutability is. A crate-visible `Arc<Mutex<Collection>>` alias hands every holder the invariants; a named cheap-clone handle (as `ClientState` already is) owns them. → STYLE.md at close. |
+| Test-kit imports | **Explicit lists, never a glob.** `use super::*` stays legitimate in an embedded test module — its subject *is* the parent, so the glob expresses "internals included." A kit/sibling module gets named imports: provenance stays readable (is `chain` the subject or a helper?), glob-glob collisions with the parent namespace are impossible, and rustc's unused-import lint enforces the kit-sweep rule per consumer — it exposed three helpers as kit-internal on day one. Post-carve, each file's list is the 3–8 helpers it actually uses. → STYLE.md at close, with the handle rule. |
 | Comment pruning | Rides along per project 3 §8 — the split rewrites every file, so prune then; graduation rules in §4. |
 | `app/ui` | In scope as the final carve (the project 3 parking note named both files), view-only, by screen. |
 | Sequencing | Ledger first (M1): it shrinks both `client.rs` and `sync.rs`, kills the upward import and the alias, and the send/outbox carve (M3) then moves clean call sites instead of raw lock code. |

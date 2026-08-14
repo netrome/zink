@@ -203,15 +203,15 @@ pub(crate) fn deposited_frame() -> Vec<u8> {
     .to_bytes()
 }
 
-pub(crate) fn registered_frame() -> Vec<u8> {
+fn registered_frame() -> Vec<u8> {
     zink_protocol::MailboxResponse::new(MailboxResult::Registered).to_bytes()
 }
 
-pub(crate) fn acked_frame() -> Vec<u8> {
+fn acked_frame() -> Vec<u8> {
     zink_protocol::MailboxResponse::new(MailboxResult::Acked).to_bytes()
 }
 
-pub(crate) fn envelopes_frame(envelopes: Vec<MessageEnvelope>) -> Vec<u8> {
+fn envelopes_frame(envelopes: Vec<MessageEnvelope>) -> Vec<u8> {
     let items = envelopes
         .into_iter()
         .zip(1u64..)

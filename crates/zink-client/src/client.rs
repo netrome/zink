@@ -3345,7 +3345,12 @@ mod test_kit;
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use super::test_kit::*;
+    use super::test_kit::{
+        befriend, chain, deposited_envelopes, deposited_frame, dir_bytes, loop_client,
+        mailbox_only, mailbox_spec, message, open_homed, open_homed_with, record_with_dead_mailbox,
+        routed_record, script_drain, sealed_chain, sealed_for, signed_record, spawn_test_relay,
+        summary, temp_key, temp_root,
+    };
     use super::*;
     use crate::ports::clock::{TestClock, TestWallClock};
     use crate::ports::transport::{Home, Loopback, TestTransport};
