@@ -20,7 +20,7 @@ use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
 
-use crate::clock::WallClock;
+use crate::clock::{Clock, WallClock};
 
 /// Blob-cache policy knobs (relay-operator policy, not protocol).
 #[derive(Debug, Clone, Copy)]
@@ -71,23 +71,28 @@ pub fn push_tag_timestamp_ms(tag: &[u8]) -> Option<u64> {
 }
 
 /// In-memory blob cache with TTL + size-cap semantics (dev / tests).
-pub fn mem_blob_cache<W: WallClock>(config: BlobCacheConfig, clock: W) -> MemStore {
+pub fn mem_blob_cache<C: Clock, W: WallClock>(
+    config: BlobCacheConfig,
+    clock: C,
+    wall_clock: W,
+) -> MemStore {
     let store = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
         gc_config: Some(GcConfig {
             interval: config.gc_interval,
             add_protected: None,
         }),
     });
-    spawn_tag_sweeper((*store).clone(), config, clock);
+    spawn_tag_sweeper((*store).clone(), config, clock, wall_clock);
     store
 }
 
 /// On-disk blob cache with TTL + size-cap semantics. Blobs *and* their
 /// retention tags live in `root` and survive restarts together.
-pub async fn fs_blob_cache<W: WallClock>(
+pub async fn fs_blob_cache<C: Clock, W: WallClock>(
     root: &Path,
     config: BlobCacheConfig,
-    clock: W,
+    clock: C,
+    wall_clock: W,
 ) -> Result<FsStore, Box<dyn std::error::Error + Send + Sync>> {
     let mut options = iroh_blobs::store::fs::options::Options::new(root);
     options.gc = Some(GcConfig {
@@ -95,19 +100,25 @@ pub async fn fs_blob_cache<W: WallClock>(
         add_protected: None,
     });
     let store = FsStore::load_with_opts(root.join("blobs.db"), options).await?;
-    spawn_tag_sweeper((*store).clone(), config, clock);
+    spawn_tag_sweeper((*store).clone(), config, clock, wall_clock);
     Ok(store)
 }
 
 /// Periodically delete push tags that expired or point at oversized blobs;
 /// GC then collects whatever those tags were keeping alive.
-fn spawn_tag_sweeper<W: WallClock>(store: Store, config: BlobCacheConfig, clock: W) {
+fn spawn_tag_sweeper<C: Clock, W: WallClock>(
+    store: Store,
+    config: BlobCacheConfig,
+    clock: C,
+    wall_clock: W,
+) {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(config.gc_interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Sweep-then-sleep keeps `interval`'s immediate first tick, and
+        // sleeping after the work matches the old Skip tick behavior. The
+        // wait goes through the port — no raw timers (ADR 0004).
         loop {
-            ticker.tick().await;
-            sweep_tags(&store, config, clock.now_ms()).await;
+            sweep_tags(&store, config, wall_clock.now_ms()).await;
+            clock.sleep(config.gc_interval).await;
         }
     });
 }

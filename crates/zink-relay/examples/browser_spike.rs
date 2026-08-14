@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
         zink_relay::clock::SystemClock,
+        zink_relay::clock::SystemClock,
     );
 
     tokio::signal::ctrl_c().await?;

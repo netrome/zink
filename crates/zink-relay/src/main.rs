@@ -134,7 +134,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         max_total_bytes: blob_budget,
         ..BlobCacheConfig::default()
     };
-    let blob_store = fs_blob_cache(&data_dir.join("blobs"), blob_config, SystemClock).await?;
+    let blob_store = fs_blob_cache(
+        &data_dir.join("blobs"),
+        blob_config,
+        SystemClock,
+        SystemClock,
+    )
+    .await?;
     // Both ceilings, stated up front: an operator running this beside other
     // services should not have to read the source to know the worst case.
     let who = match &allow_list {
@@ -168,11 +174,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             MailboxService::<_, AllowListFile>::with_admission(mailboxes, list, max_mailboxes),
             &blob_store,
             SystemClock,
+            SystemClock,
         ),
         None => spawn_relay_router(
             endpoint,
             MailboxService::with_admission(mailboxes, OpenToAll, max_mailboxes),
             &blob_store,
+            SystemClock,
             SystemClock,
         ),
     };

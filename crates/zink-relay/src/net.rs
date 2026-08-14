@@ -24,7 +24,7 @@ use zink_protocol::{
 
 use crate::admission::Admission;
 use crate::blobs::push_tag;
-use crate::clock::WallClock;
+use crate::clock::{Clock, WallClock};
 use crate::mailbox::MailboxService;
 use crate::store::MailboxStore;
 
@@ -33,10 +33,16 @@ use crate::store::MailboxStore;
 /// deposit encrypted blobs so recipients can fetch after the sender goes
 /// offline); each push writes a timestamped retention tag that bounds the
 /// blob's lifetime (see `blobs`).
-pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, A: Admission, W: WallClock>(
+pub fn spawn_relay_router<
+    S: MailboxStore + fmt::Debug,
+    A: Admission,
+    C: Clock + Clone + fmt::Debug,
+    W: WallClock,
+>(
     endpoint: Endpoint,
     service: MailboxService<S, A>,
     blob_store: &iroh_blobs::api::Store,
+    clock: C,
     wall_clock: W,
 ) -> Router {
     Router::builder(endpoint)
@@ -45,6 +51,7 @@ pub fn spawn_relay_router<S: MailboxStore + fmt::Debug, A: Admission, W: WallClo
             MailboxHandler {
                 service: Arc::new(service),
                 live: Arc::default(),
+                clock,
             },
         )
         .accept(
@@ -109,21 +116,26 @@ struct LiveConnections {
 }
 
 #[derive(Debug)]
-struct MailboxHandler<S, A> {
+struct MailboxHandler<S, A, C> {
     service: Arc<MailboxService<S, A>>,
     live: Arc<Mutex<LiveConnections>>,
+    /// Bounds the nudge fire-and-forget (no raw timers — ADR 0004).
+    clock: C,
 }
 
-impl<S, A> Clone for MailboxHandler<S, A> {
+impl<S, A, C: Clone> Clone for MailboxHandler<S, A, C> {
     fn clone(&self) -> Self {
         Self {
             service: self.service.clone(),
             live: self.live.clone(),
+            clock: self.clock.clone(),
         }
     }
 }
 
-impl<S: MailboxStore + fmt::Debug, A: Admission> ProtocolHandler for MailboxHandler<S, A> {
+impl<S: MailboxStore + fmt::Debug, A: Admission, C: Clock + Clone + fmt::Debug> ProtocolHandler
+    for MailboxHandler<S, A, C>
+{
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let caller = PublicKey(*connection.remote_id().as_bytes());
         let mut session = None;
@@ -186,7 +198,7 @@ impl<S: MailboxStore + fmt::Debug, A: Admission> ProtocolHandler for MailboxHand
                                 "nudging live recipient"
                             );
                             for target in targets {
-                                nudge(target);
+                                nudge(target, self.clock.clone());
                             }
                         }
                     }
@@ -217,14 +229,15 @@ impl<S: MailboxStore + fmt::Debug, A: Admission> ProtocolHandler for MailboxHand
 /// signal (live-delivery.md §3). Best-effort by design: the mailbox holds
 /// the envelope and fetch-on-foreground remains the backstop, so failures
 /// are ignored.
-fn nudge(connection: Connection) {
+fn nudge<C: Clock>(connection: Connection, clock: C) {
     tokio::spawn(async move {
-        let _ = tokio::time::timeout(NUDGE_TIMEOUT, async {
-            if let Ok(mut stream) = connection.open_uni().await {
-                let _ = stream.finish();
-            }
-        })
-        .await;
+        let _ = clock
+            .timeout(NUDGE_TIMEOUT, async {
+                if let Ok(mut stream) = connection.open_uni().await {
+                    let _ = stream.finish();
+                }
+            })
+            .await;
     });
 }
 

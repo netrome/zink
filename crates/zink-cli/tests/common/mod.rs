@@ -188,6 +188,7 @@ pub async fn spawn_relay_at(
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
         zink_relay::clock::SystemClock,
+        zink_relay::clock::SystemClock,
     );
     (router, dial)
 }

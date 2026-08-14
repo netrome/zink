@@ -1,11 +1,14 @@
 # Ports & adapters: time and transport behind traits
 
-> **Status: 📝 scoping (2026-08-12).** Project **3-ports-and-adapters**. Not yet
-> started — this is the plan. The goal is to finish the ports/adapters story on
-> the **client** side: put *time* and *network transport* behind traits so the
-> domain logic (fan-out, reachability, delivery) is testable in-process,
-> deterministically, in milliseconds — without giving up a thin tier of real
-> end-to-end tests.
+> **Status: ✅ complete (2026-08-14).** Project **3-ports-and-adapters**. The
+> ports/adapters story on the **client** side is done: time and network
+> transport sit behind verb-named ports (`ports/`) with the real world
+> confined to `adapters/`; every protocol-logic assertion runs in-process on
+> doubles, deterministically, in milliseconds; a named real-network smoke
+> tier remains (transport.md §8); the `ZINK_*_MS` env back-channel is gone.
+> Durable knowledge graduated to
+> [`docs/design/transport.md`](../../design/transport.md), `ports/clock.rs`'s
+> `//!`, and [ADR 0004](../../decisions/0004-time-and-transport-behind-ports.md).
 
 Governed by the standard slice discipline (AGENTS.md): small vertical slices,
 one per turn, each runnable and measured before the next. The invariants in
@@ -83,6 +86,16 @@ Slow tail: `zink-cli` `groups` 5.96 s · `groups/auto_query` 3.84 s ·
 decomposition are in fast-failure.md §2–3. Re-measure at the end of each slice;
 the point is the *shape* changing (logic tests leaving the subprocess layer),
 not a single headline number.
+
+**Final (measured 2026-08-14, P8).** Whole workspace: **235 tests, ~1.1 s
+wall** (parallel; ~5.7 s when the `keep_delivering` smoke waits out a slow
+holepunch — the variance is that one honest real-network wait). Per crate:
+protocol 100 in 0.07 s · client 76 in 0.67 s (protocol-logic tests each ≤
+10 ms; the five real-network smokes are the remainder) · relay 46 in 0.57 s
+(real-QUIC wire tests) · cli 13 in 1.0 s (CLI-surface + three smokes). The
+shape the project aimed at, landed: every protocol-logic assertion runs
+in-process on doubles, deterministically; the network keeps only the named
+smoke tier (transport.md §8) and the CLI's own surface tests.
 
 ## 4. Guardrails — the traps to avoid
 
@@ -353,8 +366,17 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   real endpoints without paying deadlines (~0.1–0.3 s) — project 4 converts
   them opportunistically. Suite: **235/235, wall ~2.3 s**, zink-client's 76
   in 0.7 s; clippy clean; wasm unaffected.
-- [ ] **P8 🎯 · Re-measure + graduate.** Update §3’s table; land the design doc,
-  clock note, and ADR (§5); record the test-double discipline.
+- [x] **P8 · Re-measure + graduate.** ✅ 2026-08-14. §3 gained the final
+  measurement (235 tests, ~1.1 s wall; every protocol-logic assertion
+  in-process). Graduated per §5:
+  [transport.md](../../design/transport.md) (written in P3, edited through P7
+  — contracts, seam ledger, double-kit discipline, the named smoke tier),
+  the clock rationale as `ports/clock.rs`'s `//!` (separate parameters,
+  `timeout` derived from `sleep`, no timers in ports or adapters), and
+  [ADR 0004](../../decisions/0004-time-and-transport-behind-ports.md) —
+  time and transport behind ports, tied to tenets 6/7 and STYLE.md's
+  I/O-at-the-edges, with the rejected alternatives (env knobs, one
+  full-behavior fake) on record.
 
 ## 7. Decisions log
 
@@ -378,11 +400,14 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 
 ## 8. Follow-ups / parked
 
-- **Relay-side raw timers.** `zink-relay` still calls `tokio::time` directly
-  (the nudge timeout, the blob-GC ticker, wire-test waits) — its `Clock` port
-  is read-only `now()`. The client's `sleep`/`timeout`-bearing port pattern
-  extends there whenever the relay first needs a deterministic timer test;
-  client + CLI are already at zero raw time calls, tests included.
+- **Relay-side raw timers.** ✅ Done at project close (2026-08-14): the
+  relay's `Clock` gained `sleep` + the derived `timeout` (mirroring the
+  client's — ADR 0004), the nudge deadline and blob-GC sweep cadence run
+  through it (sweep-then-sleep preserves the old interval semantics), and
+  the wire-test waits go through `SystemClock`. **Zero raw `tokio::time`
+  calls outside the two `SystemClock` adapters, workspace-wide.** The relay's
+  `TestClock::sleep` is a loud panic stub until a retention test first
+  drives a timer — then port the client's parked-sleep registry.
 
 - **Project 4 — module split** (`client.rs` ~6.8 k lines, `app/ui/src/lib.rs`
   ~2.4 k). Sequenced after this; the port seams become the module lines.

@@ -1,7 +1,14 @@
-//! Time behind ports, mirroring the relay's `clock.rs`. `Clock` is monotonic
-//! (elapsed, backoff waits, deadlines); `WallClock` is unix-millisecond wall
-//! time (wire timestamps, cooldowns that outlive a process). The production
-//! implementation is `crate::adapters::system_clock::SystemClock`.
+//! Time behind ports (ADR 0004). `Clock` is monotonic (elapsed, backoff
+//! waits, deadlines); `WallClock` is unix-millisecond wall time (wire
+//! timestamps, cooldowns that outlive a process). The production
+//! implementation of both is `crate::adapters::system_clock::SystemClock`.
+//!
+//! The discipline: the two are SEPARATE `Client` parameters because wall and
+//! monotonic time move independently in the real world — tests drive them
+//! apart (a wall rewind under monotonic progress). `timeout` is derived from
+//! `sleep`, so a test clock's `advance` fires any deadline deterministically
+//! — which is also why no port or adapter ever runs a timer of its own.
+//! Doubles live in `clock/test_clock.rs`, one per port.
 
 use std::future::Future;
 use std::time::{Duration, Instant};

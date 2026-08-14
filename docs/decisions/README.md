@@ -34,3 +34,4 @@ Copy [`0000-template.md`](./0000-template.md). Next number, kebab-case title,
 | [0001](./0001-native-first-client.md) | Native-first client (Tauri v2) over PWA/WASM for the MVP | Accepted | 5, 9 |
 | [0002](./0002-self-wrap-own-history.md) | Self-wrap convention — sealing to your own key for readable history | Accepted | 3, 4 |
 | [0003](./0003-per-user-homed-multi-relay.md) | Per-user homed, multi-relay connectivity (never a shared relay) | Accepted | 5, 9 |
+| [0004](./0004-time-and-transport-behind-ports.md) | Time and transport behind ports in the client | Accepted | 6, 7 |

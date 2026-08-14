@@ -7,6 +7,7 @@ use zink_protocol::{
     DeviceKey, KeyCommitment, MAILBOX_ALPN, MAX_RESPONSE_BYTES, MailboxOp, MailboxRequest,
     MailboxResponse, MailboxResult, MessageCore, MessageEnvelope, Versioned,
 };
+use zink_relay::clock::{Clock, SystemClock};
 use zink_relay::mailbox::MailboxService;
 use zink_relay::net::spawn_relay_router;
 use zink_relay::store::InMemoryStore;
@@ -22,7 +23,8 @@ async fn spawn_relay() -> (iroh::protocol::Router, EndpointAddr) {
         endpoint,
         MailboxService::new(InMemoryStore::new()),
         &blob_store,
-        zink_relay::clock::SystemClock,
+        SystemClock,
+        SystemClock,
     );
     (router, addr)
 }
@@ -172,7 +174,8 @@ async fn nudge__should_reach_a_live_registered_recipient_on_deposit() {
 
     // Then: the relay nudges B — a zero-length uni stream on B's own
     // connection — and the nudged fetch finds the envelope
-    tokio::time::timeout(std::time::Duration::from_secs(5), b.accept_uni())
+    SystemClock
+        .timeout(std::time::Duration::from_secs(5), b.accept_uni())
         .await
         .expect("nudged within the timeout")
         .expect("uni stream accepted");
@@ -209,7 +212,8 @@ async fn nudge__should_go_to_the_newest_connection_when_a_device_reconnects() {
 
     // Then: the live (newest) connection is the one nudged — the stale
     // connection's cleanup must not have evicted it
-    tokio::time::timeout(std::time::Duration::from_secs(5), b.accept_uni())
+    SystemClock
+        .timeout(std::time::Duration::from_secs(5), b.accept_uni())
         .await
         .expect("nudged within the timeout")
         .expect("uni stream accepted");
@@ -246,7 +250,8 @@ async fn nudge__should_survive_a_second_connection_registering_and_closing() {
 
     // Then: the still-open subscription connection is nudged (before the
     // fix, the poll's register+close evicted B's liveness and this hung)
-    tokio::time::timeout(std::time::Duration::from_secs(5), b_sub.accept_uni())
+    SystemClock
+        .timeout(std::time::Duration::from_secs(5), b_sub.accept_uni())
         .await
         .expect("subscription nudged despite the poll connection closing")
         .expect("uni stream accepted");
