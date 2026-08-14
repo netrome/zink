@@ -1,3 +1,5 @@
+//! REAL-NETWORK SMOKE (P7, transport.md §8): the full walking skeleton —
+//! keygen → send → recv over a real relay, every layer live.
 //! 🚩 The walking skeleton, end to end: relay + two `zink-cli` binaries.
 //! A encrypts + deposits for B's key; B fetches + opens + prints plaintext.
 

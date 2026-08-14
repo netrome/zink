@@ -3712,13 +3712,10 @@ mod tests {
         // Given: a 3-message conversation A holds in full, while B — added
         // mid-conversation — holds only the latest message, so it can't even
         // build the DAG (no genesis on disk) and thus can't reply.
-        let a = Client::open_or_create(&temp_key("walk", "server"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("walk", "client"))
-            .await
-            .expect("open B");
-        befriend(&a, &b); // the D0c gate serves contacts only
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("walk", "server", &wire);
+        let (b, _b_net, _b_clock) = loop_client("walk", "client", &wire);
+        befriend(&a.state, b.public_key()); // the D0c gate serves contacts only
 
         let author = DeviceKey::from_seed([9; 32]);
         let msgs = chain(&author, b.public_key(), 3);
@@ -3737,7 +3734,14 @@ mod tests {
         // address — a locally-bound peer's bare public socket isn't reliably
         // self-reachable on one host; the string API is exercised separately)
         let fetched = b
-            .backfill_addr(conversation, a.transport.peer())
+            .backfill_addr(
+                conversation,
+                Peer {
+                    key: a.public_key(),
+                    relays: vec![],
+                    sockets: vec![],
+                },
+            )
             .await
             .expect("backfill");
 
@@ -3789,10 +3793,9 @@ mod tests {
     /// contacts-only serving gate lets the requester's sync calls through
     /// (the minimal record — key only — via the store, skipping
     /// `add_contact`'s reachability validation, which serving doesn't need).
-    fn befriend(server: &Client, requester: &Client) {
-        let record = ContactRecord::new(vec![requester.public_key()], vec![], vec![]);
+    fn befriend(server: &ClientState, requester: PublicKey) {
+        let record = ContactRecord::new(vec![requester], vec![], vec![]);
         server
-            .state
             .save_contact("requester", &record)
             .expect("save contact");
     }
@@ -3844,6 +3847,7 @@ mod tests {
 
     #[tokio::test]
     async fn homed_endpoint__should_report_online_without_waiting_out_probe_timeout() {
+        // REAL-NETWORK SMOKE (P7, transport.md §8): real `online()` readiness timing.
         // Given: a home relay serving QAD (De2). Without it, the first
         // net-report waited out iroh's full 3 s probe timeout before the
         // endpoint reported online (measured ~3.03 s of the ~3.15 s
@@ -4007,26 +4011,27 @@ mod tests {
 
     #[tokio::test]
     async fn send__should_deliver_directly_when_the_mailbox_is_unreachable() {
-        // Given: A and B homed to *different* relays, each holding the
-        // other's record. B's mailbox dial string is dead — the only way a
-        // message can reach B is peer-to-peer (D5).
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let (_relay_b, url_b) = spawn_test_relay().await;
-        let a = open_homed("direct", "a", &url_a).await;
-        let b = open_homed("direct", "b", &url_b).await;
+        // Given: A and B wired directly, each holding the other's record.
+        // B's mailbox dial string is dead — but B acks the push, so the
+        // deposit is discharged and the dead mailbox is never even dialed
+        // (an attempt would panic as unscripted).
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("direct", "a", &wire);
+        let (b, _b_net, _b_clock) = loop_client("direct", "b", &wire);
+        let relay_a = DeviceKey::from_seed([131; 32]).public();
+        let relay_b = DeviceKey::from_seed([132; 32]).public();
         // The serving gate (D0c) covers `Deliver` too: B accepts a push
         // only from a contact.
         b.add_contact(
-            &record_with_dead_mailbox(a.public_key(), &url_a),
+            &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
         .expect("B adds A");
         a.add_contact(
-            &record_with_dead_mailbox(b.public_key(), &url_b),
+            &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.transport.online().await; // homed before A rendezvouses via its relay
         // The live sink is the *only* signal for a direct arrival: no
         // mailbox means no nudge to drain.
         let live: std::sync::Arc<std::sync::Mutex<Vec<Received>>> = Default::default();
@@ -4186,21 +4191,21 @@ mod tests {
         // Given: A and B able to reach each other peer-to-peer (D5), so the
         // send earns a `Stored` ack from B's *own device key* — the only
         // party whose word means "delivered" (a relay's `Deposited` doesn't).
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let (_relay_b, url_b) = spawn_test_relay().await;
-        let a = open_homed("confirm", "a", &url_a).await;
-        let b = open_homed("confirm", "b", &url_b).await;
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("confirm", "a", &wire);
+        let (b, _b_net, _b_clock) = loop_client("confirm", "b", &wire);
+        let relay_a = DeviceKey::from_seed([133; 32]).public();
+        let relay_b = DeviceKey::from_seed([134; 32]).public();
         b.add_contact(
-            &record_with_dead_mailbox(a.public_key(), &url_a),
+            &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
         .expect("B adds A");
         a.add_contact(
-            &record_with_dead_mailbox(b.public_key(), &url_b),
+            &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.transport.online().await;
 
         // When
         let receipt = a
@@ -4221,7 +4226,15 @@ mod tests {
 
         // …and it survives a reopen: the ack is transient, the record isn't.
         drop(a);
-        let a = open_homed("confirm", "a", &url_a).await;
+        let key_path = temp_key("confirm", "a");
+        let a = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
+            &key_path,
+            ClientConfig::default(),
+            TestClock::new(),
+            SystemClock,
+            TestTransport::new(),
+        );
         assert_eq!(
             a.history(receipt.conversation).expect("A history")[0].confirmed,
             vec![b.public_key()],
@@ -4425,6 +4438,7 @@ mod tests {
 
     #[tokio::test]
     async fn send__should_keep_delivering_after_the_relays_disappear() {
+        // REAL-NETWORK SMOKE (P7, transport.md §8): an established QUIC path surviving relay shutdown.
         // Given: A and B, each homed to its own relay, already talking —
         // the first send rendezvouses through B's relay and establishes a
         // peer path.
@@ -4479,6 +4493,7 @@ mod tests {
 
     #[tokio::test]
     async fn send__should_fall_back_to_the_mailbox_when_the_peer_is_offline() {
+        // REAL-NETWORK SMOKE (P7, transport.md §8): a real dial failing within its budget.
         // Given: B's record is known (relay URL + dead mailbox) but B is not
         // running at all — the ordinary case, and the one that must not
         // regress: a direct attempt that fails costs a bounded moment and
@@ -5288,45 +5303,40 @@ mod tests {
         // deposit fans out to every recipient the relay hosts, so skipping on
         // "any recipient acked" would silently lose C's copy. This is the
         // regression test for that hazard.
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let (_relay_b, url_b) = spawn_test_relay().await;
-        let a = open_homed_with("shared", "a", &url_a, Duration::from_millis(300)).await;
-        let b = open_homed("shared", "b", &url_b).await;
+        let wire = Loopback::new();
+        let (a, a_net, a_clock) = loop_client("shared", "a", &wire);
+        let (b, _b_net, _b_clock) = loop_client("shared", "b", &wire);
+        let relay_a = DeviceKey::from_seed([138; 32]).public();
         b.add_contact(
-            &record_with_dead_mailbox(a.public_key(), &url_a),
+            &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
         .expect("B adds A");
-        b.transport.online().await;
         let carol = DeviceKey::from_seed([42; 32]).public();
-        // One shared mailbox string for both — what a shared relay looks like.
-        let mailbox = format!("{}@203.0.113.9:1", hex::encode(&b.public_key().0));
-        let shared = |key: PublicKey, url: &str| {
-            ContactRecord::new(
-                vec![key],
-                vec![],
-                vec![RelayEntry {
-                    mailbox: mailbox.clone(),
-                    relay_url: Some(url.to_string()),
-                }],
-            )
-        };
-        a.add_contact(&shared(b.public_key(), &url_b), Some("b".to_string()))
+        // One shared mailbox for both — what a shared relay looks like. The
+        // relay and carol are both silent: held dials, deadlines on the
+        // TestClock (carol's cold probe, then the relay's full patience).
+        let shared_relay = DeviceKey::from_seed([139; 32]).public();
+        let shared = |key: PublicKey| routed_record(key, &shared_relay);
+        a.add_contact(&shared(b.public_key()), Some("b".to_string()))
             .expect("A adds B");
-        a.add_contact(&shared(carol, &url_a), Some("c".to_string()))
+        a.add_contact(&shared(carol), Some("c".to_string()))
             .expect("A adds C");
+        a_net.dial.hold(&carol);
+        a_net.dial.hold(&shared_relay);
 
         // When
-        let result = a
-            .send(
-                &[
-                    a.resolve_contact("b").expect("resolve b"),
-                    a.resolve_contact("c").expect("resolve c"),
-                ],
-                b"hello both".to_vec(),
-                vec![],
-            )
-            .await;
+        let recipients = [
+            a.resolve_contact("b").expect("resolve b"),
+            a.resolve_contact("c").expect("resolve c"),
+        ];
+        let (result, ()) =
+            tokio::join!(a.send(&recipients, b"hello both".to_vec(), vec![]), async {
+                a_clock.wait_for_sleepers(1).await;
+                a_clock.advance(Duration::from_millis(600)); // carol's probe
+                a_clock.wait_for_sleepers(1).await;
+                a_clock.advance(ClientConfig::default().connect_timeout);
+            },);
 
         // Then: B took it directly, but the shared relay is still owed —
         // C has no other way to ever see this message
@@ -5346,16 +5356,15 @@ mod tests {
         // sender's first message goes through the mailbox (where the relay's
         // caps and the quarantine view are the policy), never straight to
         // our disk.
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let (_relay_b, url_b) = spawn_test_relay().await;
-        let a = open_homed_with("gate", "a", &url_a, Duration::from_millis(600)).await;
-        let b = open_homed("gate", "b", &url_b).await;
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("gate", "a", &wire);
+        let (b, _b_net, _b_clock) = loop_client("gate", "b", &wire);
+        let relay_b = DeviceKey::from_seed([135; 32]).public();
         a.add_contact(
-            &record_with_dead_mailbox(b.public_key(), &url_b),
+            &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
         .expect("A adds B");
-        b.transport.online().await;
         let for_b = sealed_for(&a.device, b.public_key(), b"psst");
 
         // When
@@ -5374,21 +5383,21 @@ mod tests {
         // Being *allowed to push* must still not mean being allowed to write
         // arbitrary history into our store — not even our own relay can do
         // that (it indexes deposits per recipient key).
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let (_relay_b, url_b) = spawn_test_relay().await;
-        let a = open_homed_with("addressed", "a", &url_a, Duration::from_millis(600)).await;
-        let b = open_homed("addressed", "b", &url_b).await;
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("addressed", "a", &wire);
+        let (b, _b_net, _b_clock) = loop_client("addressed", "b", &wire);
+        let relay_a = DeviceKey::from_seed([136; 32]).public();
+        let relay_b = DeviceKey::from_seed([137; 32]).public();
         a.add_contact(
-            &record_with_dead_mailbox(b.public_key(), &url_b),
+            &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
         .expect("A adds B");
         b.add_contact(
-            &record_with_dead_mailbox(a.public_key(), &url_a),
+            &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
         .expect("B adds A");
-        b.transport.online().await;
         let elsewhere = DeviceKey::from_seed([43; 32]).public();
         let for_carol = sealed_for(&a.device, elsewhere, b"not for you");
 
@@ -5411,6 +5420,7 @@ mod tests {
 
     #[tokio::test]
     async fn backfill_by_key__should_reach_a_peer_via_its_relay_across_two_relays() {
+        // REAL-NETWORK SMOKE (P7, transport.md §8): cross-relay rendezvous, by key alone.
         // Given: two relay services; A homes to one, B to the other — the
         // D0b acceptance shape (never a single shared relay). B knows only
         // A's *key* plus A's stored ContactRecord naming A's relay URL.
@@ -5418,7 +5428,7 @@ mod tests {
         let (_relay_b, url_b) = spawn_test_relay().await;
         let a = open_homed("bykey", "server", &url_a).await;
         let b = open_homed("bykey", "client", &url_b).await;
-        befriend(&a, &b); // the D0c gate serves contacts only
+        befriend(&a.state, b.public_key()); // the D0c gate serves contacts only
         a.transport.online().await; // A must be homed before B rendezvouses via its relay
 
         let author = DeviceKey::from_seed([5; 32]);
@@ -5512,7 +5522,7 @@ mod tests {
         );
 
         // When: A stores B's record — B is now a contact and gets served
-        befriend(&a, &b);
+        befriend(&a.state, b.public_key());
         let fetched = b
             .backfill_addr(conversation, a.transport.peer())
             .await
@@ -5536,7 +5546,7 @@ mod tests {
         let b = Client::open_or_create(&temp_key("forward", "client"))
             .await
             .expect("open B");
-        befriend(&a, &b);
+        befriend(&a.state, b.public_key());
         let author = DeviceKey::from_seed([4; 32]);
         let msgs = chain(&author, b.public_key(), 5);
         let conversation = msgs[0].id();
@@ -5566,12 +5576,10 @@ mod tests {
         // (homed to its own relay); B — on a different relay — receives only
         // the latest message, as a mid-conversation joiner would. B holds
         // A's record (key + relay URL), as any messageable contact does.
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let (_relay_b, url_b) = spawn_test_relay().await;
-        let a = open_homed("autosync", "server", &url_a).await;
-        let b = open_homed("autosync", "client", &url_b).await;
-        befriend(&a, &b);
-        a.transport.online().await;
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("autosync", "server", &wire);
+        let (b, _b_net, _b_clock) = loop_client("autosync", "client", &wire);
+        befriend(&a.state, b.public_key());
 
         let msgs = chain(&a.device, b.public_key(), 3);
         let conversation = msgs[0].id();
@@ -5585,7 +5593,7 @@ mod tests {
             vec![],
             vec![RelayEntry {
                 mailbox: "unused@203.0.113.1:1".to_string(),
-                relay_url: Some(url_a.clone()),
+                relay_url: Some("http://203.0.113.1:1".to_string()),
             }],
         );
         b.add_contact(&record, Some("a".to_string()))
@@ -5650,10 +5658,10 @@ mod tests {
         // Given: B (homed, serving) holds Carol's record; A holds B as a
         // dialable contact and is in B's contact store. Carol herself is
         // unknown to A and offline — the one-way-add shape (design §1).
-        let (_relay, url) = spawn_test_relay().await;
-        let a = open_homed("learn", "asker", &url).await;
-        let b = open_homed("learn", "responder", &url).await;
-        befriend(&b, &a); // B's gate serves A
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("learn", "asker", &wire);
+        let (b, _b_net, _b_clock) = loop_client("learn", "responder", &wire);
+        befriend(&b.state, a.public_key()); // B's gate serves A
         let carol = DeviceKey::from_seed([21; 32]);
         let carol_record = signed_record(
             &carol,
@@ -5670,12 +5678,11 @@ mod tests {
             vec![],
             vec![RelayEntry {
                 mailbox: "unused@203.0.113.1:1".to_string(),
-                relay_url: Some(url.clone()),
+                relay_url: Some("http://203.0.113.1:1".to_string()),
             }],
         );
         a.add_contact(&b_record, Some("bob".to_string()))
             .expect("add bob");
-        b.transport.online().await;
         let contacts_dir =
             std::path::PathBuf::from(format!("{}.state", temp_key("learn", "asker")))
                 .join("contacts");
@@ -5717,21 +5724,31 @@ mod tests {
         // Given: Carol is A's contact via a *stale* record (right relay
         // URL, outdated mailbox); Carol is online with a fresh profile and
         // serves A (the record-freshness case, design §7)
-        let (_relay, url) = spawn_test_relay().await;
-        let a = open_homed("fresh", "asker", &url).await;
-        let c = open_homed("fresh", "carol", &url).await;
-        befriend(&c, &a);
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("fresh", "asker", &wire);
+        let (c, _c_net, _c_clock) = loop_client("fresh", "carol", &wire);
+        // Carol's fresh profile — written straight to state, as `open_homed`
+        // did (`build_own_record` reads it when she answers for herself).
+        c.state
+            .save_profile(
+                "carol",
+                &[RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some("http://203.0.113.1:1".to_string()),
+                }],
+            )
+            .expect("save profile");
+        befriend(&c.state, a.public_key());
         let stale = ContactRecord::new(
             vec![c.public_key()],
             vec![],
             vec![RelayEntry {
                 mailbox: "stale@203.0.113.1:1".to_string(),
-                relay_url: Some(url.clone()),
+                relay_url: Some("http://203.0.113.1:1".to_string()),
             }],
         );
         a.add_contact(&stale, Some("carol".to_string()))
             .expect("add carol");
-        c.transport.online().await;
 
         // When
         let answers = a.who_is(c.public_key()).await.expect("who_is").answers;
@@ -6123,7 +6140,7 @@ mod tests {
 
         // When: the same requester asks as a contact (fresh connection —
         // the gate resolves per connection)
-        befriend(&a, &c);
+        befriend(&a.state, c.public_key());
         let connection = net::connect_peer(
             &c.transport,
             &a.transport.peer(),
@@ -6476,34 +6493,48 @@ mod tests {
     #[tokio::test]
     async fn history__should_mark_crossed_in_flight_on_both_clients() {
         // Given: alice and bob share a genesis, then reply concurrently —
-        // relays down, so neither sees the other's until the copies land
-        let open = |name: &'static str| async move {
+        // each deposit is taken by a scripted relay, and the copies cross by
+        // direct state transfer (the crossing is what the flag is about; the
+        // dial strings' endpoint ids double as the recipient keys)
+        let open = |name: &'static str| {
             let key = temp_key("crossed", name);
             keystore::create(&key).expect("key");
-            Client::open_with(
+            let net = TestTransport::new();
+            let client = Client::with_transport(
+                keystore::load(&key).expect("load key"),
                 &key,
-                ClientConfig {
-                    connect_timeout: Duration::from_millis(300),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("open")
+                ClientConfig::default(),
+                TestClock::new(),
+                SystemClock,
+                net.clone(),
+            );
+            (client, net)
         };
-        let alice = open("alice").await;
-        let bob = open("bob").await;
+        let (alice, a_net) = open("alice");
+        let (bob, b_net) = open("bob");
         let contact = |key: PublicKey| {
             vec![Contact {
                 keys: vec![key],
                 relays: vec![format!("{}@203.0.113.7:1", hex::encode(&key.0))],
             }]
         };
-        let result = alice
+        for _ in 0..3 {
+            a_net
+                .dial
+                .connect(&bob.public_key())
+                .reply(deposited_frame());
+        }
+        b_net
+            .dial
+            .connect(&alice.public_key())
+            .reply(deposited_frame());
+        alice
             .send(&contact(bob.public_key()), b"genesis".to_vec(), vec![])
-            .await;
-        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+            .await
+            .expect("send");
         let conversation = alice.state.conversations()[0];
-        let copy = |from: &Client, to: &Client| {
+        type LoopClient = Client<TestClock, SystemClock, TestTransport>;
+        let copy = |from: &LoopClient, to: &LoopClient| {
             for envelope in from.state.load_envelopes(conversation).expect("load") {
                 to.state
                     .store_envelope(conversation, &envelope)
@@ -6701,10 +6732,21 @@ mod tests {
         // the same-person evidence alice will hold); alice has both as
         // contact entries and a conversation whose membership carries all
         // three keys via the phone's send-to-self.
-        let (_relay, url) = spawn_test_relay().await;
-        let phone = open_homed("drill", "phone", &url).await;
-        let alice = open_homed("drill", "alice", &url).await;
-        befriend(&phone, &alice); // alice is served by the phone
+        let wire = Loopback::new();
+        let (phone, _p_net, _p_clock) = loop_client("drill", "phone", &wire);
+        let (alice, _a_net, _a_clock) = loop_client("drill", "alice", &wire);
+        // The phone's profile — `my_record` reads it (as `open_homed` wrote).
+        phone
+            .state
+            .save_profile(
+                "phone",
+                &[RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some("http://203.0.113.1:1".to_string()),
+                }],
+            )
+            .expect("save profile");
+        befriend(&phone.state, alice.public_key()); // alice is served by the phone
         let laptop = DeviceKey::from_seed([94; 32]);
         let laptop_link = SignedAttestation::new(
             Attestation {
@@ -6755,7 +6797,6 @@ mod tests {
         // When: the phone repudiates the lost laptop; alice's next
         // freshness pull on the phone brings the fresh record
         phone.repudiate(laptop.public()).expect("repudiate");
-        phone.transport.online().await;
         let outcome = alice.who_is(phone.public_key()).await.expect("pull");
         assert!(!outcome.answers.is_empty());
 
@@ -6779,16 +6820,16 @@ mod tests {
     async fn who_is__should_carry_the_responders_vouch_as_an_endorsement() {
         // Given: B holds Carol's record and A as a contact; A holds B as
         // a dialable contact ("bob")
-        let (_relay, url) = spawn_test_relay().await;
-        let a = open_homed("endorse", "asker", &url).await;
-        let b = open_homed("endorse", "responder", &url).await;
-        befriend(&b, &a);
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("endorse", "asker", &wire);
+        let (b, _b_net, _b_clock) = loop_client("endorse", "responder", &wire);
+        befriend(&b.state, a.public_key());
         let b_record = ContactRecord::new(
             vec![b.public_key()],
             vec![],
             vec![RelayEntry {
                 mailbox: "bb@203.0.113.2:2".to_string(),
-                relay_url: Some(url.clone()),
+                relay_url: Some("http://203.0.113.1:1".to_string()),
             }],
         );
         a.add_contact(&b_record, Some("bob".to_string()))
@@ -6797,7 +6838,6 @@ mod tests {
         let carol_record = signed_record(&carol, "Carol", 0, mailbox_only("cc@203.0.113.9:9"));
         b.add_contact(&carol_record, Some("Carrie".to_string()))
             .expect("add carol");
-        b.transport.online().await;
 
         // When: A asks before B has vouched
         let outcome = a.who_is(carol.public()).await.expect("who_is");
@@ -6846,9 +6886,9 @@ mod tests {
     async fn rewrap__should_make_pre_pairing_history_readable_on_the_paired_device() {
         // Given: the phone holds a fully-sealed conversation from before
         // the laptop's key existed; both home to a relay for dial-by-key
-        let (_relay, url) = spawn_test_relay().await;
-        let phone = open_homed("rewrap", "phone", &url).await;
-        let laptop = open_homed("rewrap", "laptop", &url).await;
+        let wire = Loopback::new();
+        let (phone, _p_net, _p_clock) = loop_client("rewrap", "phone", &wire);
+        let (laptop, _l_net, _l_clock) = loop_client("rewrap", "laptop", &wire);
         let author = DeviceKey::from_seed([60; 32]);
         let msgs = sealed_chain(&author, phone.public_key(), &[b"one", b"two", b"three"]);
         let conversation = msgs[0].id();
@@ -6872,11 +6912,10 @@ mod tests {
                 vec![],
                 vec![RelayEntry {
                     mailbox: "unused@203.0.113.1:1".to_string(),
-                    relay_url: Some(url.clone()),
+                    relay_url: Some("http://203.0.113.1:1".to_string()),
                 }],
             ))
             .expect("recognize back");
-        phone.transport.online().await;
 
         // When: the D2a-style full flow — the laptop holds only the tip,
         // backfills the skeleton by key, then pulls re-wraps
@@ -6935,7 +6974,7 @@ mod tests {
         let msgs = sealed_chain(&author, phone.public_key(), &[b"secret"]);
         let id = msgs[0].id();
         phone.state.store_envelope(id, &msgs[0]).unwrap();
-        befriend(&phone, &alice);
+        befriend(&phone.state, alice.public_key());
 
         // When: the contact asks for re-wraps
         let connection = net::connect_peer(
@@ -7089,6 +7128,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_client__should_dial_by_key_and_home_without_a_reopen() {
+        // REAL-NETWORK SMOKE (P7, transport.md §8): homing + dial-by-key rendezvous through a real iroh relay.
         // Given: B homed + serving; A is a FRESH client — key created this
         // run, no profile yet (the new-participant moment from the D2c
         // field run, where who-is was dead until an app restart)
@@ -7097,7 +7137,7 @@ mod tests {
         let a = Client::open_or_create(&temp_key("rebind5", "newborn"))
             .await
             .expect("open A");
-        befriend(&b, &a);
+        befriend(&b.state, a.public_key());
         a.add_contact(
             &ContactRecord::new(
                 vec![b.public_key()],
@@ -7144,10 +7184,10 @@ mod tests {
         // Given: B (A's contact, homed, serving) authored a conversation
         // that includes the unknown key C, and holds C's record. The drain
         // hands A the message — nothing else happens manually.
-        let (_relay, url) = spawn_test_relay().await;
-        let a = open_homed("autowho", "asker", &url).await;
-        let b = open_homed("autowho", "responder", &url).await;
-        befriend(&b, &a);
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("autowho", "asker", &wire);
+        let (b, _b_net, _b_clock) = loop_client("autowho", "responder", &wire);
+        befriend(&b.state, a.public_key());
         let carol = DeviceKey::from_seed([31; 32]);
         let carol_record = signed_record(
             &carol,
@@ -7165,13 +7205,12 @@ mod tests {
                 vec![],
                 vec![RelayEntry {
                     mailbox: "unused@203.0.113.1:1".to_string(),
-                    relay_url: Some(url.clone()),
+                    relay_url: Some("http://203.0.113.1:1".to_string()),
                 }],
             ),
             Some("bob".to_string()),
         )
         .expect("add bob");
-        b.transport.online().await;
         let genesis = message(
             &b.device,
             vec![a.public_key(), carol.public()],
@@ -7480,7 +7519,7 @@ mod tests {
 
         // When: the same requester asks as a contact (fresh connection —
         // the gate is resolved per connection)
-        befriend(&a, &b);
+        befriend(&a.state, b.public_key());
         let connection = net::connect_peer(
             &b.transport,
             &a.transport.peer(),
@@ -7526,7 +7565,7 @@ mod tests {
         let b = Client::open_or_create(&temp_key("whoisself", "client"))
             .await
             .expect("open B");
-        befriend(&a, &b);
+        befriend(&a.state, b.public_key());
         let connection = net::connect_peer(
             &b.transport,
             &a.transport.peer(),

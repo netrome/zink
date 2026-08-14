@@ -348,8 +348,43 @@ assert_eq!(a.flush_outbox().await.expect("flush").delivered, 1);
 
 ## 8. What stays real
 
-A thin, explicitly-labelled smoke tier (P7) stays on real iroh for what only a
-real network proves: handshake/ALPN against a real relay, holepunch and
-relay-fallback, `Endpoint::online()` homing, iroh-blobs streaming, the
-graceful-close drain. P4 proves the adapter first by passing the *existing*
-suite through it before any test migrates.
+The smoke tier (P7): the named set below stays on real iroh because each
+proves something the loopback would fake. Every member carries a
+`REAL-NETWORK SMOKE (P7, transport.md §8)` label at its head; anything
+real-iroh *without* the label is a candidate for migration or deletion, not a
+protected resident. Because smokes measure real timing, they run
+**serialized with one retry** (`.config/nextest.toml`'s `real-network`
+group) — the parallel suite otherwise makes them contend for sockets and QAD
+probes, which is how `keep_delivering` flaked the moment P6/P7 made the rest
+of the suite fast. The in-process suite gets neither concession: it is
+deterministic by construction.
+
+In `zink-client`:
+- `fresh_client__should_dial_by_key_and_home_without_a_reopen` — homing +
+  dial-by-key rendezvous through a real iroh relay.
+- `homed_endpoint__should_report_online_without_waiting_out_probe_timeout` —
+  real `online()` readiness timing.
+- `backfill_by_key__should_reach_a_peer_via_its_relay_across_two_relays` —
+  cross-relay rendezvous by key alone.
+- `send__should_fall_back_to_the_mailbox_when_the_peer_is_offline` — a real
+  dial failing within its budget.
+- `send__should_keep_delivering_after_the_relays_disappear` — an established
+  QUIC path surviving relay shutdown.
+
+In `zink-cli` (whole-file or per-test labels): `walking_skeleton.rs` (every
+layer live, end to end), `images.rs` (real iroh-blobs streaming), and
+outbox's queue-while-down/flush-on-return (a relay restarting at the same
+dial string). The relay crate's wire tests cover handshake/ALPN framing.
+
+The remaining `zink-cli` e2e (contacts, history, threading, live, avatar,
+fanout's two live-path tests, outbox expiry) are a third thing: **CLI-surface
+tests** — they exercise the dev tool's own parsing and rendering over live
+paths, sub-second each, and are neither protocol-logic tests (those are
+in-process) nor network proofs (those are the smokes above). They live and
+die with the CLI's surface.
+
+A small residue of in-process tests still binds real endpoints without
+paying deadlines (local two-endpoint serving-gate tests, and state tests
+that open a client for its store): cheap (~0.1–0.3 s), deterministic, and
+not worth a migration of their own — project 4's module split can convert
+them opportunistically as it touches their files.

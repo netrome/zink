@@ -323,10 +323,33 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   scripting/`home_relays()` all deleted unexercised (§7 records the standing
   rule). Suite: **237/237, wall ~2.4 s (was ~6.0 s)** — the tail is now the
   `who_is` e2e at 2.4 s; clippy clean; wasm unaffected.
-- [ ] **P7 🎯 · Define the real-network smoke tier.** The minimal, explicitly
-  labelled set that stays on real iroh (§4 list). *Done when:* the real-network
-  tests are few, named as smokes, and everything else is in-process.
-- [ ] **P8 · Re-measure + graduate.** Update §3’s table; land the design doc,
+- [x] **P7 · Define the real-network smoke tier.** ✅ 2026-08-14. **Migrated
+  13 more logic tests off real iroh** onto loopback/scripted doubles —
+  crossed-in-flight history (1.3 s → ms), the De7 ack confirmation, both D5
+  decline gates, direct-when-mailbox-dead, the shared-relay
+  no-skip regression, auto-sync heal, the who-is trio
+  (learn/freshness/vouch-endorsement), auto-who-is scoping, re-wrap, the
+  repudiation drill, and the backfill walk. **Deleted two more subprocess
+  duplicates**: `who_is.rs` (resolution logic in-process; the real-network
+  who-is round trip lives in the `fresh_client` smoke) and outbox's De7
+  test (in-process twin migrated). **The named smoke tier** — every member
+  carries a `REAL-NETWORK SMOKE (P7, transport.md §8)` label: zink-client's
+  `fresh_client` (homing + dial-by-key), `homed_endpoint` (`online()`
+  timing), `backfill_by_key` (cross-relay rendezvous), `fall_back_to_the_
+  mailbox` (a real dial failing), `keep_delivering` (established path
+  surviving relay shutdown); zink-cli's `walking_skeleton` (every layer
+  live), `images` (real blob streaming), and outbox queue/flush (relay
+  restart at the same dial string). Remaining zink-cli e2e are a third,
+  explicit category — **CLI-surface tests** (parsing/rendering over live
+  paths, sub-second) — recorded in §8. **Smokes run serialized + one retry**
+  (`.config/nextest.toml` `real-network` group): making the suite fast made
+  them contend for sockets/QAD probes, and `keep_delivering` flaked ~1-in-3
+  until grouped; verified stable over six consecutive full runs. Residue,
+  deliberate: a handful of local two-endpoint serving-gate/state tests bind
+  real endpoints without paying deadlines (~0.1–0.3 s) — project 4 converts
+  them opportunistically. Suite: **235/235, wall ~2.3 s**, zink-client's 76
+  in 0.7 s; clippy clean; wasm unaffected.
+- [ ] **P8 🎯 · Re-measure + graduate.** Update §3’s table; land the design doc,
   clock note, and ADR (§5); record the test-double discipline.
 
 ## 7. Decisions log

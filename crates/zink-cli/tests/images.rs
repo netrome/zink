@@ -1,3 +1,5 @@
+//! REAL-NETWORK SMOKE (P7, transport.md §8): real iroh-blobs streaming —
+//! push to a relay cache, confirmed transfer, fetch + decrypt.
 //! B3 end to end: CLI sends an image (thumbnail + full-res); the recipient
 //! fetches both blobs from the relay cache and decrypts them.
 

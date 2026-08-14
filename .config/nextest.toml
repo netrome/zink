@@ -1,0 +1,18 @@
+# Real-network smokes (transport.md §8) measure real timing — holepunching,
+# homing, relay restarts — so they run serialized (parallel suite load makes
+# them contend for sockets/QAD probes) with one retry as the flake backstop.
+# The in-process suite gets neither: it is deterministic by construction.
+
+[test-groups]
+real-network = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = '''
+test(send__should_keep_delivering_after_the_relays_disappear)
+| test(send__should_fall_back_to_the_mailbox_when_the_peer_is_offline)
+| test(fresh_client__should_dial_by_key_and_home_without_a_reopen)
+| test(homed_endpoint__should_report_online_without_waiting_out_probe_timeout)
+| test(backfill_by_key__should_reach_a_peer_via_its_relay_across_two_relays)
+'''
+test-group = 'real-network'
+retries = 1
