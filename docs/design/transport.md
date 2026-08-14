@@ -352,12 +352,22 @@ The smoke tier (P7): the named set below stays on real iroh because each
 proves something the loopback would fake. Every member carries a
 `REAL-NETWORK SMOKE (P7, transport.md §8)` label at its head; anything
 real-iroh *without* the label is a candidate for migration or deletion, not a
-protected resident. Because smokes measure real timing, they run
-**serialized with one retry** (`.config/nextest.toml`'s `real-network`
-group) — the parallel suite otherwise makes them contend for sockets and QAD
-probes, which is how `keep_delivering` flaked the moment P6/P7 made the rest
-of the suite fast. The in-process suite gets neither concession: it is
-deterministic by construction.
+protected resident.
+
+Smokes measure real timing, which makes racy *premises* the flake source to
+watch. The case that proved it: `keep_delivering` flaked ~1-in-3 the moment
+P6/P7 made the suite fast — its "peer path is established" assertion checked
+a `Stored` ack, but an ack rides relay-routed QUIC just as happily, and
+under a loaded suite the holepunch sometimes hadn't finished before the test
+killed the relays; the second dial then genuinely had no route (and the
+product answer to that, the outbox queue, is by design). The fix is never a
+retry — a retried smoke masks exactly the regression it exists to watch —
+but pinning the premise to an observable fact: `await_direct_path`
+(test-only, on `IrohTransport`) waits on `Connection::paths_stream()` for a
+holepunched `is_ip` path, bounded so a real holepunch regression fails
+loudly instead of hanging. Under load the smoke now waits instead of
+flaking. **Standing rule: a flaky smoke gets its premise pinned, not a retry
+policy.**
 
 In `zink-client`:
 - `fresh_client__should_dial_by_key_and_home_without_a_reopen` — homing +

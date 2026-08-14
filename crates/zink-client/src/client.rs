@@ -4466,6 +4466,27 @@ mod tests {
             .await
             .expect("first send");
         assert_eq!(first.direct_recipients, 1, "the peer path is established");
+        // The ack alone doesn't prove a *direct* path — a `Stored` ack rides
+        // relay-routed QUIC just as happily, and under a loaded suite the
+        // holepunch sometimes hasn't finished yet. The premise of killing
+        // the relays is that a direct path exists to survive on, so wait for
+        // that fact itself. Reactive, on the client's own (real) clock: the
+        // bound is never paid on success — it fires only when holepunching
+        // genuinely failed, the regression this smoke exists to catch.
+        a.clock
+            .timeout(
+                Duration::from_secs(15),
+                a.transport.await_direct_path(
+                    &Peer {
+                        key: b.public_key(),
+                        relays: vec![url_b.clone()],
+                        sockets: vec![],
+                    },
+                    SYNC_ALPN,
+                ),
+            )
+            .await
+            .expect("holepunch a direct path within 15s");
 
         // When: both relay services go away completely — no rendezvous, no
         // mailbox, nothing. This is "restart the relay mid-conversation".

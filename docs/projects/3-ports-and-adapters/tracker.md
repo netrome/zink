@@ -341,10 +341,14 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   live), `images` (real blob streaming), and outbox queue/flush (relay
   restart at the same dial string). Remaining zink-cli e2e are a third,
   explicit category — **CLI-surface tests** (parsing/rendering over live
-  paths, sub-second) — recorded in §8. **Smokes run serialized + one retry**
-  (`.config/nextest.toml` `real-network` group): making the suite fast made
-  them contend for sockets/QAD probes, and `keep_delivering` flaked ~1-in-3
-  until grouped; verified stable over six consecutive full runs. Residue,
+  paths, sub-second) — recorded in §8. **One smoke premise pinned**: making
+  the suite fast surfaced `keep_delivering` flaking ~1-in-3 — its `Stored`-ack
+  assertion never proved a *direct* path (acks ride relay-routed QUIC; the
+  holepunch raced the relay shutdown). Fixed by awaiting the fact itself
+  (`await_direct_path` over `Connection::paths_stream`, bounded) — no
+  retries, no serialization; 8/8 clean full-parallel runs, with load
+  absorbed as honest wait time in that one smoke (§8 records the standing
+  rule: pin a flaky smoke's premise, never retry it). Residue,
   deliberate: a handful of local two-endpoint serving-gate/state tests bind
   real endpoints without paying deadlines (~0.1–0.3 s) — project 4 converts
   them opportunistically. Suite: **235/235, wall ~2.3 s**, zink-client's 76
@@ -373,6 +377,12 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 | Sequencing | Before the module split (project 4): ports move the seams, so the split lands clean. |
 
 ## 8. Follow-ups / parked
+
+- **Relay-side raw timers.** `zink-relay` still calls `tokio::time` directly
+  (the nudge timeout, the blob-GC ticker, wire-test waits) — its `Clock` port
+  is read-only `now()`. The client's `sleep`/`timeout`-bearing port pattern
+  extends there whenever the relay first needs a deterministic timer test;
+  client + CLI are already at zero raw time calls, tests included.
 
 - **Project 4 — module split** (`client.rs` ~6.8 k lines, `app/ui/src/lib.rs`
   ~2.4 k). Sequenced after this; the port seams become the module lines.

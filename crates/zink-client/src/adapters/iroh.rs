@@ -108,6 +108,27 @@ impl IrohTransport {
             sockets: addr.ip_addrs().copied().collect(),
         }
     }
+
+    /// Wait until a connection to `to` holds a holepunched direct (non-relay)
+    /// path. A delivery ack alone doesn't prove one — acks ride relay-routed
+    /// QUIC just as happily — so a smoke whose premise is "a direct path
+    /// exists" (e.g. before killing the relays) waits for the fact itself.
+    /// The learned direct address outlives this probe connection in the
+    /// endpoint's remote map, which is what a later fresh dial relies on.
+    #[cfg(test)]
+    pub(crate) async fn await_direct_path(&self, to: &Peer, alpn: &[u8]) {
+        let conn = self
+            .dial(to, alpn)
+            .await
+            .expect("dial for the direct-path probe");
+        let mut lists = std::pin::pin!(conn.connection.paths_stream());
+        while let Some(list) = lists.next().await {
+            if list.iter().any(|path| path.is_ip()) {
+                return;
+            }
+        }
+        panic!("connection closed before holepunching a direct path");
+    }
 }
 
 impl Dial for IrohTransport {
