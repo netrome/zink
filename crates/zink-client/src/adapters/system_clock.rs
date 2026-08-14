@@ -27,3 +27,10 @@ impl WallClock for SystemClock {
         u64::try_from(ms).expect("unix time in ms exceeds u64")
     }
 }
+
+/// Wall time for the two call-sites outside a `Client` (`state.rs`
+/// first-seen, `sync.rs` reach stamp); everywhere else use an injected
+/// clock port.
+pub(crate) fn now_ms() -> u64 {
+    SystemClock.now_ms()
+}

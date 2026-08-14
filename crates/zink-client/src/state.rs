@@ -110,7 +110,7 @@ impl ClientState {
         if path.exists() {
             return;
         }
-        let now = crate::client::now_ms();
+        let now = crate::adapters::system_clock::now_ms();
         if let Err(error) = write_atomic(&path, now.to_string().as_bytes()) {
             tracing::debug!(%error, "could not record a conversation's first-seen time");
         }

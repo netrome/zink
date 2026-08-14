@@ -169,25 +169,33 @@ crates/zink-client/src/
 
 **Tier 1 — the shared-state extractions (de-tangle before moving)**
 
-- [ ] **M1 · `reach.rs`: the `ReachLedger`.** New top-level leaf module —
-  both `client.rs` and `sync.rs` import *downward* — absorbing `Reach` +
-  the `ReachMap` alias (from `sync.rs`) and `reach_of`/`note_reach`/
-  `persist_unreachable`/`load_unreachable`/`direct_budget`/`FAIL_COOLDOWN_MS`
-  (from `client.rs`). A cheap-clone handle owning the lock; interface:
-  `restore(persisted, now)` (drops cooled + future-dated),
-  `dial_budget(key, now, connect_timeout)` (absorbs `reach_of` +
-  `direct_budget`), `noted_failure`/`noted_reached`/`noted_inbound`
-  (the evidence semantics, named — today they're closures at four call
-  sites), `unreachable_snapshot(now)` (the prune rules; caller writes).
-  **No clock inside** (every method takes `now`), **no I/O inside**
-  (`restore` takes rows, snapshot returns rows) — so its unit tests are
-  plain calls with fabricated timestamps: cooldown boundary, evidence TTL,
-  known/unknown budget caps, rewind drops, snapshot pruning, stored-vs-
-  declined semantics. `SyncHandler::new` takes a `ReachLedger`; the
-  `crate::client::now_ms` upward import for reach dies (the handler passes
-  its own reading). *Done when:* no `.lock()` on reach outside `reach.rs`;
-  the `ReachMap` alias is gone; behavior pinned by the existing delivery
-  tests unchanged.
+- [x] **M1 · `reach.rs`: the `ReachLedger`.** ✅ 2026-08-14. New top-level
+  leaf module (319 lines incl. its tests) absorbing `Reach` + the `ReachMap`
+  alias from `sync.rs` and `reach_of`/`note_reach`/`persist_unreachable`'s
+  prune half/`load_unreachable`/`direct_budget`/`FAIL_COOLDOWN_MS` from
+  `client.rs`. A cheap-clone handle owning the lock; the notes landed as
+  **`note_delivered` / `note_seen` / `note_failed`** (sharper than the
+  sketch's `noted_*`): `note_delivered` (a `Stored` ack) also clears a
+  pending cooldown — so a concurrent dial's failure can't suppress the next
+  send to a peer that just took a message — while `note_seen` (a decline,
+  or an inbound connection) deliberately doesn't; both patterns existed as
+  closures at the call sites, now named and unit-pinned. `restore` and
+  `unreachable_snapshot` are data-in/data-out (no clock, no I/O inside —
+  every method takes `now`); `dial_budget` wraps the still-pure
+  `direct_budget`, whose policy test moved verbatim. **Poisoned-lock policy
+  decided once**, as promised: `PoisonError::into_inner` at the single lock
+  site (was three different stances) — no invariant spans entries, evidence
+  is advisory, and the drain path's `seen` set already used the same stance.
+  `SyncHandler` takes a `ReachLedger`; the free `now_ms()` moved to
+  `adapters/system_clock.rs` (state/sync now import the P1 wall-clock
+  shortcut from the adapter it names, strengthening `adapters.rs`'s "no
+  real clock outside" audit line). The two `load_unreachable` tests were
+  re-expressed against the public surface (dial suppressed / not, instead
+  of map internals) with fabricated timestamps — no fs, no cleanup; three
+  new tests pin delivered-clears / seen-doesn't / snapshot-prunes.
+  **Proof:** 238/238 (was 235: −3 moved, +6 in `reach.rs`), clippy clean,
+  `wasm32` compiles; `client.rs` 7,696 → 7,490, `sync.rs` 312 → 285; zero
+  reach `.lock()` outside `reach.rs`, `ReachMap` gone.
 - [ ] **M2 · `client/test_kit.rs`.** The ~25 shared helpers graduate out of
   `mod tests` into a `#[cfg(test)]` kit module (the pattern the transport
   doubles set: the contract kit lives beside what it tests). `mod tests`

@@ -18,6 +18,8 @@ pub mod keystore;
 mod net;
 #[cfg(not(target_family = "wasm"))]
 mod ports;
+#[cfg(not(target_family = "wasm"))]
+mod reach;
 #[cfg(target_family = "wasm")]
 mod spike;
 #[cfg(not(target_family = "wasm"))]
