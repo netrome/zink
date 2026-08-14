@@ -134,3 +134,8 @@ pub struct ConnError(pub String);
 #[derive(Debug, Clone, Error)]
 #[error("{0}")]
 pub struct InvalidRelayUrl(pub String);
+
+#[cfg(test)]
+mod test_transport;
+#[cfg(test)]
+pub(crate) use test_transport::TestTransport;

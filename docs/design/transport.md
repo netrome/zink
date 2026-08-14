@@ -1,8 +1,8 @@
 # Transport ports
 
-Status: **designed 2026-08-13 (P3); iroh adapter landed 2026-08-13 (P4).**
-Project [3-ports-and-adapters](../projects/3-ports-and-adapters/tracker.md).
-The test-double kit lands in P5; this doc is edited in place as it does.
+Status: **designed 2026-08-13 (P3); iroh adapter 2026-08-13 (P4); double kit
+2026-08-14 (P5).** Project
+[3-ports-and-adapters](../projects/3-ports-and-adapters/tracker.md).
 Companion to the client clock ports (`zink-client/src/ports/clock.rs`).
 
 ## 1. Why
@@ -278,42 +278,54 @@ the capability it exercises (`sync_request(conn: &impl Request, …)`,
 
 ## 7. The double kit
 
-Small, per-capability, composable — never a network model:
+Small, per-capability, composable — never a network model. Landed in P5 as
+`ports/transport/test_transport.rs`:
 
-1. **One double per capability**, composed per scenario through a delegating
-   `TestTransport { dial, blobs, accept, home }`; undriven capabilities are
-   `Unused`, which errors loudly — never silently succeeds.
-2. **Controls, not simulation**: hold (never resolves), release (resolves now
-   — held *then* released is "timed out, then arrived"), fail (now, or on the
-   Nth operation — mid-send failure), kill (a connection dies; pending and
-   future ops error). No latency or loss models — the test is the scenario.
-3. **Doubles speak real frames**: scripted responses are real
-   `MailboxResult`/`SyncResult` BORSH bytes built with `zink-protocol` (pure,
-   available to tests). Doubles script *which* frame comes back; they never
-   reimplement protocol logic.
-4. **Honest defaults**: `accept_uni` and `online()` pend until the test acts —
-   silence is a network's truthful default.
+1. **One double per capability**, composed through `TestTransport
+   { dial, blobs, accept, home }` (one `Clone`-shared handle scripts and
+   inspects everything).
+2. **Controls, not simulation**: hold (never resolves — the caller's deadline
+   drops it), connect-after-hold (the next attempt succeeds: "down, then came
+   back"), fail (a dial refused; a request that breaks mid-operation). No
+   latency or loss models — the test is the scenario. Connection death
+   mid-await (`kill`) arrives with the subscribe-loop migrations (P6).
+3. **Doubles speak real frames**: scripted replies are exact
+   `MailboxResponse`/`SyncResponse` BORSH bytes built with `zink-protocol`
+   (pure, available to tests). Doubles script *which* frame comes back; they
+   never inspect requests or reimplement protocol logic.
+4. **Honest defaults, never silent success**: remote-initiated capabilities
+   default to *silence* — `accept`, `accept_uni` and `online()` pend until
+   the test acts, exactly as a quiet network would — while an **unscripted
+   domain-initiated action panics** (a returned error would vanish into the
+   domain's best-effort handling; silence would hang the test instead of
+   failing it).
 5. **Two-client wiring is wiring**: P6's tests need two in-process clients
    talking; a loopback joining one side's `Dial` to the other's `Accept` is
    channel plumbing. The moment it grows behavior (ordering, timing, loss), it
    has become the forbidden simulator.
 
-Expected shapes: `ScriptedDial` (per-key outcome scripts with hold/release
-handles), `TestConn` (`Request + AcceptUni`: scripted frame→frame, a test-side
-frame sender, `kill()`), `MemBlobs`, `ChannelAccept`, `TestHome`. The
-archetype (tracker §4):
+The kit: `ScriptedDial` (per-key outcome queues: connect / refuse / hold,
+plus a `dialed` counter — `dialed == 0` is the assertion that evidence
+suppressed a dial entirely), `TestConn` (`Request + AcceptUni`: exact-frame
+replies with fail/hold controls, a sent-request recorder, a uni-frame
+sender), `ScriptedDialBlobs`/`TestBlobConn` (push recorder, `serve`d
+fetches), `ChannelAccept` (inject an inbound request, await the served
+response), `TestHome` (`set_online`). The archetype (tracker §4), landed as
+`delivery__should_recover_when_a_dead_relay_returns`, 7 ms:
 
 ```rust
-// Given — both relays silent, a client on a TestClock
-dial.hold(relay_a); dial.hold(relay_b);
-// When — send fans out; both deadlines park; one advance fires them
-let send = spawn(client.send(…));
-clock.wait_for_sleepers(2).await;       // the parallelism assertion
-clock.advance(CONNECT_TIMEOUT);
-// Then — fallback observed, then recovery, in ~0 ms of real time
-assert!(outbox_owes(&send.await));
-dial.release(relay_a);
-client.flush_outbox().await;
+// Given — the relay silent, a client on a TestClock
+net.dial.hold(&relay);
+// When — the send's deadline parks, one advance fires it
+let (result, ()) = tokio::join!(a.send(&recipients, msg, vec![]), async {
+    clock.wait_for_sleepers(1).await;
+    clock.advance(DEADLINE);
+});
+// Then — fallback observed…
+assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+// …and the relay returns: the next dial connects, the deposit is taken
+net.dial.connect(&relay).reply(deposited_frame());
+assert_eq!(a.flush_outbox().await.expect("flush").delivered, 1);
 ```
 
 ## 8. What stays real

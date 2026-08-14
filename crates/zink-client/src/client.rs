@@ -145,6 +145,31 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
         let transport =
             IrohTransport::bind(&device, &home_relays, zink_protocol::MAX_SYNC_REQUEST_BYTES)
                 .await?;
+        Ok(Self::assemble(
+            device, state, config, clock, wall_clock, transport,
+        ))
+    }
+
+    /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
+    /// device reaches us on `SYNC_ALPN` to backfill history when it knows
+    /// our address explicitly (same-LAN / dev tooling). The deployment path
+    /// is dial-by-key via our home relay (`backfill_by_key`, D0b).
+    pub fn sync_address(&self) -> Result<String, Error> {
+        self.transport.sync_address()
+    }
+}
+
+impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
+    /// Wire a client around an already-built transport — shared by
+    /// `with_device` (real iroh) and the test constructor (doubles).
+    fn assemble(
+        device: DeviceKey,
+        state: ClientState,
+        config: ClientConfig,
+        clock: C,
+        wall_clock: W,
+        transport: N,
+    ) -> Self {
         // Serve peer history sync on our own transport (D0): contacts-only
         // gate (D0c); serves fresh self-records for `who-is-this` (D1a), so
         // the handler needs signing — its own key instance, rebuilt from the
@@ -164,7 +189,7 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
         let serve_task = n0_future::task::AbortOnDropHandle::new(n0_future::task::spawn(
             crate::sync::serve(transport.clone(), handler),
         ));
-        Ok(Self {
+        Self {
             device,
             transport,
             state,
@@ -175,19 +200,30 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
             reach,
             clock,
             wall_clock,
-        })
+        }
     }
 
-    /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
-    /// device reaches us on `SYNC_ALPN` to backfill history when it knows
-    /// our address explicitly (same-LAN / dev tooling). The deployment path
-    /// is dial-by-key via our home relay (`backfill_by_key`, D0b).
-    pub fn sync_address(&self) -> Result<String, Error> {
-        self.transport.sync_address()
+    /// A client on injected doubles: no endpoint, no I/O — the network is
+    /// whatever the test scripts.
+    #[cfg(test)]
+    fn with_transport(
+        device: DeviceKey,
+        key_path: &str,
+        config: ClientConfig,
+        clock: C,
+        wall_clock: W,
+        transport: N,
+    ) -> Self {
+        Self::assemble(
+            device,
+            ClientState::open(key_path),
+            config,
+            clock,
+            wall_clock,
+            transport,
+        )
     }
-}
 
-impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     /// Register the edge's sink for **directly delivered** messages (D5):
     /// messages a peer handed us over the sync ALPN, with no mailbox and so
     /// no nudge to drain. It is the direct-path sibling of `subscribe`'s
@@ -3418,8 +3454,9 @@ pub(crate) fn now_ms() -> u64 {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::ports::transport::Home;
-    use zink_protocol::{KeyCommitment, MessageCore};
+    use crate::ports::clock::{TestClock, TestWallClock};
+    use crate::ports::transport::{Home, TestTransport};
+    use zink_protocol::{KeyCommitment, MessageCore, SyncResponse};
 
     /// A key path in a per-test temp dir (tests run in parallel, so the dir is
     /// namespaced by `test` — a shared root would let one test's cleanup delete
@@ -3862,6 +3899,21 @@ mod tests {
                 relay_url: Some(relay_url.to_string()),
             }],
         )
+    }
+
+    /// A mailbox spec whose endpoint id is `relay_key` — parseable (real id,
+    /// TEST-NET socket), never really dialed: the doubles key on the id.
+    fn mailbox_spec(relay_key: &PublicKey) -> String {
+        format!("{}@203.0.113.1:1", hex::encode(&relay_key.0))
+    }
+
+    /// A relay's `Deposited` ack as exact frame bytes for a scripted conn
+    /// (the id is an idempotency receipt; `deliver` matches any).
+    fn deposited_frame() -> Vec<u8> {
+        zink_protocol::MailboxResponse::new(MailboxResult::Deposited {
+            id: MessageId([0; 32]),
+        })
+        .to_bytes()
     }
 
     #[tokio::test]
@@ -4369,49 +4421,79 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_peer__should_persist_so_the_next_process_skips_the_dial() {
-        // Given: an absent peer with a dialable record. The first send has to
-        // learn it is offline the expensive way — a dial that runs out its
-        // budget. Pre-De6b that lesson died with the process, so the CLI
-        // re-paid it on *every* invocation (measured: 802 / 798 / 794 ms for
-        // three consecutive sends to the same offline peer) and the app on
-        // every start.
-        let (_relay_a, url_a) = spawn_test_relay().await;
-        let a = open_homed_with("reachcache", "a", &url_a, Duration::from_millis(300)).await;
+        // Given: an absent peer with a dialable record (a relay url licenses
+        // the direct path). The first send learns it is offline the expensive
+        // way — a held dial that runs out its 600 ms cold-probe budget, fired
+        // by the TestClock. Pre-De6b that lesson died with the process, so
+        // the CLI re-paid it on *every* invocation.
+        const T0: u64 = 1_700_000_000_000;
         let absent = DeviceKey::from_seed([57; 32]).public();
-        a.add_contact(
-            &record_with_dead_mailbox(absent, &url_a),
-            Some("ghost".to_string()),
-        )
-        .expect("A adds the absent peer");
+        let relay = DeviceKey::from_seed([58; 32]).public();
+        let record = ContactRecord::new(
+            vec![absent],
+            vec![],
+            vec![RelayEntry {
+                mailbox: mailbox_spec(&relay),
+                relay_url: Some("http://203.0.113.1:1".to_string()),
+            }],
+        );
+        let key_path = temp_key("reachcache", "a");
+        keystore::create(&key_path).expect("key");
+        let clock = TestClock::new();
+        let net = TestTransport::new();
+        net.dial.hold(&absent); // the peer is gone
+        net.dial.connect(&relay).reply(deposited_frame()); // its mailbox is fine
+        let a = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
+            &key_path,
+            ClientConfig::default(),
+            clock.clone(),
+            TestWallClock::new(T0),
+            net.clone(),
+        );
+        a.add_contact(&record, Some("ghost".to_string()))
+            .expect("A adds the absent peer");
+        let recipients = [a.resolve_contact("ghost").expect("resolve")];
 
-        // When: one send tries and fails (mailbox is dead too — "queued")
-        let _ = a
-            .send(
-                &[a.resolve_contact("ghost").expect("resolve")],
-                b"anyone home".to_vec(),
-                vec![],
-            )
-            .await;
+        // When: one send pays the probe (the deposit itself lands)
+        let (receipt, ()) = tokio::join!(
+            a.send(&recipients, b"anyone home".to_vec(), vec![]),
+            async {
+                clock.wait_for_sleepers(1).await;
+                clock.advance(Duration::from_millis(600));
+            },
+        );
+        assert_eq!(receipt.expect("send").direct_recipients, 0);
 
         // Then: the failure is on disk…
         let persisted = a.state.unreachable();
         assert_eq!(persisted.len(), 1, "one failed peer recorded");
         assert_eq!(persisted[0].0, absent.0, "…and it is the peer we dialed");
-        // Dropped, not `close()`d: closing after a failed dial waits out
-        // iroh's ~3 s relay-path drain (fast-failure.md F6) and this test
-        // would pay it. The abort line in the log is the accepted price, as
-        // in the CLI harness.
         drop(a);
 
-        // …and a fresh process inherits it, so it spends no dial budget at all
-        let reopened = open_homed_with("reachcache", "a", &url_a, Duration::from_millis(300)).await;
+        // …and a fresh process inherits it: within the cooldown, the next
+        // send makes NO dial to that peer at all — not a shorter one, none.
+        let net = TestTransport::new();
+        net.dial.connect(&relay).reply(deposited_frame());
+        let reopened = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
+            &key_path,
+            ClientConfig::default(),
+            TestClock::new(),
+            TestWallClock::new(T0 + 5_000),
+            net.clone(),
+        );
+        reopened
+            .send(
+                &[reopened.resolve_contact("ghost").expect("resolve")],
+                b"still there?".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("send");
         assert_eq!(
-            direct_budget(
-                reopened.reach_of(&absent),
-                now_ms(),
-                ClientConfig::default().connect_timeout
-            ),
-            None,
+            net.dial.dialed(&absent),
+            0,
             "a known-offline peer must cost a fresh process nothing"
         );
 
@@ -4420,27 +4502,19 @@ mod tests {
 
     #[tokio::test]
     async fn delivery__should_pay_one_deadline_for_two_dead_relays() {
-        // Given: a contact whose record names TWO mailboxes on TEST-NET
-        // (packets vanish, so each deposit runs until its deadline) and no
-        // relay url, so nothing is dialed directly and the only network cost
-        // in this test is the two deposits. The deadlines run on an injected
-        // `TestClock`, so no real time passes.
-        //
-        // The dial strings carry **real endpoint ids**: the `unused@…` form
-        // the other tests use fails at *parse*, instantly, which would make
-        // the send complete without parking a single deadline timer.
+        // Given: a contact whose record names TWO mailboxes, both held
+        // silent by the dial double — each deposit runs until a deadline
+        // only the TestClock moves. No relay url, so nothing is dialed
+        // directly; the only network cost in this test is the two deposits.
         const DEADLINE: Duration = Duration::from_secs(10);
-        let dead_mailbox = |host: u8, seed: u8| RelayEntry {
-            mailbox: format!(
-                "{}@203.0.113.{host}:1",
-                hex::encode(&DeviceKey::from_seed([seed; 32]).public().0)
-            ),
-            relay_url: None,
-        };
+        let relay_key = |seed: u8| DeviceKey::from_seed([seed; 32]).public();
         let key_path = temp_key("twodead", "a");
         keystore::create(&key_path).expect("key");
-        let clock = crate::ports::clock::TestClock::new();
-        let a = Client::with_device(
+        let clock = TestClock::new();
+        let net = TestTransport::new();
+        net.dial.hold(&relay_key(74));
+        net.dial.hold(&relay_key(75));
+        let a = Client::with_transport(
             keystore::load(&key_path).expect("load key"),
             &key_path,
             ClientConfig {
@@ -4449,14 +4523,22 @@ mod tests {
             },
             clock.clone(),
             SystemClock,
-        )
-        .await
-        .expect("open A");
+            net.clone(),
+        );
         a.add_contact(
             &ContactRecord::new(
                 vec![DeviceKey::from_seed([73; 32]).public()],
                 vec![],
-                vec![dead_mailbox(7, 74), dead_mailbox(8, 75)],
+                vec![
+                    RelayEntry {
+                        mailbox: mailbox_spec(&relay_key(74)),
+                        relay_url: None,
+                    },
+                    RelayEntry {
+                        mailbox: mailbox_spec(&relay_key(75)),
+                        relay_url: None,
+                    },
+                ],
             ),
             Some("ghost".to_string()),
         )
@@ -4479,6 +4561,8 @@ mod tests {
         assert_eq!(a.state.outbox().len(), 2, "both relays still owed");
 
         // And: the outbox flush pays the same way, over the same two entries
+        net.dial.hold(&relay_key(74));
+        net.dial.hold(&relay_key(75));
         let (report, ()) = tokio::join!(a.flush_outbox(), async {
             clock.wait_for_sleepers(2).await;
             clock.advance(DEADLINE);
@@ -4489,8 +4573,68 @@ mod tests {
             "still nowhere to deliver"
         );
 
-        drop(a); // `close()` would wait out iroh's drain (fast-failure.md F6)
         let _ = std::fs::remove_dir_all(temp_root("twodead"));
+    }
+
+    #[tokio::test]
+    async fn delivery__should_recover_when_a_dead_relay_returns() {
+        // Given: one relay, held silent — the send falls back to the outbox
+        // on a deadline only the TestClock moves. The §4 archetype: silence,
+        // deterministic timeout, fallback, then recovery — a scenario a real
+        // network won't produce on command.
+        const DEADLINE: Duration = Duration::from_secs(10);
+        let relay = DeviceKey::from_seed([81; 32]).public();
+        let key_path = temp_key("recover", "a");
+        keystore::create(&key_path).expect("key");
+        let clock = TestClock::new();
+        let net = TestTransport::new();
+        net.dial.hold(&relay);
+        let a = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
+            &key_path,
+            ClientConfig {
+                connect_timeout: DEADLINE,
+                ..Default::default()
+            },
+            clock.clone(),
+            SystemClock,
+            net.clone(),
+        );
+        a.add_contact(
+            &ContactRecord::new(
+                vec![DeviceKey::from_seed([80; 32]).public()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: mailbox_spec(&relay),
+                    relay_url: None,
+                }],
+            ),
+            Some("ghost".to_string()),
+        )
+        .expect("add the contact");
+        let recipients = [a.resolve_contact("ghost").expect("resolve")];
+
+        // When: the send times out and is queued…
+        let (result, ()) = tokio::join!(
+            a.send(&recipients, b"catch up later".to_vec(), vec![]),
+            async {
+                clock.wait_for_sleepers(1).await;
+                clock.advance(DEADLINE);
+            },
+        );
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        assert_eq!(a.state.outbox().len(), 1, "owed to the silent relay");
+
+        // …and the relay comes back: the next dial connects, the deposit
+        // is taken
+        net.dial.connect(&relay).reply(deposited_frame());
+        let report = a.flush_outbox().await.expect("flush");
+
+        // Then: recovered, nothing owed — and no real time passed anywhere
+        assert_eq!(report.delivered, 1);
+        assert!(a.state.outbox().is_empty(), "the debt is settled");
+
+        let _ = std::fs::remove_dir_all(temp_root("recover"));
     }
 
     #[test]
@@ -6283,76 +6427,66 @@ mod tests {
 
     #[tokio::test]
     async fn who_is__should_dial_contacts_concurrently_not_serially() {
-        // Given: one reachable responder and three offline contacts whose
-        // relay URLs point at TEST-NET (packets vanish — each dial runs out
-        // the full deadline, the exact field stall diagnosed at D1's close)
-        let (_relay, url) = spawn_test_relay().await;
-        // Like `open_homed`, but with a short dial deadline: A must be
-        // homed to have a relay transport to dial peers through at all.
+        // Given: one responder that answers and three whose dials hang
+        // (the exact field stall diagnosed at D1's close). Every deadline
+        // is the TestClock's, so serial dials would park one timer at a
+        // time — parking all three at once IS the concurrency assertion.
         let key_path = temp_key("conc", "asker");
-        ClientState::open(&key_path)
-            .save_profile(
-                "asker",
-                &[RelayEntry {
-                    mailbox: "unused@203.0.113.1:1".to_string(),
-                    relay_url: Some(url.clone()),
-                }],
-            )
-            .expect("save profile");
         keystore::create(&key_path).expect("create key");
-        let a = Client::open_with(
+        let clock = TestClock::new();
+        let net = TestTransport::new();
+        let responder = DeviceKey::from_seed([39; 32]).public();
+        net.dial.connect(&responder).reply(
+            SyncResponse::new(SyncResult::Known {
+                record: Box::new(ContactRecord::new(vec![responder], vec![], vec![])),
+                endorsements: vec![],
+            })
+            .to_bytes(),
+        );
+        for n in 0..3u8 {
+            net.dial.hold(&DeviceKey::from_seed([40 + n; 32]).public());
+        }
+        let a = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
             &key_path,
-            ClientConfig {
-                connect_timeout: Duration::from_secs(1),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("open A");
-        let b = open_homed("conc", "responder", &url).await;
-        befriend(&b, &a);
-        a.add_contact(
-            &ContactRecord::new(
-                vec![b.public_key()],
+            ClientConfig::default(),
+            clock.clone(),
+            SystemClock,
+            net.clone(),
+        );
+        let dialable = |key: PublicKey, host: u8| {
+            ContactRecord::new(
+                vec![key],
                 vec![],
                 vec![RelayEntry {
-                    mailbox: "unused@203.0.113.1:1".to_string(),
-                    relay_url: Some(url.clone()),
+                    mailbox: format!("unused@203.0.113.{host}:1"),
+                    relay_url: Some(format!("http://203.0.113.{host}:1")),
                 }],
-            ),
-            Some("bob".to_string()),
-        )
-        .expect("add bob");
+            )
+        };
+        a.add_contact(&dialable(responder, 1), Some("bob".to_string()))
+            .expect("add bob");
         for n in 0..3u8 {
             a.add_contact(
-                &ContactRecord::new(
-                    vec![DeviceKey::from_seed([40 + n; 32]).public()],
-                    vec![],
-                    vec![RelayEntry {
-                        mailbox: format!("unused@203.0.113.{}:1", n + 2),
-                        relay_url: Some(format!("http://203.0.113.{}:1", n + 2)),
-                    }],
-                ),
+                &dialable(DeviceKey::from_seed([40 + n; 32]).public(), n + 2),
                 Some(format!("offline{n}")),
             )
             .expect("add offline contact");
         }
-        b.transport.online().await;
 
-        // When: asking about B's key (B answers with its self-record)
-        let started = std::time::Instant::now();
-        let outcome = a.who_is(b.public_key()).await.expect("who_is");
-        let elapsed = started.elapsed();
+        // When: asking about the responder's key (it answers with its
+        // self-record); time moves only after all three doomed dials are
+        // parked together
+        let (outcome, ()) = tokio::join!(a.who_is(responder), async {
+            clock.wait_for_sleepers(3).await;
+            clock.advance(Duration::from_secs(5)); // WHO_IS_DIAL_CAP
+        });
 
-        // Then: the answer arrived, the three dead dials are counted
-        // honestly — and the whole query cost ~one capped dial, not a
-        // serial sum (serial would be ≥ 3 s here)
+        // Then: the answer arrived and the three dead dials are counted
+        // honestly
+        let outcome = outcome.expect("who_is");
         assert_eq!(outcome.answers.len(), 1);
         assert_eq!((outcome.asked, outcome.unreachable), (4, 3));
-        assert!(
-            elapsed < Duration::from_millis(2500),
-            "took {elapsed:?} — dials look serial"
-        );
 
         let _ = std::fs::remove_dir_all(temp_root("conc"));
     }

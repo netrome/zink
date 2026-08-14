@@ -267,16 +267,35 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   cap); blob staging is per-push inside the adapter (no shared `MemStore` —
   `restage_owed` became the synchronous `reload_owed`); `set_profile`'s relay
   diff compares parser-normalized URL strings.
-- [ ] **P5 🎯 · Test-double kit + first migration.** Small composable doubles
-  per capability (`ScriptedDial` / `TestConn` / `MemBlobs` / `ChannelAccept` /
-  `TestHome`, composed via a delegating `TestTransport` with loud `Unused`
-  stubs — transport.md §7), driven together with `TestClock`. Migrate a first
-  batch of logic tests (fan-out, who-is resolution, offline-then-arrive) off
-  subprocess/real-iroh to in-process. *Done when:* the archetype scenario (§4)
-  runs in-process in ms.
+- [x] **P5 · Test-double kit + first migration.** ✅ 2026-08-14. The kit, in
+  `ports/transport/test_transport.rs`: `TestTransport { dial, blobs, accept,
+  home }` (one `Clone`-shared handle scripts and inspects everything) with
+  `ScriptedDial` (per-key connect/refuse/hold queues + a `dialed` counter),
+  `TestConn` (exact-frame replies, fail/hold, request recorder, uni sender),
+  `ScriptedDialBlobs`/`TestBlobConn`, `ChannelAccept` (inject → served
+  response), `TestHome` (`set_online`). One design refinement over the P3
+  sketch, recorded in transport.md §7: instead of literal `Unused` stubs,
+  **honest defaults** — remote-initiated capabilities default to silence
+  (`accept`/`accept_uni`/`online` pend, which the always-running serve loop
+  requires), unscripted domain-initiated actions panic (an `Err` would vanish
+  into best-effort handling; silence would hang the test, not fail it).
+  `Client` gained `assemble` (shared wiring) and a `#[cfg(test)]`
+  `with_transport` constructor — no endpoint, no I/O. Migrated + landed, each
+  deterministic in **≤ 9 ms**: the §4 archetype
+  (`delivery__should_recover_when_a_dead_relay_returns` — silence → one
+  `advance` → outbox fallback → relay returns → flush recovers; a scenario a
+  real network can't produce on command), `who_is` concurrency (1.3 s → 7 ms,
+  `wait_for_sleepers(3)` as the assertion, elapsed-bound retired),
+  `unreachable_peer` persistence (real relay + two homed clients → 9 ms, and
+  the assertion sharpened from a budget check to `dialed(&absent) == 0`), and
+  two-dead-relays (off TEST-NET sockets entirely). P2b's stragglers are now
+  two: the mailbox-fallback sends and `delivery__should_keep_delivering…`
+  need two in-process clients (the P6 loopback); the `online` smoke stays
+  real-network (P7). Suite: 237/237, wall ~6.0 s (the tail is zink-cli
+  subprocess e2e — P6's target).
 
 **Tier 3 — Complete the migration + smoke tier**
-- [ ] **P6 · Migrate remaining logic assertions.** Groups grow/shrink,
+- [ ] **P6 🎯 · Migrate remaining logic assertions.** Groups grow/shrink,
   multi-device carry, `recv` partial-failure → in-process transport + clock.
   Delete the pure-logic subprocess e2e they replace. **Decommission
   `ZINK_CONNECT_TIMEOUT_MS` / `ZINK_CLOSE_DEADLINE_MS`** (production reads and
@@ -300,7 +319,7 @@ re-measured where relevant · this tracker updated · durable bits graduated per
 | Blob ops | Intent-level (`PushBlob` = durable receipt, `FetchBlob` = hash-verified bytes), not stream-level; iroh-blobs mechanics are adapter detail, real streaming covered by the P7 smoke tier. |
 | Time in transport | No `Duration` params, no timers in adapters; every deadline is a domain-side `clock.timeout` race — the rule that keeps `TestClock` sovereign over all waits. |
 | Accept style | Pull: `accept()` yields `Inbound { peer, frame, reply }` to a domain-owned serve loop; adapter forwards `Router` accepts into the pull surface. |
-| Test doubles | Small composable per-scenario doubles, not one simulator (§4); one double per capability, controls (hold/release/fail/kill), real BORSH frames, loud `Unused` stubs — discipline in transport.md §8. |
+| Test doubles | Small composable per-scenario doubles, not one simulator (§4); one double per capability, controls (hold / connect-after-hold / fail), real BORSH frames. Honest defaults: silence for remote-initiated capabilities, a loud panic for unscripted domain-initiated actions — discipline in transport.md §7. |
 | Module layout | `ports/{clock,transport}.rs` (traits + plain data; doubles as `#[cfg(test)]` submodules of their port — the port's contract kit) vs `adapters/{iroh,system_clock}.rs` (the real world, one file per technology — no per-port nesting, we've sworn off a second transport). The tree carries the dependency direction; "no iroh outside `adapters/`" is a one-glob audit. An adapter as a *child* of its port (the P4 first cut) inverted that story. |
 | Smoke tier | Retained and explicit; never zero real-network tests. |
 | Env knobs | `ZINK_*_MS` decommissioned once the subprocess logic tests are migrated (P6). |
