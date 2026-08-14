@@ -410,7 +410,8 @@ re-measured where relevant · this tracker updated · durable bits graduated per
   drives a timer — then port the client's parked-sleep registry.
 
 - **Project 4 — module split** (`client.rs` ~6.8 k lines, `app/ui/src/lib.rs`
-  ~2.4 k). Sequenced after this; the port seams become the module lines.
+  ~2.4 k). → Scoped as [4-module-split](../4-module-split/tracker.md)
+  (2026-08-14). Sequenced after this; the port seams become the module lines.
   Fold in a **comment-pruning pass** while there: many `client.rs` docstrings
   carry "why"/mechanism/testing narration that belongs in design docs, not the
   code (Kevlin-lean — a docstring says what a caller needs, nothing more). The
