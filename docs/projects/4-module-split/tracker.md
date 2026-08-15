@@ -305,10 +305,26 @@ opportunistically, as its own commit)
   collapsed to eight `zink_protocol` names — the monolith no longer
   imports what it no longer owns. **Proof:** 239/239, clippy clean,
   `wasm32` compiles; `client.rs` → 1,236 lines.
-- [ ] **M7 · `client/backfill.rs`.** backfill/fill/fetch_one/auto_sync +
-  the rewrap trio + `remember` (shared with `sync.rs`; decide at the slice
-  whether it belongs here or beside `state.rs`). Named `backfill`, not
-  `sync` — the crate already has a `sync.rs` serving the *other* direction.
+- [x] **M7 · `client/backfill.rs`.** ✅ 2026-08-15. `backfill.rs` (826
+  lines): the fetching side of peer sync — backfill/backfill_by_key/
+  backfill_addr, the backward/forward walks + `fetch_one`, `auto_sync`,
+  and the rewrap trio — plus its eight subject tests (backfill ×5,
+  auto_sync, rewrap, the `get_keys` serve-gate drill). Named `backfill`,
+  not `sync` — the crate's `sync.rs` serves the other direction.
+  **`remember` decided: it stays in root** — the ingest rule shared by
+  all three arrival paths (drain, direct, backfill) plus `sync.rs`'s
+  `crate::client::remember`, and root is now exactly the wiring file such
+  a shared rule belongs in. Visibility: `auto_sync`/`auto_rewrap`
+  `pub(super)` (recv's hooks), `backfill_addr` `pub(super)` (the
+  repudiation drill pulls through it). **One repair found by the move**:
+  M6's deletion boundary had eaten `backfill`'s first doc line (the
+  original had no blank between `avatar`'s close and the doc) — restored
+  verbatim. Root `client.rs` is now **444 lines of pure wiring**: module
+  decls + re-exports, `ClientConfig`, the `Client` struct, constructors/
+  `assemble`, lifecycle (`close`/`await_reachable`/`on_direct_delivery`/
+  `Reachable`), `remember`, and the two root smokes (`fresh_client`,
+  `homed_endpoint`). Its `zink_protocol` import is three names. **Proof:**
+  239/239, clippy clean, `wasm32` compiles.
 
 **Tier 3 — the app + close-out**
 
