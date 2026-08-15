@@ -285,10 +285,26 @@ opportunistically, as its own commit)
   `conversations`), `auto_who_is` (recv's arrival hooks). **Proof:**
   239/239, clippy clean, `wasm32` compiles; `client.rs` → 2,658 lines
   (7,696 at project start).
-- [ ] **M6 · `client/profile.rs` + `client/history.rs`.** Profile/home-relay
-  management + `build_own_record` (still shared with `sync.rs` — now a
-  downward import from a small module instead of into the monolith), the
-  avatar flows, and the read-side conversation views + `triage`.
+- [x] **M6 · `client/profile.rs` + `client/history.rs`.** ✅ 2026-08-15.
+  `profile.rs` (471 lines): `AvatarReceipt`, set_profile/home-relay
+  management/`my_record`/`register_at_home_relays`, the avatar flows, and
+  `build_own_record` — still reached by `sync.rs` as
+  `crate::client::build_own_record` via a root `pub(crate) use` re-export,
+  so the serve edge didn't change. `history.rs` (1,023 lines): the
+  read-side — `ConversationSummary`/`Inbox`/`MAX_MESSAGE_REQUESTS`/
+  `triage`/`HistoryMessage`, membership/conversations/participant_labels/
+  history, `participants_of` (now `pub(super)`, imported explicitly by
+  `send.rs`) + `membership_delta` — **plus the blob-fetch trio**
+  (`fetch_blob`/`fetch_stored_blob`/`open_cached_or_fetch`), assigned here
+  once the map showed `avatar` does its own fetching: the trio serves
+  message rendering only, and it made both production ranges contiguous.
+  Twelve history tests moved (membership, deltas, triage ×3, quarantine,
+  crossed-in-flight, groups, labels ×2 — and the two confirmation
+  read-side stragglers M3 parked: `history__no_confirmation`,
+  `add_acks__union`) plus three profile tests. Root's import list
+  collapsed to eight `zink_protocol` names — the monolith no longer
+  imports what it no longer owns. **Proof:** 239/239, clippy clean,
+  `wasm32` compiles; `client.rs` → 1,236 lines.
 - [ ] **M7 · `client/backfill.rs`.** backfill/fill/fetch_one/auto_sync +
   the rewrap trio + `remember` (shared with `sync.rs`; decide at the slice
   whether it belongs here or beside `state.rs`). Named `backfill`, not

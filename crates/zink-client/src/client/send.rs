@@ -18,7 +18,8 @@ use crate::ports::rng::Draw;
 use crate::ports::transport::Transport;
 use crate::{blobs, net};
 
-use super::{Client, Contact, participants_of};
+use super::history::participants_of;
+use super::{Client, Contact};
 
 /// A message that is sealed, stored and ledgered, but not yet delivered —
 /// `stage_send`'s output and `deliver`'s input.
