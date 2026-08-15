@@ -86,6 +86,29 @@ let envelope = decode_envelope(bytes)?;
 mailbox.deposit(envelope).await?;   // `mailbox` is a port
 ```
 
+### One facade type, impl-per-module
+
+When a type's API surface *is* the product (the client's `Client`), a grown
+module splits into **files, not structs**: the root file keeps the struct,
+constructors and wiring; each flow lives in a child module as its own `impl`
+block, together with its result types (directly above the methods that return
+them) and its tests. Parallel sub-structs would re-plumb the same shared state
+and generic parameters through every piece without separating any real
+concern. Keep cross-module seams few and `pub(super)` — the visibility ledger
+is the honest map of how coupled the clusters really are. No `mod.rs`: a
+module splits as `name.rs` plus a `name/` directory.
+
+### Share handles, not collections
+
+Shared mutability isn't the smell — *anonymous* shared mutability is. Never
+pass around a bare `Arc<Mutex<Collection>>`, least of all as a crate-visible
+type alias: every holder gets raw access to the invariants. Wrap it in a
+named, cheap-`Clone` handle (`ClientState`, `ReachLedger`) that owns the lock
+privately, exposes verb methods that maintain the invariants, decides the
+poisoning stance once, and takes timestamps as data (`now` parameters) so its
+policy is testable with fabricated values — the "no time inside the port"
+rule, applied to state.
+
 ## Naming
 
 - Descriptive names that convey intent (`resolve_identity`, not `resolve` or `process`).
@@ -142,6 +165,16 @@ with such inputs explicitly.
 
 Tests that touch the filesystem use a shared temp-dir helper for a unique directory,
 and clean up (`remove_dir_all`) at the end.
+
+### Test imports
+
+`use super::*` belongs in embedded test modules only — the subject *is* the
+parent, so the glob says "internals included". A shared test kit (or any other
+sibling module) is imported by name, never by glob: provenance stays readable
+(is `chain` the subject or a helper?), glob-glob collisions with the parent
+namespace are impossible, and the unused-import lint enforces per-consumer kit
+minimality. The kit itself imports explicitly too — leaning on the parent's
+imports via `use super::*` breaks every time the parent sheds one.
 
 ### JavaScript / service worker tests
 

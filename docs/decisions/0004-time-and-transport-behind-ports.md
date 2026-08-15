@@ -58,3 +58,21 @@ each labelled in code. Everything else asserts in-process.
 - Rejected along the way: env-var timeout knobs (production reading test-only
   config) and one full-behavior iroh fake (bound to drift and lie) — the stable
   artifact is the trait plus its contract, not any double.
+
+## Addendum: timing entropy (2026-08-15, project 4)
+
+The same discipline was extended to the third ambient effect: randomness
+used for **timing decisions**. `subscribe`'s reconnect jitter drew `OsRng`
+directly in domain code, through a float detour ending in panic-capable
+`Duration` arithmetic. Now `ports/rng.rs` defines `Draw`
+(`draw(bound) → u64`, uniform in `[0, bound)`, timing decisions only),
+`adapters/system_rng.rs` implements it over the OS RNG, and `Client` gained
+a fourth defaulted parameter (`R: Draw = SystemRng`) under the same
+one-parameter-per-port rule. The jitter policy itself is a pure
+integer-millisecond function pinned by band-edge tests.
+
+**Cryptographic randomness is deliberately not behind this port**: sealing
+and key generation pass a `CryptoRngCore` explicitly at the call site —
+`zink-protocol`'s own testable seam — because a scriptable crypto-entropy
+port would be a footgun, not a feature. The adapters audit line now reads
+"no iroh type, real clock, or timing entropy outside `adapters/`".

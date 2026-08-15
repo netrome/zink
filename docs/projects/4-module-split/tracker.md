@@ -1,9 +1,15 @@
 # Module split: carve `client.rs`, keep `Client`
 
-> **Status: 📝 scoping (2026-08-14).** Project **4-module-split**, sequenced
+> **Status: ✅ complete (2026-08-15).** Project **4-module-split**, sequenced
 > after [3-ports-and-adapters](../3-ports-and-adapters/tracker.md) so the
-> split lands on the port seams that project carved (its §8 parked this).
-> Behavior-preserving throughout: the suite is the net, the diff is moves.
+> split landed on the port seams that project carved. The 7,696-line
+> `client.rs` is a 444-line wiring root over eight flow modules (each with
+> its types and tests); the two anonymous mutexes are named types
+> (`ReachLedger`, `AskedOnce`); timing entropy joined time and transport
+> behind ports (`Draw` — found and fixed mid-project); the app's 2,362-line
+> `lib.rs` is a 250-line shell over six screens. Behavior-preserving
+> throughout — 239/239, ~1.1 s wall, every commit green. Conventions
+> graduated to STYLE.md; entropy addendum on ADR 0004.
 
 Governed by the standard slice discipline (AGENTS.md): small vertical slices,
 one per turn, each runnable and measured before the next. This project touches
@@ -340,9 +346,28 @@ opportunistically, as its own commit)
   markup/CSS/copy changes. **Verified by build** (`app/ui/build.sh` →
   `app/dist/pkg`, zero warnings); the click-through half needs a desktop
   session — this box is headless, so that's on the next app run.
-- [ ] **M9 · Re-measure + graduate.** Final line-count and suite-time table
-  here; STYLE.md conventions, `reach.rs` `//!`, client-core.md pointer,
-  projects README rows per §5.
+- [x] **M9 · Re-measure + graduate.** ✅ 2026-08-15. **Final shape** (was:
+  one 7,696-line `client.rs` + one 2,362-line `app/ui/src/lib.rs`):
+
+  | File | Lines | | File | Lines |
+  |---|---|---|---|---|
+  | `client/contacts.rs` | 1,513 | | `client/recv.rs` | 441 |
+  | `client/send.rs` | 1,480 | | `client/test_kit.rs` | 406 |
+  | `client/who_is.rs` | 1,061 | | `reach.rs` | 319 |
+  | `client/history.rs` | 1,023 | | `client/outbox.rs` | 215 |
+  | `client/backfill.rs` | 826 | | `app/ui/src/lib.rs` | 250 |
+  | `client/profile.rs` | 471 | | app views (6 files) | 2,160 |
+  | `client.rs` (root) | 444 | | | |
+
+  Suite: **239/239, ~1.1 s wall** (project 3's floor held; +4 tests net —
+  reach ledger, jitter band), clippy clean, `wasm32` + `app/ui/build.sh`
+  clean, 0 TODO/FIXME. Graduated per §5: **STYLE.md** gained
+  *one facade type, impl-per-module* and *share handles, not collections*
+  (§Module organization) and *test imports* (§Testing); **ADR 0004** gained
+  the timing-entropy addendum (`Draw`/`SystemRng`, crypto randomness
+  explicitly excluded); **client-core.md**'s signature pointer now names
+  the module tree; the reach rationale lives as `reach.rs`'s `//!` (done
+  at M1, no design note needed); projects README row updated.
 
 ## 7. Decisions log
 
@@ -375,3 +400,14 @@ opportunistically, as its own commit)
   produces the reading. Thread `W` into `SyncHandler` only when a test
   first needs to drive it.
 - **Lazy endpoint bind** (fast-failure.md F5) — still unscheduled, CLI-only.
+- **Stale relay entries make "sending…" permanent** (found during M8's
+  app run, confirmed 2026-08-15): changing relays leaves old relay URLs in
+  existing contact records with no update path, so every send to them owes
+  a dead relay forever and the app's per-message `pending` flag never
+  clears — aggravated by the app not rendering `confirmed` (the CLI shows
+  both cues). A fresh contact works. Product work, not module-split:
+  (a) map `confirmed` into the app DTO + render it, (b) wording when
+  delivered-but-owed, (c) the record-update path for a relay change —
+  (c) touches trust semantics and deserves its own slice.
+- **App click-through** (M8): the by-screen carve is build-verified only —
+  this box is headless; eyeball the six screens on the next desktop run.

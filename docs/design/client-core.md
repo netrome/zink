@@ -249,8 +249,11 @@ client.avatar(PublicKey) -> Option<Vec<u8>>   // highest-revision claim across
 
 `Received` carries the envelope (sender, conversation id, blob refs) and the opened
 body as a `Result` — the *edge* decides presentation (print, webview, notification).
-The actual signatures live in `crates/zink-client/src/client.rs`; this sketch is a map,
-not a contract.
+The actual signatures live in `crates/zink-client/src/client.rs` and its flow
+modules — `client/{send,outbox,recv,contacts,who_is,profile,history,backfill}.rs`
+(project 4 split the monolith; the root file keeps the struct, constructors and
+wiring, each flow its own `impl` block with its types and tests). This sketch is
+a map, not a contract.
 
 ## Decisions
 
