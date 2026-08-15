@@ -249,11 +249,14 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   Set/edit from the S2 members panel; display precedence local name >
   joined-petnames default everywhere a label renders (rows, chat header,
   notification titles via the command layer). Storage decided in-slice
-  (same local-never-transmitted constraint class as S7's read markers). Why
-  in scope: with several conversations per set first-class (S1), three rows
-  all labelled "alice, bob" are indistinguishable — naming is the
-  organizing tool. *Done when:* two same-set conversations are tellable
-  apart at a glance in every list.
+  (same local-never-transmitted constraint class as S7's read markers), with
+  one constraint fixed now: **my label is stored distinct from any future
+  peer suggestion** — the anchor-vs-learned split the contact store already
+  uses — so the shared-names follow-on (§8) slots underneath without
+  migration. Why in scope: with several conversations per set first-class
+  (S1), three rows all labelled "alice, bob" are indistinguishable — naming
+  is the organizing tool. *Done when:* two same-set conversations are
+  tellable apart at a glance in every list.
 - [ ] **S7 · Unread + close.** A local read marker per conversation (storage
   decided in-slice: app-layer store vs `zink-client` state — local-only
   either way, never transmitted, §4) → unread badge on Chats rows and the
@@ -290,6 +293,22 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   whatever the index holds) until real usage says otherwise; any change is
   client policy, not protocol. The fresh-genesis entry (S1) is the escape
   hatch either way.
+- **Shared conversation names — a future project, not a slice here** (scoped
+  in conversation, 2026-08-15). Letting participants see what you call a
+  chat ("besties" vs "me and my boiz") is the person-naming model transposed
+  to a new subject type (a genesis id instead of a key): my lens sovereign >
+  peer suggestions rendered with provenance, sharing default-on but
+  per-rename optional (a "annoying coworkers" label stays local), nothing
+  auto-adopted without attribution — `Claim::Name`'s primitive-vs-policy
+  line, walked again. Carrier: a name claim sealed *inside* the conversation
+  (the membership precedent — participants only, late joiners via backfill,
+  relays see ciphertext); **never in served records**, which would leak a
+  conversation's existence to whoever pulls the record. Needs a SPEC §11
+  proposal (body-encoding agreement at minimum) and a called-out
+  renegotiation of the "naming never enters the protocol" invariant —
+  exactly what this project's charter excludes. Prerequisite: S6's local
+  lens, whose storage constraint keeps this seam open. Not a gossip plane
+  (deferred list stands): the conversation DAG is the carrier.
 - **Arbitrary local grouping of conversations** (folders/tags beyond a name)
   — S6 does names only; grouping waits for a concrete need, alongside
   ui-design-system.md §1's parked arbitrary-grouping note for people.
