@@ -165,8 +165,7 @@ Notes:
   system webkit2gtk (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
   for the `apt` packages; only needed on machines building the desktop app).
   Android builds need nothing beyond §3.1–3.4.
-- Debug APKs are auto-signed and sideloadable; release builds need a signing
-  config (not set up yet).
+- Debug APKs are auto-signed and sideloadable; signed release builds are §3.8.
 - The app's `Cargo.toml` sets `[profile.dev] debug = false, strip = "debuginfo"` —
   without it the debug APK is ~350 MB of Rust debuginfo. Debug via `adb logcat`.
 - Gradle repackages APKs **in place**: after big dependency changes the APK can
@@ -203,6 +202,81 @@ background delivery will stall under Doze (live-delivery.md §5). The
 persistent "zink is connected" notification is the foreground service that
 keeps live delivery running; it's minimum-importance and collapses out of
 the way.
+
+### 3.8 Making a signed release
+
+Release builds are split across two roles so signing material never touches
+the build machine:
+
+- **Build machine** (full Android toolchain, §3.1–3.6 or the Nix `.#android`
+  shell) produces an *unsigned* release APK.
+- **Signing machine** (holds the release keystore; needs only `apksigner`)
+  signs it, prompting for the keystore password each time — no password is
+  stored anywhere.
+
+**One-time: create the release keystore** (any machine with a JDK; it lives
+on the signing machine only):
+
+```sh
+keytool -genkeypair -v -keystore zink-release.jks \
+  -alias zink -keyalg RSA -keysize 2048 -validity 10000
+chmod 600 zink-release.jks
+```
+
+The name/organization prompts build the certificate's Distinguished Name —
+cosmetic, immutable, and embedded (publicly readable) in every signed APK;
+a name or "zink" is fine. **Back the keystore up.** Android identifies the
+app by this certificate forever: lose it and every phone must
+uninstall/reinstall, wiping its device key — a new certificate, even one made
+from the same key, counts as a different app.
+
+**Per release:**
+
+1. Bump `version` in `app/src-tauri/tauri.conf.json`. Android derives
+   `versionCode` from it (major·1 000 000 + minor·1 000 + patch), and it must
+   increase or phones refuse the upgrade.
+2. Build machine — build unsigned, then confirm alignment (AGP aligns during
+   packaging; the check is belt-and-braces, using build-tools' zipalign):
+
+   ```sh
+   (cd app/src-tauri && cargo tauri android build --apk --target aarch64)
+   APK=app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+   "$ANDROID_HOME"/build-tools/*/zipalign -c -P 16 4 "$APK" && echo aligned
+   ```
+
+3. Signing machine — fetch, sign (prompts for the keystore password), verify:
+
+   ```sh
+   scp <build-machine>:<path-to>/app-universal-release-unsigned.apk .
+   nix shell nixpkgs#apksigner        # or: sdkmanager "build-tools;35.0.0"
+   apksigner sign --ks zink-release.jks --ks-key-alias zink \
+     --out zink-<version>.apk app-universal-release-unsigned.apk
+   apksigner verify --print-certs zink-<version>.apk
+   ```
+
+4. Distribute: attach the APK to a GitHub release
+   (`gh release create v<version> zink-<version>.apk`); phones running
+   [Obtainium](https://github.com/ImranR98/Obtainium) pointed at the repo get
+   notified and can install updates. Serving over HTTP as in §3.7 works too —
+   either way upgrades are protected by Android's same-signature rule.
+
+Signed releases upgrade in place (app data and device key survive). A
+**debug ↔ release switch** is a signature change: uninstall first, which
+wipes app data — the phone gets a fresh device identity and must re-pair
+(and be re-added to a relay allow-list, §5).
+
+In-Gradle signing also works on a machine that holds the keystore: put a
+`keystore.properties` at `app/src-tauri/gen/android/` (the path is
+gitignored):
+
+```properties
+keyAlias=zink
+password=<keystore password>
+storeFile=/absolute/path/to/zink-release.jks
+```
+
+Without it — the normal case — the release build emits
+`app-universal-release-unsigned.apk`.
 
 ## 4. Optional
 
