@@ -92,19 +92,6 @@ pub(crate) fn ChatView(
         });
     };
 
-    let attach = move |ev: leptos::ev::Event| {
-        let input = event_target::<web_sys::HtmlInputElement>(&ev);
-        let Some(file) = input.files().and_then(|files| files.get(0)) else {
-            return;
-        };
-        spawn_local(async move {
-            match image::prepare(&file).await {
-                Ok(prepared) => attachment.set(Some(prepared)),
-                Err(e) => err(e),
-            }
-        });
-    };
-
     // Sender avatars (D1d), lazily fetched per key; present-but-empty
     // marks in-flight or none (both render nothing).
     let avatars = RwSignal::new(HashMap::<String, String>::new());
@@ -281,7 +268,7 @@ pub(crate) fn ChatView(
         });
     };
 
-    let send = move |_| {
+    let send = move || {
         let body = draft.get_untracked();
         let image = attachment.get_untracked().map(|(image, _)| image);
         if body.trim().is_empty() && image.is_none() {
@@ -657,20 +644,6 @@ pub(crate) fn ChatView(
                 }}
             </div>
             <div class="compose">
-                {move || {
-                    attachment
-                        .get()
-                        .map(|(_, preview)| {
-                            view! {
-                                <div class="pending">
-                                    <img class="thumb" src=preview />
-                                    <button class="secondary" on:click=move |_| attachment.set(None)>
-                                        "remove image"
-                                    </button>
-                                </div>
-                            }
-                        })
-                }}
                 <div class="picks">
                     <select on:change=move |ev| add_pick.set(event_target_value(&ev))>
                         <option value="" selected disabled>
@@ -706,14 +679,7 @@ pub(crate) fn ChatView(
                             })
                     }}
                 </div>
-                <input type="file" accept="image/*" on:change=attach />
-                <textarea
-                    rows="2"
-                    placeholder="message"
-                    prop:value=move || draft.get()
-                    on:input=move |ev| draft.set(event_target_value(&ev))
-                />
-                <button on:click=send>"send"</button>
+                <Composer draft=draft attachment=attachment send=send err=err />
             </div>
             {move || {
                 viewer
@@ -731,6 +697,54 @@ pub(crate) fn ChatView(
                     })
             }}
         </main>
+    }
+}
+
+/// The message composer — attachment preview + picker, text box, send.
+/// Shared by the live chat and the draft chat (project 6 S1): one composer,
+/// so a first message can do everything a reply can.
+#[component]
+pub(crate) fn Composer(
+    draft: RwSignal<String>,
+    attachment: RwSignal<Option<(OutgoingImage, String)>>,
+    send: impl Fn() + Copy + Send + 'static,
+    err: impl Fn(String) + Copy + Send + 'static,
+) -> impl IntoView {
+    let attach = move |ev: leptos::ev::Event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&ev);
+        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        spawn_local(async move {
+            match image::prepare(&file).await {
+                Ok(prepared) => attachment.set(Some(prepared)),
+                Err(e) => err(e),
+            }
+        });
+    };
+    view! {
+        {move || {
+            attachment
+                .get()
+                .map(|(_, preview)| {
+                    view! {
+                        <div class="pending">
+                            <img class="thumb" src=preview />
+                            <button class="secondary" on:click=move |_| attachment.set(None)>
+                                "remove image"
+                            </button>
+                        </div>
+                    }
+                })
+        }}
+        <input type="file" accept="image/*" on:change=attach />
+        <textarea
+            rows="2"
+            placeholder="message"
+            prop:value=move || draft.get()
+            on:input=move |ev| draft.set(event_target_value(&ev))
+        />
+        <button on:click=move |_| send()>"send"</button>
     }
 }
 

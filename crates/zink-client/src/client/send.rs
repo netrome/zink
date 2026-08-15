@@ -105,6 +105,32 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         self.stage(draft, plaintext, blob_drafts, contacts)
     }
 
+    /// `stage_send`, but **always a fresh genesis**: the participant-set
+    /// lookup is skipped, so addressing people you already chat with starts
+    /// a *second* conversation instead of threading into the first. The
+    /// deliberate "new chat" act — conversations are genesis-identified and
+    /// several per participant set is a feature (groups.md §3); `send`'s
+    /// auto-threading remains the send-by-name convenience. The index still
+    /// records this set → the new conversation (latest writer wins, like
+    /// any send).
+    pub fn stage_send_new(
+        &self,
+        contacts: &[Contact],
+        plaintext: Vec<u8>,
+        blob_drafts: Vec<BlobDraft>,
+    ) -> Result<StagedSend, Error> {
+        if contacts.is_empty() {
+            return Err(Error::NoRecipients);
+        }
+        let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
+        self.stage(
+            self.genesis_draft(recipients),
+            plaintext,
+            blob_drafts,
+            contacts,
+        )
+    }
+
     /// The draft `send` threads: into the participant set's conversation if we
     /// know one, else a fresh genesis.
     fn send_draft(&self, contacts: &[Contact]) -> Result<MessageDraft, Error> {
@@ -133,16 +159,22 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             .or_else(|| self.state.conversation_for(&participants));
         match existing {
             Some(conversation) => self.threaded_draft(conversation, recipients),
-            None => Ok(MessageDraft {
-                conversation: None,
-                parents: vec![],
-                recipients,
-                seq: 0,
-                logical: 0,
-                timestamp_ms: self.wall_clock.now_ms(),
-                plaintext: vec![],
-                blobs: vec![],
-            }),
+            None => Ok(self.genesis_draft(recipients)),
+        }
+    }
+
+    /// The draft of a conversation-opening message: no parents, seq/logical
+    /// 0 — its own id becomes the conversation id at seal time.
+    fn genesis_draft(&self, recipients: Vec<PublicKey>) -> MessageDraft {
+        MessageDraft {
+            conversation: None,
+            parents: vec![],
+            recipients,
+            seq: 0,
+            logical: 0,
+            timestamp_ms: self.wall_clock.now_ms(),
+            plaintext: vec![],
+            blobs: vec![],
         }
     }
 
@@ -683,6 +715,51 @@ mod tests {
         assert_eq!(a.state.conversation_for(&grown), Some(conversation));
 
         let _ = std::fs::remove_dir_all(temp_root("index"));
+    }
+
+    #[tokio::test]
+    async fn stage_send_new__should_start_a_second_conversation_with_the_same_people() {
+        // Given: an existing conversation for {A, B}, indexed — the set a
+        // plain `send` would thread into
+        let key_path = temp_key("fresh", "a");
+        keystore::create(&key_path).expect("key");
+        let a = Client::open_with(&key_path, ClientConfig::default())
+            .await
+            .expect("open");
+        let b = DeviceKey::from_seed([23; 32]).public();
+        let genesis = message(&a.device, vec![b], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        a.state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+        let set = BTreeSet::from([a.public_key(), b]);
+        a.state
+            .record_conversation(&set, conversation)
+            .expect("map");
+        assert_eq!(a.state.conversation_for(&set), Some(conversation));
+
+        // When: staging a *new* conversation to the same person
+        let staged = a
+            .stage_send_new(
+                &[Contact {
+                    keys: vec![b],
+                    relays: vec![],
+                }],
+                b"again, separately".to_vec(),
+                vec![],
+            )
+            .expect("stage");
+
+        // Then: a second, distinct conversation exists beside the first
+        assert_ne!(staged.conversation, conversation);
+        assert_eq!(staged.conversation, staged.id, "its genesis names it");
+        assert_eq!(
+            a.state.conversation_for(&set),
+            Some(staged.conversation),
+            "the index re-points to the latest writer, like any send"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("fresh"));
     }
 
     #[tokio::test]

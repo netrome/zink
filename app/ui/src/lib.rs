@@ -4,12 +4,14 @@
 
 mod chat;
 mod chats;
+mod draft;
 mod image;
 mod invoke;
 mod me;
 mod onboarding;
 mod people;
 mod person;
+mod picker;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -18,6 +20,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 use chat::ChatView;
 use chats::ChatsView;
+use draft::DraftChatView;
 use me::MeView;
 use onboarding::OnboardingView;
 use people::PeopleView;
@@ -30,11 +33,13 @@ pub fn start() {
 }
 
 /// Which screen is showing. `Chat` carries its label so the header doesn't
-/// need a lookup.
+/// need a lookup; `Draft` is a chat with no genesis yet (project 6 S1) —
+/// the picked people, nothing stored.
 #[derive(Clone, PartialEq)]
 enum View {
     Chats,
     Chat { id: String, label: String },
+    Draft { to: Vec<String> },
     People,
     Person { petname: String },
     Me,
@@ -126,6 +131,7 @@ fn App() -> impl IntoView {
         load_messages(id.clone());
         view.set(View::Chat { id, label });
     };
+    let start_draft = move |to: Vec<String>| view.set(View::Draft { to });
     let open_person = move |petname: String| view.set(View::Person { petname });
     // Onboarding done → drop the takeover and land on Chats.
     let finish_onboarding = move || {
@@ -160,6 +166,15 @@ fn App() -> impl IntoView {
                     conversations=conversations
                     state=state
                     open_chat=open_chat
+                    start_draft=start_draft
+                />
+            }
+            .into_any(),
+            View::Draft { to } => view! {
+                <DraftChatView
+                    to=to
+                    open_chat=open_chat
+                    back=move || view.set(View::Chats)
                     ok=ok
                     err=err
                 />
@@ -205,7 +220,9 @@ fn App() -> impl IntoView {
         }}
         <nav class="tabbar">
             <button
-                class:active=move || matches!(view.get(), View::Chats | View::Chat { .. })
+                class:active=move || {
+                    matches!(view.get(), View::Chats | View::Chat { .. } | View::Draft { .. })
+                }
                 on:click=move |_| {
                     load_conversations();
                     view.set(View::Chats);

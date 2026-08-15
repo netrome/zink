@@ -106,6 +106,18 @@ set; older sets keep pointing at the conversation (already today's behavior
 "new chat" is explicitly conversation-creating, so no UX ambiguity is
 added).
 
+**The index is send-by-name policy, never conversation identity** (made
+explicit in project 6 S1, 2026-08-15). A conversation *is* its genesis id;
+several conversations over the same participant set are a feature (think
+channels), and the receive path has always handled them — each genesis is
+its own conversation. The one-slot index exists only so a send-by-name (the
+CLI convenience) can thread somewhere reasonable; which conversation a
+repeated set resolves to is latest-writer-wins, nothing more. The app never
+leans on it: replies go through `send_in`, and its "new chat" stages an
+explicit fresh genesis (`stage_send_new`, which skips the lookup) — the
+existing same-set conversations are *listed* to the user at draft time,
+discovery, never silent reuse.
+
 ## 4. The scoped auto-query (the who-is-this.md §5 revision)
 
 D1 resolved "no auto-query" because asking your contacts about a key

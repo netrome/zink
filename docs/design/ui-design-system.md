@@ -126,6 +126,13 @@ appear at trust moments.
 vouch / repudiate) are small ghost buttons, not stacked full-width blocks.
 All interactive targets ≥ `--tap`.
 
+**The people-picker** (project 6 S1): every pick-a-person surface is the same
+component (`app/ui/src/picker.rs`) — full-width tappable rows (avatar +
+petname, ≥ `--tap`), the selected set as removable chips above the list, a
+filter box once the list passes ~8 contacts, alphabetical order, and an empty
+state that points at People. Selection is by petname; what a pick *means*
+stays with the calling screen.
+
 **Safe area (the occlusion fix), specifically:**
 - `viewport-fit=cover` on the viewport meta.
 - `min-height: 100dvh` (dynamic viewport height), never `100vh`.
@@ -138,9 +145,14 @@ the bar owns the safe-area padding, which also fixes the occlusion bug
 structurally).
 
 - **Chats** — *"what's happening?"* The conversation list, nothing else glued
-  to it. A single **+** starts a new chat (pick people → chat opens with an
-  empty composer). No permanent compose form, no refresh button (live delivery +
-  the 60 s backstop poll cover it; a visible refresh button only sows doubt).
+  to it. A single **+** starts a new chat: pick people (the §2 picker), then a
+  **draft chat** — empty history, a line naming that the first send starts the
+  conversation, and links to the existing conversations with exactly those
+  people (discovery, never auto-routing: a new chat is always a *new*
+  conversation; several per participant set is a feature, groups.md §3). The
+  draft reuses the one composer, so a first message can do anything a reply
+  can. No permanent compose form, no refresh button (live delivery + the 60 s
+  backstop poll cover it; a visible refresh button only sows doubt).
 - **People** — *"who do I know?"* Just the contact list + a **+** (scan / paste
   / pair as focused sub-flows). Tapping a person opens a **detail screen** built
   as the §1 lens: my lens (petname, avatar, their device keys) · their self-claim ·

@@ -653,26 +653,7 @@ async fn conversations(app: AppHandle, managed: State<'_, ManagedClient>) -> Res
     let mut conversations = Vec::new();
     let mut requests = Vec::new();
     for summary in inbox.conversations.iter().chain(inbox.requests.iter()) {
-        let other_keys: Vec<_> = summary
-            .participants
-            .iter()
-            .copied()
-            .filter(|key| !own.contains(key))
-            .collect();
-        // Deduped per person (multi-device.md §7): a two-device contact
-        // labels once.
-        let others = client.participant_labels(&other_keys)?;
-        let row = Conversation {
-            id: hex::encode(&summary.id.0),
-            label: if others.is_empty() {
-                "only me".to_string()
-            } else {
-                others.join(", ")
-            },
-            message_count: summary.message_count,
-            last_timestamp_ms: summary.last_timestamp_ms,
-            request: !summary.known,
-        };
+        let row = conversation_row(&client, &own, summary)?;
         if row.request {
             requests.push(row);
         } else {
@@ -684,6 +665,76 @@ async fn conversations(app: AppHandle, managed: State<'_, ManagedClient>) -> Res
         requests,
         dropped,
     })
+}
+
+/// One dto row from a summary: participants labelled minus the own cluster,
+/// "only me" when alone.
+fn conversation_row(
+    client: &Client,
+    own: &std::collections::BTreeSet<PublicKey>,
+    summary: &zink_client::ConversationSummary,
+) -> Result<Conversation, String> {
+    let other_keys: Vec<_> = summary
+        .participants
+        .iter()
+        .copied()
+        .filter(|key| !own.contains(key))
+        .collect();
+    // Deduped per person (multi-device.md §7): a two-device contact
+    // labels once.
+    let others = client.participant_labels(&other_keys)?;
+    Ok(Conversation {
+        id: hex::encode(&summary.id.0),
+        label: if others.is_empty() {
+            "only me".to_string()
+        } else {
+            others.join(", ")
+        },
+        message_count: summary.message_count,
+        last_timestamp_ms: summary.last_timestamp_ms,
+        request: !summary.known,
+    })
+}
+
+/// The stored conversations whose people-set is exactly the given contacts —
+/// the draft view's discovery list ("you already have N with these people").
+/// People, not keys: the own cluster counts as "me", a contact matches
+/// through any key of their cluster, and a conversation holding a key that
+/// is neither is not a match. Newest-first, like `conversations`.
+#[tauri::command]
+async fn conversations_with(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    to: Vec<String>,
+) -> Result<Vec<Conversation>, String> {
+    let client = client(&app, &managed).await?;
+    let picked: std::collections::BTreeSet<String> = to.into_iter().collect();
+    if picked.is_empty() {
+        return Ok(vec![]);
+    }
+    let own = client.own_keys();
+    let mut allowed = own.clone();
+    let mut clusters = Vec::new();
+    for (petname, record) in client.contacts()? {
+        if picked.contains(&petname) {
+            allowed.extend(record.keys.iter().copied());
+            clusters.push(record.keys.clone());
+        }
+    }
+    if clusters.len() != picked.len() {
+        return Ok(vec![]); // a name that resolves to no contact matches nothing
+    }
+    let mut rows = Vec::new();
+    for summary in client.conversations()? {
+        let every_member_picked = summary.participants.iter().all(|key| allowed.contains(key));
+        let every_pick_member = clusters
+            .iter()
+            .all(|keys| keys.iter().any(|key| summary.participants.contains(key)));
+        if every_member_picked && every_pick_member {
+            rows.push(conversation_row(&client, &own, &summary)?);
+        }
+    }
+    Ok(rows)
 }
 
 /// One conversation's messages, linearized, petname-labelled.
@@ -857,7 +908,11 @@ async fn send_message(
                 .iter()
                 .map(|petname| client.resolve_contact(petname))
                 .collect::<Result<_, _>>()?;
-            client.stage_send(&contacts, text.into_bytes(), blobs)?
+            // The app's "new chat" is always a fresh genesis (project 6 §7):
+            // conversations are genesis-identified, several per participant
+            // set is a feature — the draft view already offered the existing
+            // ones. Replies go through the `conversation` arm above.
+            client.stage_send_new(&contacts, text.into_bytes(), blobs)?
         }
         _ => return Err("no conversation or contact given".into()),
     };
@@ -1217,6 +1272,7 @@ pub fn run() {
             clear_local_avatar,
             person_detail,
             conversations,
+            conversations_with,
             messages,
             send_message,
             fetch_blob,

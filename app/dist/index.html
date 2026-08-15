@@ -127,7 +127,15 @@
     .panel { border: 1px solid var(--border); border-radius: var(--radius); padding: .5rem; margin: .4rem 0; background: var(--surface); }
     .avatar { width: 2rem; height: 2rem; border-radius: 50%; object-fit: cover; vertical-align: middle; }
     .picks { display: flex; flex-wrap: wrap; gap: .3rem .8rem; align-items: center; margin-bottom: .3rem; }
-    .pick { white-space: nowrap; }
+    /* The people-picker (project 6 S1): thumb-sized tappable rows, the
+       selected set as removable chips. */
+    .picker-row { display: flex; align-items: center; gap: .5rem; min-height: var(--tap); }
+    .picker-row.selected { background: var(--accent-weak); border-radius: var(--radius-sm); }
+    .picker-row .check { margin-left: auto; color: var(--accent); font-weight: 600; }
+    .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin: .2rem 0 .4rem; }
+    .chip { background: var(--accent-weak); color: var(--accent); border-radius: 999px;
+            padding: .3rem .7rem; font-size: var(--text-sm); cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
     .wild { border-left: 3px solid var(--warn); padding-left: .5rem; margin: .3rem 0; }
     .avatar-lg { width: 3.5rem; height: 3.5rem; }
     .panel .row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }

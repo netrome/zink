@@ -1,6 +1,6 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 📋 scoped (2026-08-15), not started.** Project **6-ui-polish**,
+> **Status: 🔨 in progress — S1 landed (2026-08-15).** Project **6-ui-polish**,
 > branch `better-selections`. Trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
@@ -189,7 +189,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
 
 **Tier 1 — the named pain**
 
-- [ ] **S1 · The people-picker + draft chat.** One shared picker component:
+- [x] **S1 · The people-picker + draft chat.** One shared picker component:
   full-width rows (avatar + petname), tap-anywhere toggle, ≥ `--tap`
   targets, selected people as chips above the list, filter box (appears
   past ~8 contacts), alphabetical order, real empty state pointing at
@@ -205,6 +205,17 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   filtered app-side from summaries' membership. *Done when:* U1 and U12 are
   dead — including: a second conversation with the same people can be
   started from the app.
+  *Landed 2026-08-15:* `PeoplePicker` (`app/ui/src/picker.rs`) +
+  `DraftChatView` (`draft.rs`), sharing the chat's composer — extracted as
+  `Composer` in `chat.rs`, so a first message can attach an image;
+  `stage_send_new` beside `stage_send` (`send.rs`, genesis draft extracted;
+  `send`'s auto-threading untouched); the app's send-by-recipients arm
+  stages a fresh genesis; new `conversations_with` command (people-set
+  equality over summaries) backs the discovery list; `conversation_row`
+  extracted for both list commands. Suite 240 (was 239), clippy clean,
+  zink-client wasm32 + desktop `cargo check` + `app/ui/build.sh` clean.
+  Graduated: groups.md §3 (index = send-by-name policy, never identity),
+  ui-design-system.md §2 (picker pattern) + §3 (draft-chat flow).
 - [ ] **S2 · The members panel + a person's conversations.** New
   `membership` command (labels via the existing `history.rs::membership` +
   `participant_labels`), serving two surfaces. Chat header becomes tappable
