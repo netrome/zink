@@ -409,5 +409,7 @@ opportunistically, as its own commit)
   (a) map `confirmed` into the app DTO + render it, (b) wording when
   delivered-but-owed, (c) the record-update path for a relay change —
   (c) touches trust semantics and deserves its own slice.
+  → Scoped as [5-relay-lifecycle](../5-relay-lifecycle/tracker.md)
+  (2026-08-15): (a)/(b) land in its R3, (c) in R1/R5.
 - **App click-through** (M8): the by-screen carve is build-verified only —
   this box is headless; eyeball the six screens on the next desktop run.
