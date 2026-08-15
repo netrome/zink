@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{AppState, QrPayload, RecordPreview};
+use zink_app_dto::{AppState, QrPayload, RELAY_QR_PREFIX, RecordPreview};
 
 use crate::{NoArgs, avatar_data_url, image, invoke};
 
@@ -34,8 +34,16 @@ pub(crate) fn MeView(
         }
     });
 
-    let add_relay = move |_| {
-        let value = new_relay.get_untracked().trim().to_string();
+    // Append one spec to the edited list (R4): scanned payloads and pasted
+    // `ZINK-RELAY:` text both land here, normalized to the bare spec. The
+    // existing "save" stays the one explicit act that applies the profile.
+    let stage_relay = move |spec: &str| {
+        let value = spec
+            .trim()
+            .strip_prefix(RELAY_QR_PREFIX)
+            .unwrap_or(spec.trim())
+            .trim()
+            .to_string();
         if value.is_empty() {
             return;
         }
@@ -44,6 +52,9 @@ pub(crate) fn MeView(
                 list.push(value);
             }
         });
+    };
+    let add_relay = move |_| {
+        stage_relay(&new_relay.get_untracked());
         new_relay.set(String::new());
     };
     let remove_relay = move |value: String| {
@@ -227,7 +238,13 @@ pub(crate) fn MeView(
             let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
             scanning.set(false);
             match result {
-                // Always pair mode here — preview before signing.
+                // One scanner, payload decides (R4): a relay code joins the
+                // relay list (the save is the confirm); anything else is
+                // pair mode — preview before signing, as always.
+                Ok(scanned) if scanned.content.trim().starts_with(RELAY_QR_PREFIX) => {
+                    stage_relay(&scanned.content);
+                    ok("relay added to the list — save to apply");
+                }
                 Ok(scanned) => preview(scanned.content),
                 // A cancelled scan also lands here — worth no red banner.
                 Err(e) => err(e),
@@ -300,6 +317,9 @@ pub(crate) fn MeView(
             />
             <button class="secondary" on:click=add_relay>
                 "add relay"
+            </button>
+            <button class="secondary" on:click=scan>
+                "scan a relay QR"
             </button>
             <button on:click=save>"save & show my code"</button>
             {move || {

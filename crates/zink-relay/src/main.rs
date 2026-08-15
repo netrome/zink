@@ -122,10 +122,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  endpoint id: {}", endpoint.id());
     // The full relay spec `<id>@<ip:port>#<relay-url>` — what users paste
     // into a profile: mailbox dial string + the same host's iroh relay URL.
+    // Each spec also prints as a scannable `ZINK-RELAY:` QR (R4,
+    // relay-lifecycle): phones add this relay by camera, and the block
+    // lands in journalctl, so a deployed service shows it once per boot.
     for sock in endpoint.addr().ip_addrs() {
         // A URL host must bracket IPv6 literals ([::1]:4456, not ::1:4456).
         let url_host = std::net::SocketAddr::new(sock.ip(), relay_http_port);
-        println!("  relay spec: {}@{sock}#http://{url_host}", endpoint.id());
+        let spec = format!("{}@{sock}#http://{url_host}", endpoint.id());
+        println!("  relay spec: {spec}");
+        let payload = format!("{}{spec}", zink_protocol::RelayEntry::QR_PREFIX);
+        match qrcode::QrCode::new(payload.as_bytes()) {
+            Ok(code) => println!(
+                "{}",
+                code.render::<qrcode::render::unicode::Dense1x2>().build()
+            ),
+            Err(error) => eprintln!("  (no QR for this spec: {error})"),
+        }
     }
     println!("  QAD: udp/{relay_http_port} (self-signed TLS)");
 

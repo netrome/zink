@@ -387,7 +387,13 @@ async fn set_profile(
 ) -> Result<QrPayload, String> {
     let client = client(&app, &managed).await?;
     client.set_profile(&name, &relays).await?;
-    client.register_at_home_relays().await?;
+    // Best-effort (R4, 5-relay-lifecycle §8): the profile is saved and the
+    // QR must render even when the relay is unreachable — that QR is the
+    // recovery artifact. An unreachable own relay surfaces through the
+    // send/recv paths (R3), not by walling off the save.
+    if let Err(error) = client.register_at_home_relays().await {
+        tracing::warn!(%error, "relay registration failed; profile saved anyway");
+    }
     // The relay may be new — give it its live-delivery task right away.
     spawn_subscriptions(&app, &managed, &client);
     qr_payload(&client.my_record()?)

@@ -34,11 +34,26 @@ pub struct RelayEntry {
 }
 
 impl RelayEntry {
+    /// The out-of-band prefix for a single relay spec — the scannable
+    /// artifact `zink-relay` prints (R4, relay-lifecycle). Deliberately
+    /// distinct from the `ZINK:` contact-record prefix so one scanner can
+    /// route by payload. Presentation like `ZINK:`, never wire.
+    pub const QR_PREFIX: &'static str = "ZINK-RELAY:";
+
+    /// The scannable/paste-able form: `ZINK-RELAY:<spec>`.
+    pub fn to_qr_string(&self) -> String {
+        format!("{}{}", Self::QR_PREFIX, self.to_spec())
+    }
+
     /// Parse the human/CLI spec `<mailbox-dial>[#<relay-url>]` — the form
-    /// `zink-relay` prints and profiles/QR flows pass around. Pure string
-    /// splitting; the parts are validated where they're used (the mailbox
-    /// dial by the dialing edge, the URL by the endpoint builder).
+    /// `zink-relay` prints and profiles/QR flows pass around. The scanned
+    /// `ZINK-RELAY:` form is accepted too, so a spec pastes anywhere one
+    /// is asked for. Pure string splitting; the parts are validated where
+    /// they're used (the mailbox dial by the dialing edge, the URL by the
+    /// endpoint builder).
     pub fn from_spec(spec: &str) -> Self {
+        let spec = spec.trim();
+        let spec = spec.strip_prefix(Self::QR_PREFIX).unwrap_or(spec);
         match spec.split_once('#') {
             Some((mailbox, url)) if !url.trim().is_empty() => Self {
                 mailbox: mailbox.trim().to_string(),
@@ -207,6 +222,27 @@ mod tests {
                 "someid@203.0.113.7:4400#http://203.0.113.7:4401",
             )],
         )
+    }
+
+    #[test]
+    fn relay_entry_qr__should_roundtrip_and_paste_as_a_plain_spec() {
+        // Given
+        let entry = RelayEntry::from_spec("someid@203.0.113.7:4400#http://203.0.113.7:4401");
+
+        // When
+        let payload = entry.to_qr_string();
+
+        // Then: the scanned form parses back, and routes distinctly from
+        // a contact QR (the prefixes must never shadow each other)
+        assert_eq!(
+            payload,
+            "ZINK-RELAY:someid@203.0.113.7:4400#http://203.0.113.7:4401"
+        );
+        assert_eq!(RelayEntry::from_spec(&payload), entry);
+        assert!(
+            !payload.starts_with(QR_PREFIX),
+            "a relay QR is not a contact QR"
+        );
     }
 
     #[test]

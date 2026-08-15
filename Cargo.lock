@@ -5244,6 +5244,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-relay",
  "n0-future",
+ "qrcode",
  "rcgen",
  "rustls",
  "tokio",

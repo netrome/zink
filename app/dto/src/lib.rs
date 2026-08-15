@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The relay-spec QR prefix (R4) — the webview's routing copy of
+/// `zink_protocol::RelayEntry::QR_PREFIX` (the source of truth, which the
+/// UI crate deliberately doesn't depend on). Must match it byte-for-byte;
+/// the protocol's tests pin the literal.
+pub const RELAY_QR_PREFIX: &str = "ZINK-RELAY:";
+
 /// Everything the UI needs on load, in one call.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppState {

@@ -1,6 +1,6 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 🟡 in progress (started 2026-08-15) — R1 ✅ R2 ✅ R3 ✅.** Project **5-relay-lifecycle**,
+> **Status: 🟡 in progress (started 2026-08-15) — R1–R4 ✅.** Project **5-relay-lifecycle**,
 > picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
 > permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
 > (server reinstall, 2026-08-15) hit three compounding walls — see §1.
@@ -229,14 +229,31 @@ recorded per §5.
 
 **Tier 2 — the management surface**
 
-- [ ] **R4 · Relay QR + one scanner.** `zink-relay` prints a terminal QR
-  (Unicode half-block; `qrcode`, already in the workspace) of
-  `ZINK-RELAY:<spec>` beside the existing `relay spec:` lines — which
-  sockets get one decided in-slice (lean: each, they're two). App: the
-  existing scanner routes by prefix — `ZINK:` → contact flow (unchanged),
-  `ZINK-RELAY:` → "add to my relays?" confirm in Me; paste accepts the
-  prefixed form anywhere a spec is accepted, CLI included. *Done when:*
-  phone-adds-relay is scan → confirm, zero transcription.
+- [x] **R4 · Relay QR + one scanner.** ✅ 2026-08-16. The artifact became a
+  protocol-adjacent constant: `RelayEntry::QR_PREFIX = "ZINK-RELAY:"` +
+  `to_qr_string` (presentation like `ZINK:`, never wire; the prefixes
+  can't shadow each other, pinned by test), and **`from_spec` strips the
+  prefix** — so the scanned form pastes anywhere a spec is asked for (CLI
+  `--relay`, the Me editor, profiles) with zero extra plumbing.
+  `zink-relay` prints a Unicode half-block QR under **each** `relay spec:`
+  line (sockets decided: each — two lines apart, the operator picks;
+  journalctl shows the block once per boot). App, one scanner per screen,
+  payload decides: the Me pair-scanner routes `ZINK-RELAY:` payloads into
+  the relay list (the existing **save is the confirm**), a dedicated
+  "scan a relay QR" button sits beside "add relay" sharing the same
+  handler, and the People scanner redirects relay codes with a friendly
+  pointer instead of "malformed input". Folded in the §8 parked fix,
+  twice: CLI `my-record` prints the record *before* best-effort
+  registration (warning on stderr, exit 0 — the recovery artifact is
+  never walled off), and the app's `set_profile` mirrors it (profile
+  saves, QR renders, registration failure logged). Dependency: `qrcode`
+  0.14.1 into `zink-relay` — already in the workspace; the artifact is
+  the feature. **Proof:** 251/251 (+1 protocol test), clippy clean,
+  `wasm32` + `app/ui/build.sh` + src-tauri check clean; live demo: relay
+  startup shows the scannable block, `my-record` against the killed
+  relay printed the payload + warning with exit 0, and
+  `--relay "ZINK-RELAY:<spec>"` was accepted verbatim. **B6 is dead** —
+  phone-adds-relay is scan → save, zero transcription.
 - [ ] **R5 · Per-contact relay panel.** Person view shows the *effective*
   relays with provenance and freshness — "from your scan · Jul 26", "served
   by them · yesterday", "you set this · today" — plus last-deposit outcome
@@ -274,7 +291,7 @@ recorded per §5.
 | Override rank | **Open — decide in R5.** Tension: the petname precedent says manual wins; but a manual override outranking subject-served answers can go stale and recreate this project's disease. Lean: manual wins while it works, and R3's stuck-surfacing is the honesty valve. |
 | Outbox keying | Resolved at R2: **keep `(message, relay)`, reconcile at flush.** The file format never changed, so pre-R2 ledgers migrate by being flushed once; per-recipient state lives nowhere because it's derivable (sealed recipients + acks + current records). Re-keying by recipient was rejected as a stored duplicate of what reconciliation computes. |
 | Stuck threshold & wording | Resolved at R3: the client exposes the *fact* (`owed_since_ms`); thresholds are **edge policy** — stuck at 10 min (a relay restart never alarms), undelivered at the public `OUTBOX_GIVE_UP_MS`. Wording is our-deposit-only ("can't reach *their relay*", never "not delivered"); confirmation stays positive-only. |
-| Relay QR payload | `ZINK-RELAY:` + the existing spec string, no new encoding — the spec format is already the versioned artifact. One scanner, prefix-routed. (R4) |
+| Relay QR payload | Resolved at R4: `ZINK-RELAY:` + the existing spec string, no new encoding — the spec format is already the versioned artifact. Prefix-stripping lives in `RelayEntry::from_spec`, so every spec-accepting surface takes the scanned form for free. QR per bound socket (each — the operator picks). |
 | Subject-refresh policy | **Open — decide in R6.** Triggers (which connection events), rate limit, and the failure-eager mode. Fixed now: subject-only, existing-connection-only, learned-store-only. |
 | Revision hint on messages | **Parked** (§8) — a wire change through SPEC §11, proposed only after R6 shows the residual gap (receivers who never get a live channel to the migrated peer). |
 
@@ -302,8 +319,5 @@ recorded per §5.
   §11 proposal, only if it bites in practice.
 - **De6e presence query** — declined stance stands (SPEC §11).
 - **`my-record` can't print while a home relay is down** (found by the R1
-  drill): the CLI hard-fails on `register_at_home_relays()?` *before*
-  printing the payload — so a user whose relay just died can't produce the
-  very record/QR that would re-home them. Registration should be
-  best-effort for the print path. Natural home: R4 (it touches this
-  command anyway).
+  drill) — ✅ fixed in R4, in both the CLI and the app's `set_profile`:
+  print/save first, register best-effort with a warning.

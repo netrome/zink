@@ -150,9 +150,18 @@ async fn my_record(args: &[String]) -> Result<(), String> {
         return Err(format!("no home relay yet — pass --relay\n{USAGE}"));
     }
     client.set_profile(&name, &relays).await?;
-    client.register_at_home_relays().await?;
+    // Print first, register best-effort after (R4, 5-relay-lifecycle §8):
+    // a user whose relay just died must still be able to produce the very
+    // record/QR that re-homes them — failing before the print walled off
+    // the recovery artifact.
     let payload = client.my_record()?.to_qr_string();
     println!("{payload}");
+    if let Err(error) = client.register_at_home_relays().await {
+        eprintln!(
+            "warning: relay registration failed ({error}) — deposits to you \
+             may fail until a relay takes the registration"
+        );
+    }
     if flags.iter().any(|(flag, _)| flag == "--qr") {
         let code = qrcode::QrCode::new(payload.as_bytes()).map_err(|e| format!("qr: {e}"))?;
         println!(

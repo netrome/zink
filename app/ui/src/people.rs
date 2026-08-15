@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{AddPreview, AppState};
+use zink_app_dto::{AddPreview, AppState, RELAY_QR_PREFIX};
 
 use crate::{NoArgs, avatar_data_url, invoke};
 
@@ -69,8 +69,12 @@ pub(crate) fn PeopleView(
 
     // Every scan/paste triages first (R1): a record overlapping a stored
     // contact detours to the confirm card instead of erroring on a petname
-    // mismatch; a genuinely new one flows to the plain add.
+    // mismatch; a genuinely new one flows to the plain add. A relay code
+    // (R4) is redirected — relays are yours, not a person.
     let submit = move |payload: String| {
+        if payload.trim().starts_with(RELAY_QR_PREFIX) {
+            return err("that's a relay code — add it from your page (me → your relays)".into());
+        }
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
