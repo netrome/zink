@@ -328,9 +328,18 @@ opportunistically, as its own commit)
 
 **Tier 3 — the app + close-out**
 
-- [ ] **M8 · `app/ui/src/lib.rs` by screen.** Same treatment, different
-  toolchain: root `lib.rs` (app shell, routing) over per-screen view
-  modules. View-only (§4); verified by build + click-through.
+- [x] **M8 · `app/ui/src/lib.rs` by screen.** ✅ 2026-08-15. `lib.rs`
+  (2,362 → 250 lines): the shell — `start`, the `View` routing enum,
+  `App`, and the two genuinely shared pieces (`NoArgs`, `avatar_data_url`,
+  used by four screens) — over six per-screen modules: `onboarding` (201) ·
+  `chats` (193) · `chat` (698, plus its private `blob_data_url`/`time_of`
+  helpers — single-caller, so they moved with their screen) · `me` (450) ·
+  `people` (233) · `person` (385). Byte-exact moves; each component fn
+  became `pub(crate)` for the shell's `view!` references; routing stayed
+  entirely in the shell (no view names `View`). View-only per §4 — zero
+  markup/CSS/copy changes. **Verified by build** (`app/ui/build.sh` →
+  `app/dist/pkg`, zero warnings); the click-through half needs a desktop
+  session — this box is headless, so that's on the next app run.
 - [ ] **M9 · Re-measure + graduate.** Final line-count and suite-time table
   here; STYLE.md conventions, `reach.rs` `//!`, client-core.md pointer,
   projects README rows per §5.
