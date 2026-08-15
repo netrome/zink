@@ -30,7 +30,8 @@ Delivery: [mailbox-rendezvous-push.md](./design/mailbox-rendezvous-push.md) ·
 [mailbox-wire-protocol.md](./design/mailbox-wire-protocol.md) ·
 [live-delivery.md](./design/live-delivery.md) ·
 [direct-delivery.md](./design/direct-delivery.md) ·
-[fast-failure.md](./design/fast-failure.md).
+[fast-failure.md](./design/fast-failure.md) ·
+[relay-lifecycle.md](./design/relay-lifecycle.md).
 Client & data: [client-core.md](./design/client-core.md) ·
 [dag-store.md](./design/dag-store.md) · [transport.md](./design/transport.md) ·
 [ui-design-system.md](./design/ui-design-system.md).

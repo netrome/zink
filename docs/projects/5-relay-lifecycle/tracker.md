@@ -1,6 +1,6 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 🟡 in progress (started 2026-08-15) — R1 ✅.** Project **5-relay-lifecycle**,
+> **Status: 🟡 in progress (started 2026-08-15) — R1 ✅ R2 ✅.** Project **5-relay-lifecycle**,
 > picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
 > permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
 > (server reinstall, 2026-08-15) hit three compounding walls — see §1.
@@ -182,17 +182,31 @@ recorded per §5.
   `contact-update` heals — petname kept, stored record on relay B.
   **B1 is dead.** (App card is build-verified; this box is headless —
   eyeball it on the next desktop/phone run.)
-- [ ] **R2 · The outbox follows the record.** An outbox entry means "these
-  recipients aren't served yet", not "deposit to this dial string". Flush
-  re-resolves targets through `effective_relays` at flush time (re-key
-  entries by recipient, or re-derive from conversation membership — decide
-  in-slice, with a migration for existing pending entries). Discharge on
-  proof-of-possession: when every recipient a deposit would serve has
-  direct-acked, all entries for that message clear (extends the existing
-  per-relay skip in `send.rs::deliver`). Regression test = the migration
-  story: stage to relay A, kill A, learn new relays for the recipient, flush
-  → delivered, pending cleared. *Done when:* B3 and the direct-ack half of
-  B4 are dead.
+- [x] **R2 · The outbox follows the record.** ✅ 2026-08-15. Shipped as
+  **reconcile-at-flush over the unchanged `(message, relay)` ledger** (the
+  keying decision, §7): every `flush_outbox` first re-derives each pending
+  message's owed relays — sealed recipients through `effective_relays`,
+  exactly as a fresh send — releases entries no longer owed, and adds
+  entries for newly-owed relays **inheriting the message's original age**
+  (a moved record must not reset the give-up clock). Settlement by proof
+  of possession: a relay whose every hosted recipient has a persisted De7
+  ack is released without a deposit — except for blob messages (bytes come
+  from the recipient's relay cache, so the deposit is still owed; the
+  send-time skip's guard, mirrored). Recipients resolving to *no* relays
+  (raw-spec sends, lost records) keep every staged entry — debt is never
+  dropped on no evidence. `FlushReport` gained `released` (settled ≠
+  `delivered` — honesty kept). Pre-R2 ledgers migrate by being flushed
+  once; membership is never re-litigated. Five new tests: the B3
+  migration regression (stage to silent A → R1 `update_contact` to B →
+  flush deposits to B, A released un-redialed), ack-release without a
+  dial, the blob guard, the raw-spec fallback, and age-inheritance under
+  a jumped `TestWallClock` (expired re-target stays surfaced, undialed).
+  Design graduated to **`docs/design/relay-lifecycle.md`** §1–§4 (the
+  ledger owes recipients, not dial strings; sync pulls deliberately don't
+  count as possession — §8); live-delivery.md §2 updated in place.
+  **Proof:** 250/250 (~1.1 s; was 245), clippy clean, `wasm32` compiles,
+  the real-network outbox smoke (relay restart at the same dial string)
+  green. **B3 and the direct-ack half of B4 are dead.**
 - [ ] **R3 · Honest send states in the app.** DTO gains `confirmed`
   (project-4 §8(a)) and a stuck signal (entry expired, or N consecutive
   flush failures — threshold decided in-slice with R2's shape). Chat
@@ -247,7 +261,7 @@ recorded per §5.
 | Empty petname on update | Resolved sharper at R1: `update_contact` has **no petname parameter** — an update never renames, so the API can't express the mistake. The self-claim default survives only for genuinely new contacts, where it's the right prefill. |
 | Where overrides live | Beside the record, as a new provenance class in `effective_relays` — never mutating the stored record (immutable evidence, who-is-this.md §5). Relays are unsigned in the record, so nothing cryptographic is at stake; provenance honesty is. (R5) |
 | Override rank | **Open — decide in R5.** Tension: the petname precedent says manual wins; but a manual override outranking subject-served answers can go stale and recreate this project's disease. Lean: manual wins while it works, and R3's stuck-surfacing is the honesty valve. |
-| Outbox keying | **Open — decide in R2.** Re-key by `(message, recipient)` vs keep `(message, relay)` and re-derive at flush; both must migrate existing pending entries. |
+| Outbox keying | Resolved at R2: **keep `(message, relay)`, reconcile at flush.** The file format never changed, so pre-R2 ledgers migrate by being flushed once; per-recipient state lives nowhere because it's derivable (sealed recipients + acks + current records). Re-keying by recipient was rejected as a stored duplicate of what reconciliation computes. |
 | Stuck threshold & wording | **Open — decide in R3** with R2's shape. Constraint fixed now: positive-only confirmation, stuck = our-deposit fact. |
 | Relay QR payload | `ZINK-RELAY:` + the existing spec string, no new encoding — the spec format is already the versioned artifact. One scanner, prefix-routed. (R4) |
 | Subject-refresh policy | **Open — decide in R6.** Triggers (which connection events), rate limit, and the failure-eager mode. Fixed now: subject-only, existing-connection-only, learned-store-only. |
@@ -265,10 +279,16 @@ recorded per §5.
 - **Old-relay grace period** is a deployment practice (run old + new during
   migration; SPEC §3.6 tolerates the window) — add a line to the deploy notes
   when R4 touches relay docs; no code.
-- **Partial direct-ack in groups** — R2's proof-of-possession discharge is
-  per-message-all-recipients; if a residue shows up where some recipients ack
-  and the rest's relay is dead, it surfaces in R3's stuck state honestly.
-  Revisit only if the drill (R7) shows worse.
+- **Partial direct-ack in groups** — R2 shipped this per-relay (a relay is
+  released when every recipient *it hosts* has acked), so the residue is
+  only "some of one relay's recipients acked, the rest unreachable" — that
+  stays pending and surfaces in R3's stuck state honestly. Revisit only if
+  the drill (R7) shows worse.
+- **Sync pulls are not possession** (resolved at R2, relay-lifecycle.md §3):
+  serving a message to its recipient over `get`/`get-successors` doesn't
+  settle the outbox — a request isn't a durable-store ack. Closing that
+  last window honestly means an explicit ack op on the peer ALPN — a SPEC
+  §11 proposal, only if it bites in practice.
 - **De6e presence query** — declined stance stands (SPEC §11).
 - **`my-record` can't print while a home relay is down** (found by the R1
   drill): the CLI hard-fails on `register_at_home_relays()?` *before*

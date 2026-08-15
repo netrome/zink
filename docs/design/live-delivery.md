@@ -81,6 +81,13 @@ mailbox exists because that can't be assumed).
   the social moment passed. Keep the entry, stop retrying, surface as
   "undelivered" in history; deleting a message the user wrote is not the
   client's call (tenet: discretion over enforcement).
+- **Reconciliation (R2, 2026-08-15):** a flush no longer retries entries
+  verbatim — the ledger owes *recipients*, not dial strings, so each pending
+  message first re-resolves through `effective_relays` (entries for relays
+  no longer owed are released; newly-owed relays get entries inheriting the
+  original age) and a message every recipient durably acked is settled
+  without a deposit. Rationale and guard rails:
+  [relay-lifecycle.md](./relay-lifecycle.md) §2–§4.
 - **Known-remaining — no per-entry retry backoff (not yet implemented).** A
   flush retries *every* not-yet-given-up entry, so one dead relay costs one
   connect-timeout per flush until the 30-day window. Not painful now that the
