@@ -46,6 +46,74 @@ impl Contact {
     }
 }
 
+/// `preview_contact`'s verdict: what storing a scanned/pasted record would
+/// do. Read-only triage — the explicit act stays `add_contact` /
+/// `update_contact` (R1, relay-lifecycle).
+pub enum RecordMatch {
+    /// No key overlap — a genuinely new person.
+    New {
+        /// The record's verified self-claimed name, if any — the petname
+        /// prefill for the add flow.
+        suggested_petname: Option<String>,
+    },
+    /// Shares a key with exactly one contact — storing it is an update of
+    /// that entry (multi-device.md §4); the diff is what a confirm shows.
+    Update(RecordUpdate),
+    /// Shares keys with two or more contacts — storing would be refused.
+    Ambiguous { petnames: Vec<String> },
+}
+
+/// The confirmable diff for a key-overlapping record: stored → scanned.
+/// Relays are full specs (`dial[#relay-url]`); names are the verified
+/// self-claims (`None` = no valid claim), compared by the edge.
+pub struct RecordUpdate {
+    /// The stored entry's petname — an update never renames (petnames are
+    /// ours; renaming is `rename_contact`'s job).
+    pub petname: String,
+    pub old_name: Option<String>,
+    pub new_name: Option<String>,
+    pub relays_added: Vec<String>,
+    pub relays_removed: Vec<String>,
+    pub keys_added: usize,
+    pub keys_removed: usize,
+}
+
+impl RecordUpdate {
+    fn diff(petname: &str, stored: &ContactRecord, scanned: &ContactRecord) -> Self {
+        let old_relays: BTreeSet<String> = stored.relays.iter().map(RelayEntry::to_spec).collect();
+        let new_relays: BTreeSet<String> = scanned.relays.iter().map(RelayEntry::to_spec).collect();
+        RecordUpdate {
+            petname: petname.to_string(),
+            old_name: stored.self_claimed_name().map(str::to_string),
+            new_name: scanned.self_claimed_name().map(str::to_string),
+            relays_added: new_relays.difference(&old_relays).cloned().collect(),
+            relays_removed: old_relays.difference(&new_relays).cloned().collect(),
+            keys_added: scanned
+                .keys
+                .iter()
+                .filter(|key| !stored.keys.contains(key))
+                .count(),
+            keys_removed: stored
+                .keys
+                .iter()
+                .filter(|key| !scanned.keys.contains(key))
+                .count(),
+        }
+    }
+}
+
+/// The contacts sharing at least one key with the record — the identity
+/// evidence add/update/preview all triage on (multi-device.md §4).
+fn overlapping<'a>(
+    contacts: &'a [(String, ContactRecord)],
+    record: &ContactRecord,
+) -> Vec<&'a (String, ContactRecord)> {
+    contacts
+        .iter()
+        .filter(|(_, existing)| existing.keys.iter().any(|key| record.keys.contains(key)))
+        .collect()
+}
+
 /// `resolve_name`'s verdict (who-is-this.md §6).
 pub enum ResolvedName {
     /// The key belongs to a contact — the manual label always wins.
@@ -128,11 +196,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                 )
             })?;
         let contacts = self.state.contacts()?;
-        let overlapping: Vec<&(String, ContactRecord)> = contacts
-            .iter()
-            .filter(|(_, existing)| existing.keys.iter().any(|key| record.keys.contains(key)))
-            .collect();
-        match overlapping.as_slice() {
+        match overlapping(&contacts, record).as_slice() {
             // A brand-new person; the petname must still resolve to one
             // person (send-by-name stays unambiguous).
             [] => {
@@ -155,6 +219,57 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             }
         }
         Ok(petname)
+    }
+
+    /// Triage a scanned/pasted record against the store: a brand-new
+    /// person, an update of exactly one contact (with the diff a confirm
+    /// renders), or an ambiguous span that storing would refuse. Read-only
+    /// — this is what lets an edge put the explicit update confirm in
+    /// front of a human instead of asking them to retype a petname (R1).
+    pub fn preview_contact(&self, record: &ContactRecord) -> Result<RecordMatch, Error> {
+        let contacts = self.state.contacts()?;
+        Ok(match overlapping(&contacts, record).as_slice() {
+            [] => RecordMatch::New {
+                suggested_petname: record.self_claimed_name().map(str::to_string),
+            },
+            [(petname, existing)] => {
+                RecordMatch::Update(RecordUpdate::diff(petname, existing, record))
+            }
+            several => RecordMatch::Ambiguous {
+                petnames: several.iter().map(|(name, _)| name.clone()).collect(),
+            },
+        })
+    }
+
+    /// The explicit update act (R1): replace the record of the one contact
+    /// this record shares a key with, keeping the stored petname — an
+    /// update never renames. The caller has confirmed against
+    /// `preview_contact`; a record matching nothing belongs to
+    /// `add_contact`, and one spanning two contacts is refused outright,
+    /// same as everywhere (multi-device.md §4).
+    pub fn update_contact(&self, record: &ContactRecord) -> Result<String, Error> {
+        if record.keys.is_empty() {
+            return Err(Error::InvalidRecord("record has no keys".into()));
+        }
+        if record.relays.is_empty() {
+            return Err(Error::InvalidRecord(
+                "record has no relays — no way to reach them".into(),
+            ));
+        }
+        let contacts = self.state.contacts()?;
+        match overlapping(&contacts, record).as_slice() {
+            [] => Err(Error::NotAContact(
+                "record shares no key with a stored contact — add it instead".into(),
+            )),
+            [(petname, existing)] => {
+                self.state.replace_contact(existing, petname, record)?;
+                Ok(petname.clone())
+            }
+            several => {
+                let names: Vec<&str> = several.iter().map(|(name, _)| name.as_str()).collect();
+                Err(Error::AmbiguousOverlap(names.join(", ")))
+            }
+        }
     }
 
     /// Rename a contact — set *my* petname for them (my lens, U4). Purely
@@ -906,6 +1021,207 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(temp_root("overlap-collision"));
+    }
+
+    #[tokio::test]
+    async fn preview_contact__should_report_a_new_record_with_the_self_claim() {
+        // Given: an empty store; a record self-claiming "carol"
+        let a = Client::open_or_create(&temp_key("preview-new", "a"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([40; 32]);
+        let record = signed_record(&carol, "carol", 0, mailbox_only("cc@203.0.113.1:1"));
+
+        // When
+        let matched = a.preview_contact(&record).expect("preview");
+
+        // Then
+        assert!(matches!(
+            matched,
+            RecordMatch::New { suggested_petname: Some(ref name) } if name == "carol"
+        ));
+
+        let _ = std::fs::remove_dir_all(temp_root("preview-new"));
+    }
+
+    #[tokio::test]
+    async fn preview_contact__should_diff_an_update_of_one_contact() {
+        // Given: anna stored under her original record (self-claim "Anna",
+        // one relay); a re-scan with a renamed claim, a replaced relay,
+        // and a second device key
+        let a = Client::open_or_create(&temp_key("preview-diff", "a"))
+            .await
+            .expect("open");
+        let anna = DeviceKey::from_seed([41; 32]);
+        let laptop = DeviceKey::from_seed([42; 32]);
+        let stored = signed_record(&anna, "Anna", 0, mailbox_only("old@203.0.113.1:1"));
+        a.add_contact(&stored, Some("anna".to_string()))
+            .expect("add");
+        let renamed = SignedAttestation::new(
+            Attestation {
+                version: Attestation::CURRENT,
+                attester: anna.public(),
+                subject: anna.public(),
+                claim: Claim::Name("Ann".to_string()),
+                revision: 1,
+            },
+            &anna,
+        );
+        let rescanned = ContactRecord::new(
+            vec![anna.public(), laptop.public()],
+            vec![renamed],
+            mailbox_only("new@203.0.113.9:9"),
+        );
+
+        // When
+        let matched = a.preview_contact(&rescanned).expect("preview");
+
+        // Then: an update of anna's entry, with the full diff
+        let RecordMatch::Update(update) = matched else {
+            panic!("expected an update match");
+        };
+        assert_eq!(update.petname, "anna");
+        assert_eq!(update.old_name.as_deref(), Some("Anna"));
+        assert_eq!(update.new_name.as_deref(), Some("Ann"));
+        assert_eq!(update.relays_added, vec!["new@203.0.113.9:9".to_string()]);
+        assert_eq!(update.relays_removed, vec!["old@203.0.113.1:1".to_string()]);
+        assert_eq!(update.keys_added, 1);
+        assert_eq!(update.keys_removed, 0);
+
+        let _ = std::fs::remove_dir_all(temp_root("preview-diff"));
+    }
+
+    #[tokio::test]
+    async fn preview_contact__should_report_a_record_spanning_contacts() {
+        // Given: bob and carol stored; a record carrying both their keys
+        let a = Client::open_or_create(&temp_key("preview-span", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([43; 32]);
+        let carol = DeviceKey::from_seed([44; 32]);
+        for (device, name, mailbox) in [
+            (&bob, "bob", "bb@203.0.113.1:1"),
+            (&carol, "carol", "cc@203.0.113.2:2"),
+        ] {
+            a.add_contact(
+                &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
+                Some(name.to_string()),
+            )
+            .expect("add");
+        }
+        let spanning = ContactRecord::new(
+            vec![bob.public(), carol.public()],
+            vec![],
+            mailbox_only("xx@203.0.113.7:7"),
+        );
+
+        // When
+        let matched = a.preview_contact(&spanning).expect("preview");
+
+        // Then
+        assert!(matches!(
+            matched,
+            RecordMatch::Ambiguous { ref petnames } if *petnames == ["bob", "carol"]
+        ));
+
+        let _ = std::fs::remove_dir_all(temp_root("preview-span"));
+    }
+
+    #[tokio::test]
+    async fn update_contact__should_replace_the_record_and_keep_the_petname() {
+        // Given: anna stored, then renamed on her side and re-homed to a
+        // new relay — the B1 migration regression (5-relay-lifecycle §3)
+        let a = Client::open_or_create(&temp_key("update-keeps", "a"))
+            .await
+            .expect("open");
+        let anna = DeviceKey::from_seed([45; 32]);
+        let stored = signed_record(&anna, "Anna", 0, mailbox_only("old@203.0.113.1:1"));
+        a.add_contact(&stored, Some("anna".to_string()))
+            .expect("add");
+        let rescanned = signed_record(&anna, "Ann", 1, mailbox_only("new@203.0.113.9:9"));
+
+        // When: the confirmed update — no petname anywhere in sight
+        let petname = a.update_contact(&rescanned).expect("update");
+
+        // Then: same entry, my label kept, her fresh record the new anchor
+        assert_eq!(petname, "anna");
+        let contacts = a.contacts().expect("contacts");
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].0, "anna");
+        assert_eq!(contacts[0].1, rescanned);
+        let contact = a.resolve_contact("anna").expect("resolve");
+        assert_eq!(contact.relays, vec!["new@203.0.113.9:9".to_string()]);
+
+        let _ = std::fs::remove_dir_all(temp_root("update-keeps"));
+    }
+
+    #[tokio::test]
+    async fn update_contact__should_refuse_a_record_matching_no_contact() {
+        // Given: bob stored; a record sharing none of his keys
+        let a = Client::open_or_create(&temp_key("update-none", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([46; 32]);
+        let stranger = DeviceKey::from_seed([47; 32]);
+        a.add_contact(
+            &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
+            Some("bob".to_string()),
+        )
+        .expect("add");
+        let contacts_dir =
+            std::path::PathBuf::from(format!("{}.state", temp_key("update-none", "a")))
+                .join("contacts");
+        let before = dir_bytes(&contacts_dir);
+
+        // When / Then: refused — updating what isn't stored is an add
+        assert!(matches!(
+            a.update_contact(&ContactRecord::new(
+                vec![stranger.public()],
+                vec![],
+                mailbox_only("ss@203.0.113.2:2"),
+            )),
+            Err(Error::NotAContact(_))
+        ));
+        assert_eq!(dir_bytes(&contacts_dir), before);
+
+        let _ = std::fs::remove_dir_all(temp_root("update-none"));
+    }
+
+    #[tokio::test]
+    async fn update_contact__should_refuse_a_record_spanning_contacts() {
+        // Given: bob and carol stored; a record carrying both their keys
+        let a = Client::open_or_create(&temp_key("update-span", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([48; 32]);
+        let carol = DeviceKey::from_seed([49; 32]);
+        for (device, name, mailbox) in [
+            (&bob, "bob", "bb@203.0.113.1:1"),
+            (&carol, "carol", "cc@203.0.113.2:2"),
+        ] {
+            a.add_contact(
+                &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
+                Some(name.to_string()),
+            )
+            .expect("add");
+        }
+        let contacts_dir =
+            std::path::PathBuf::from(format!("{}.state", temp_key("update-span", "a")))
+                .join("contacts");
+        let before = dir_bytes(&contacts_dir);
+
+        // When / Then: merging is never silent — refused, store untouched
+        assert!(matches!(
+            a.update_contact(&ContactRecord::new(
+                vec![bob.public(), carol.public()],
+                vec![],
+                mailbox_only("xx@203.0.113.7:7"),
+            )),
+            Err(Error::AmbiguousOverlap(_))
+        ));
+        assert_eq!(dir_bytes(&contacts_dir), before);
+
+        let _ = std::fs::remove_dir_all(temp_root("update-span"));
     }
 
     #[tokio::test]

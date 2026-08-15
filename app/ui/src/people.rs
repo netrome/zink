@@ -3,9 +3,19 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::AppState;
+use zink_app_dto::{AddPreview, AppState};
 
 use crate::{NoArgs, avatar_data_url, invoke};
+
+/// The R1 detour: a scanned/pasted record that belongs to an existing
+/// contact, held for the user's explicit confirm before it replaces that
+/// entry — the confirm card is the explicit act the overlap guard demands.
+#[derive(Clone)]
+struct PendingUpdate {
+    payload: String,
+    petname: String,
+    changes: Vec<String>,
+}
 
 /// "People" — your contacts. The list is a plain, tappable list (a row opens
 /// the person-detail lens, U4); adding a contact (scan / paste) hides behind a
@@ -27,6 +37,10 @@ pub(crate) fn PeopleView(
     // self-claimed name. Applies to both the scan and paste paths.
     let new_name = RwSignal::new(String::new());
 
+    // A scanned record matching an existing contact, awaiting the confirm
+    // card (R1) — Some switches the composer to the card.
+    let pending = RwSignal::new(None::<PendingUpdate>);
+
     let add = move |payload: String| {
         let petname = new_name.get_untracked();
         let petname = (!petname.trim().is_empty()).then_some(petname);
@@ -47,6 +61,56 @@ pub(crate) fn PeopleView(
                     adding.set(false);
                     reload();
                     ok(&format!("added {petname}"));
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Every scan/paste triages first (R1): a record overlapping a stored
+    // contact detours to the confirm card instead of erroring on a petname
+    // mismatch; a genuinely new one flows to the plain add.
+    let submit = move |payload: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+            }
+            let args = Args { payload: &payload };
+            match invoke::invoke::<AddPreview>("preview_contact", &args).await {
+                Ok(preview) => match preview.updates {
+                    Some(petname) => pending.set(Some(PendingUpdate {
+                        payload,
+                        petname,
+                        changes: preview.changes,
+                    })),
+                    None => add(payload),
+                },
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    let confirm_update = move |_| {
+        let Some(update) = pending.get_untracked() else {
+            return;
+        };
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                payload: &'a str,
+            }
+            let args = Args {
+                payload: &update.payload,
+            };
+            match invoke::invoke::<String>("update_contact", &args).await {
+                Ok(petname) => {
+                    pending.set(None);
+                    paste.set(String::new());
+                    new_name.set(String::new());
+                    adding.set(false);
+                    reload();
+                    ok(&format!("updated {petname}"));
                 }
                 Err(e) => err(e),
             }
@@ -112,7 +176,7 @@ pub(crate) fn PeopleView(
             let result = invoke::invoke::<Scanned>("plugin:barcode-scanner|scan", &args).await;
             scanning.set(false);
             match result {
-                Ok(scanned) => add(scanned.content),
+                Ok(scanned) => submit(scanned.content),
                 // A cancelled scan also lands here — worth no red banner.
                 Err(e) => err(e),
             }
@@ -131,7 +195,42 @@ pub(crate) fn PeopleView(
     view! {
         <main>
             {move || {
-                if adding.get() {
+                if let Some(update) = pending.get() {
+                    // The update-confirm card (R1): the scanned code belongs
+                    // to a stored contact — show what confirming changes.
+                    view! {
+                        <h3>"already a contact"</h3>
+                        <div>"this code belongs to " <b>{update.petname.clone()}</b></div>
+                        {if update.changes.is_empty() {
+                            view! {
+                                <div class="dim">"no name or relay changes"</div>
+                            }
+                                .into_any()
+                        } else {
+                            update
+                                .changes
+                                .iter()
+                                .map(|change| {
+                                    view! { <div class="dim">{change.clone()}</div> }
+                                })
+                                .collect::<Vec<_>>()
+                                .into_any()
+                        }}
+                        <div class="dim">
+                            {format!(
+                                "your name for them stays “{}” — rename from their page",
+                                update.petname,
+                            )}
+                        </div>
+                        <button on:click=confirm_update>
+                            {format!("update {}", update.petname)}
+                        </button>
+                        <button class="secondary" on:click=move |_| pending.set(None)>
+                            "cancel"
+                        </button>
+                    }
+                        .into_any()
+                } else if adding.get() {
                     // Add-contact composer (scan / paste), off the "+".
                     view! {
                         <h3>"add contact"</h3>
@@ -147,7 +246,7 @@ pub(crate) fn PeopleView(
                             prop:value=move || paste.get()
                             on:input=move |ev| paste.set(event_target_value(&ev))
                         />
-                        <button class="secondary" on:click=move |_| add(paste.get_untracked())>
+                        <button class="secondary" on:click=move |_| submit(paste.get_untracked())>
                             "add from pasted text"
                         </button>
                         <button

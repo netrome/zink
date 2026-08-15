@@ -1,6 +1,6 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 📋 scoped (2026-08-15), not started.** Project **5-relay-lifecycle**,
+> **Status: 🟡 in progress (started 2026-08-15) — R1 ✅.** Project **5-relay-lifecycle**,
 > picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
 > permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
 > (server reinstall, 2026-08-15) hit three compounding walls — see §1.
@@ -155,19 +155,33 @@ recorded per §5.
 
 **Tier 1 — stop the bleeding**
 
-- [ ] **R1 · Rescan is an update.** Client: scanning a record that overlaps
-  exactly one contact becomes a first-class update intent — `add_contact`
-  (or a sibling API; decide in-slice) distinguishes *new person* from
-  *update of X*, and an empty petname on the update path means "keep my
-  stored petname", never "rename to their self-claim". A typed, *different*
-  petname on an overlapping record still refuses (renaming is
-  `rename_contact`'s job). App: the overlap case renders a preview —
-  "This is **X** · name Anna → Ann · relays −`old@…` +`new@…`" — and one
-  confirm applies it; the confirm *is* the explicit act the guard demands
-  (§4). CLI: same distinction, shape decided in-slice. Tests: B1 as a
-  regression (rename + rescan heals); the hostile-record drill (smuggled key
-  cannot rewrite an anchor without the confirm) — same is-it-guarded
-  assertion, moved to the new seam.
+- [x] **R1 · Rescan is an update.** ✅ 2026-08-15. The seam is a read-only
+  triage plus a separate explicit act, `add_contact` untouched:
+  `preview_contact(record)` → `RecordMatch::{New{suggested_petname},
+  Update(RecordUpdate), Ambiguous{petnames}}` — the `RecordUpdate` diff
+  (stored → scanned: self-claims, relay specs ±, device-key counts ±) is
+  what a confirm renders — and `update_contact(record)`, which takes **no
+  petname at all**: an update never renames, so the parameter doesn't
+  exist (sharper than the sketch's "empty petname means keep"). All three
+  triage on one extracted `overlapping()` helper — the multi-device.md §4
+  identity rule now has a single definition. App: every scan/paste routes
+  through preview first; an overlap renders the confirm card ("this code
+  belongs to **X**" + change lines + "your name for them stays …"), and
+  the confirm invokes `update_contact` — the explicit act relocated from
+  retype-the-petname to one tap. New `AddPreview` DTO (render-ready
+  change lines composed at the command layer); ambiguous records error
+  with the message storing them would produce. CLI: `contact-update
+  --key <file> <ZINK:...>` — the command name is the confirm. Six new
+  tests (preview new/diff/span; update keeps-petname — the B1
+  regression — /no-overlap/span, store-untouched pinned by `dir_bytes`);
+  the hostile-record drill unchanged — the guard didn't loosen, its
+  confirm moved. **Proof:** 245/245 (was 239), clippy clean, `wasm32` +
+  `app/ui/build.sh` + src-tauri check clean; live drill against two local
+  relays: added under relay A as "Anna" → renamed to "Ann" + migrated to
+  relay B → plain re-add still walls (`ContactOverlap`) →
+  `contact-update` heals — petname kept, stored record on relay B.
+  **B1 is dead.** (App card is build-verified; this box is headless —
+  eyeball it on the next desktop/phone run.)
 - [ ] **R2 · The outbox follows the record.** An outbox entry means "these
   recipients aren't served yet", not "deposit to this dial string". Flush
   re-resolves targets through `effective_relays` at flush time (re-key
@@ -230,7 +244,7 @@ recorded per §5.
 | Decision | Resolution |
 |---|---|
 | Rescan guard | **Kept, confirm relocated.** The petname-match confirm was the right rule with unusable ergonomics (retype a petname nobody remembers). The explicit act becomes a rendered preview + confirm; the client API distinguishes new-vs-update so no layer auto-rewrites an anchor. (R1) |
-| Empty petname on update | Means "keep my stored petname". The self-claim default survives only for genuinely new contacts, where it's the right prefill. (R1) |
+| Empty petname on update | Resolved sharper at R1: `update_contact` has **no petname parameter** — an update never renames, so the API can't express the mistake. The self-claim default survives only for genuinely new contacts, where it's the right prefill. |
 | Where overrides live | Beside the record, as a new provenance class in `effective_relays` — never mutating the stored record (immutable evidence, who-is-this.md §5). Relays are unsigned in the record, so nothing cryptographic is at stake; provenance honesty is. (R5) |
 | Override rank | **Open — decide in R5.** Tension: the petname precedent says manual wins; but a manual override outranking subject-served answers can go stale and recreate this project's disease. Lean: manual wins while it works, and R3's stuck-surfacing is the honesty valve. |
 | Outbox keying | **Open — decide in R2.** Re-key by `(message, recipient)` vs keep `(message, relay)` and re-derive at flush; both must migrate existing pending entries. |
@@ -256,3 +270,9 @@ recorded per §5.
   and the rest's relay is dead, it surfaces in R3's stuck state honestly.
   Revisit only if the drill (R7) shows worse.
 - **De6e presence query** — declined stance stands (SPEC §11).
+- **`my-record` can't print while a home relay is down** (found by the R1
+  drill): the CLI hard-fails on `register_at_home_relays()?` *before*
+  printing the payload — so a user whose relay just died can't produce the
+  very record/QR that would re-home them. Registration should be
+  best-effort for the print path. Natural home: R4 (it touches this
+  command anyway).

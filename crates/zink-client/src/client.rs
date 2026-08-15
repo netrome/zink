@@ -26,7 +26,9 @@ mod recv;
 mod send;
 mod who_is;
 
-pub use contacts::{Contact, DeviceEvidence, Disavowal, LearnedName, ResolvedName};
+pub use contacts::{
+    Contact, DeviceEvidence, Disavowal, LearnedName, RecordMatch, RecordUpdate, ResolvedName,
+};
 pub use history::{ConversationSummary, HistoryMessage, Inbox, MAX_MESSAGE_REQUESTS, triage};
 pub use outbox::FlushReport;
 pub use profile::AvatarReceipt;

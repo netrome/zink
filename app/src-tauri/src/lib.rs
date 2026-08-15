@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Inbox, Message,
-    OutgoingImage, PersonDetail, QrPayload, RecordPreview, UnknownMember, WhoIsCandidate,
+    AddPreview, AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Inbox,
+    Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview, UnknownMember, WhoIsCandidate,
     WhoIsReport,
 };
-use zink_client::{Client, ResolvedName, hex};
+use zink_client::{Client, RecordMatch, RecordUpdate, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
 
 /// The one `Client` for the app's lifetime, created on first use. A single
@@ -406,6 +406,77 @@ async fn add_contact(
     Ok(client.add_contact(&record, petname.filter(|name| !name.trim().is_empty()))?)
 }
 
+/// Triage a scanned/pasted payload before storing (R1): the UI routes on
+/// `updates` — `Some(petname)` opens the update-confirm card, `None` flows
+/// to the plain add. An ambiguous record (spans two contacts) errors here
+/// with the same message storing it would produce.
+#[tauri::command]
+async fn preview_contact(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    payload: String,
+) -> Result<AddPreview, String> {
+    let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
+    let client = client(&app, &managed).await?;
+    match client.preview_contact(&record)? {
+        RecordMatch::New { suggested_petname } => Ok(AddPreview {
+            updates: None,
+            changes: vec![],
+            name: suggested_petname,
+        }),
+        RecordMatch::Update(update) => Ok(AddPreview {
+            name: update.new_name.clone(),
+            changes: change_lines(&update),
+            updates: Some(update.petname),
+        }),
+        RecordMatch::Ambiguous { petnames } => Err(format!(
+            "record shares keys with multiple contacts ({}) — not stored",
+            petnames.join(", ")
+        )),
+    }
+}
+
+/// The update card's change list, render-ready (petnames stay untouched —
+/// the card only shows what *their* record changes).
+fn change_lines(update: &RecordUpdate) -> Vec<String> {
+    let claim = |name: &Option<String>| name.clone().unwrap_or_else(|| "(none)".to_string());
+    let mut lines = Vec::new();
+    if update.old_name != update.new_name {
+        lines.push(format!(
+            "name: {} → {}",
+            claim(&update.old_name),
+            claim(&update.new_name)
+        ));
+    }
+    for relay in &update.relays_added {
+        lines.push(format!("+ relay {relay}"));
+    }
+    for relay in &update.relays_removed {
+        lines.push(format!("− relay {relay}"));
+    }
+    if update.keys_added > 0 {
+        lines.push(format!("+ {} device key(s)", update.keys_added));
+    }
+    if update.keys_removed > 0 {
+        lines.push(format!("− {} device key(s)", update.keys_removed));
+    }
+    lines
+}
+
+/// The confirmed update act (R1): replace the overlapped contact's stored
+/// record with the scanned one. The petname is untouched — renaming lives
+/// on the person page.
+#[tauri::command]
+async fn update_contact(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    payload: String,
+) -> Result<String, String> {
+    let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
+    let client = client(&app, &managed).await?;
+    Ok(client.update_contact(&record)?)
+}
+
 /// Rename a contact — set my petname for them (my lens, U4). Local only;
 /// sharing that name with friends is the separate, explicit `vouch`.
 #[tauri::command]
@@ -505,10 +576,7 @@ async fn person_detail(
 
 /// The conversation list, rendered from the stored DAG (not from a recv).
 #[tauri::command]
-async fn conversations(
-    app: AppHandle,
-    managed: State<'_, ManagedClient>,
-) -> Result<Inbox, String> {
+async fn conversations(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<Inbox, String> {
     let client = client(&app, &managed).await?;
     // The whole own cluster is "me" (D3c): a conversation is never
     // "with mårten laptop".
@@ -519,11 +587,7 @@ async fn conversations(
     let dropped = inbox.dropped;
     let mut conversations = Vec::new();
     let mut requests = Vec::new();
-    for summary in inbox
-        .conversations
-        .iter()
-        .chain(inbox.requests.iter())
-    {
+    for summary in inbox.conversations.iter().chain(inbox.requests.iter()) {
         let other_keys: Vec<_> = summary
             .participants
             .iter()
@@ -1057,6 +1121,8 @@ pub fn run() {
             app_state,
             set_profile,
             add_contact,
+            preview_contact,
+            update_contact,
             rename_contact,
             set_local_avatar,
             clear_local_avatar,

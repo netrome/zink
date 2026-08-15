@@ -45,6 +45,7 @@ async fn main() -> ExitCode {
         Some("pubkey") => pubkey(&args[1..]),
         Some("my-record") => my_record(&args[1..]).await,
         Some("contact-add") => contact_add(&args[1..]).await,
+        Some("contact-update") => contact_update(&args[1..]).await,
         Some("contacts") => contacts(&args[1..]).await,
         Some("recognize") => recognize(&args[1..]).await,
         Some("devices") => devices(&args[1..]).await,
@@ -78,6 +79,7 @@ const USAGE: &str = "usage:
   zink-cli pubkey <key-file>
   zink-cli my-record --key <file> [--name <name>] [--relay <relay> ...] [--qr]
   zink-cli contact-add --key <file> [--name <petname>] <ZINK:...>
+  zink-cli contact-update --key <file> <ZINK:...>
   zink-cli contacts --key <file>
   zink-cli recognize --key <file> <ZINK:...>
   zink-cli devices --key <file>
@@ -171,6 +173,22 @@ async fn contact_add(args: &[String]) -> Result<(), String> {
     let client = open_client(&flags).await?;
     let petname = client.add_contact(&record, optional(&flags, "--name")?)?;
     println!("added contact {petname:?}");
+    client.close().await;
+    Ok(())
+}
+
+/// The explicit update act (R1, 5-relay-lifecycle): a re-scan of someone
+/// already stored — replaces their record, keeps the petname. What the
+/// app's confirm card runs; here the command name is the confirm.
+async fn contact_update(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [payload] = positionals.as_slice() else {
+        return Err(format!("exactly one ZINK:... payload expected\n{USAGE}"));
+    };
+    let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
+    let client = open_client(&flags).await?;
+    let petname = client.update_contact(&record)?;
+    println!("updated contact {petname:?}");
     client.close().await;
     Ok(())
 }

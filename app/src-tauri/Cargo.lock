@@ -7879,6 +7879,7 @@ dependencies = [
  "n0-future",
  "rand_core 0.6.4",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",

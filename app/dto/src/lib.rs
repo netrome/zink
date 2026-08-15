@@ -42,6 +42,23 @@ pub struct RecordPreview {
     pub key: String,
 }
 
+/// Add-flow triage for a scanned/pasted record (R1, relay lifecycle): a
+/// key-overlapping record is an *update* of that contact and detours to a
+/// confirm card; anything else flows to the plain add. A record spanning
+/// two contacts errors at the command layer instead — it can't be stored.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AddPreview {
+    /// The single overlapping contact's petname — `Some` routes the UI to
+    /// the update-confirm card; `None` means a new person.
+    pub updates: Option<String>,
+    /// Render-ready change lines for the card ("name: Anna → Ann",
+    /// "+ relay xx@…", "+ 1 device key"). Empty = their record matches
+    /// what's stored.
+    pub changes: Vec<String>,
+    /// The record's verified self-claimed name — the new-person prefill.
+    pub name: Option<String>,
+}
+
 /// One contact-list row. The key rides along so the contact view can run
 /// identity actions (`who_is` refresh, D1c) without re-deriving it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
