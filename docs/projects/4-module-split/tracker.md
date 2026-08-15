@@ -246,8 +246,23 @@ opportunistically, as its own commit)
   no_confirmation…` and `add_acks__…` (confirmation *read*-side — M6
   decides), the recv/drain tests (M4). **Proof:** 238/238 (~1.1 s wall),
   clippy clean, `wasm32` compiles; `client.rs` 7,116 → 5,492.
-- [ ] **M4 · `client/recv.rs`.** recv/drain/subscribe/after_direct +
-  `Received` (re-exported where `sync.rs` needs it) + `MAX_NUDGE_BYTES`.
+- [x] **M4 · `client/recv.rs`.** ✅ 2026-08-15. `recv.rs` (413 lines):
+  `MAX_NUDGE_BYTES`, `RecvReport`/`RelayFailure`/`Received` (re-exported;
+  `sync.rs`'s `crate::client::Received` import untouched), then
+  `after_direct` + `recv`/`drain_relay`/`subscribe`/`subscribe_once`/
+  `drain_connection`, and the De6a partial-failure test. Byte-exact moves,
+  **zero visibility changes**: the auto-hooks the arrival paths call
+  (`auto_sync`/`auto_who_is`/`auto_rewrap`) are root-private and visible
+  downward — the cluster's only upward dependency. `fetch_blob`/
+  `fetch_stored_blob` deliberately stayed in root: blob fetching serves
+  both arrival and history rendering — M6 assigns it. **Kit hardening
+  rode along**: `test_kit.rs` dropped its `use super::*` for an explicit,
+  self-sufficient import block — legitimate as a parent glob, but each
+  carve shrinks root's import list and had now broken the kit's transitive
+  imports twice (`MessageDraft`, then `MailboxOp`/`MailboxResult`, with
+  `Attestation`/`Claim`/`Versioned` queued up to break in M5); the kit
+  pins its own dependencies and carves stop rippling into it. **Proof:**
+  238/238, clippy clean, `wasm32` compiles; `client.rs` 5,492 → 5,113.
 - [ ] **M5 · `client/contacts.rs` + `client/who_is.rs`.** The trust/identity
   cluster and the query cluster. `queried` becomes **`AskedOnce`**,
   private to `who_is.rs`: one method (`first(subject, conversation) ->

@@ -4,10 +4,23 @@
 //! and loopback-wired. Helpers only, no assertions; anything unexercised is
 //! deleted, not kept warm (the standing kit rule, project 3 §7).
 
-use super::*;
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use rand_core::OsRng;
+use zink_protocol::{
+    Attestation, Claim, ContactRecord, DeviceKey, KeyCommitment, MailboxOp, MailboxResult,
+    MessageCore, MessageDraft, MessageEnvelope, MessageId, PublicKey, RelayEntry,
+    SignedAttestation, Versioned,
+};
+
+use crate::adapters::system_clock::SystemClock;
 use crate::ports::clock::TestClock;
 use crate::ports::transport::{Loopback, ScriptedConn, TestTransport};
-use zink_protocol::{KeyCommitment, MessageCore, MessageDraft};
+use crate::state::ClientState;
+use crate::{hex, keystore};
+
+use super::{Client, ClientConfig, ConversationSummary};
 
 /// A key path in a per-test temp dir (tests run in parallel, so the dir is
 /// namespaced by `test` — a shared root would let one test's cleanup delete
