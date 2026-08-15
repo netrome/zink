@@ -172,6 +172,7 @@ fn App() -> impl IntoView {
                     messages=messages
                     state=state
                     reload_messages=load_messages
+                    open_person=open_person
                     ok=ok
                     err=err
                 />

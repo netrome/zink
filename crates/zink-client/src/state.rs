@@ -319,13 +319,18 @@ impl ClientState {
         outbox
     }
 
-    /// Message ids with at least one outstanding delivery — the `pending`
-    /// flag of history.
-    pub fn pending_messages(&self) -> BTreeSet<MessageId> {
-        self.outbox()
-            .into_iter()
-            .map(|entry| entry.message)
-            .collect()
+    /// Messages with at least one outstanding delivery, each with its
+    /// oldest entry's `created_ms` — *since when* it has been owed is what
+    /// lets an edge tell in-flight from stuck (R3, relay-lifecycle.md).
+    pub fn pending_since(&self) -> BTreeMap<MessageId, u64> {
+        let mut since = BTreeMap::new();
+        for entry in self.outbox() {
+            since
+                .entry(entry.message)
+                .and_modify(|created: &mut u64| *created = (*created).min(entry.created_ms))
+                .or_insert(entry.created_ms);
+        }
+        since
     }
 
     /// One entry per (message, relay): the relay part of the name is a

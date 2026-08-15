@@ -628,6 +628,16 @@ async fn messages(
     managed: State<'_, ManagedClient>,
     conversation: String,
 ) -> Result<Vec<Message>, String> {
+    // A message owed longer than this is rendered "can't reach their
+    // relay" instead of "sending…" (R3) — long enough that a relay restart
+    // or a slow flush never alarms, short enough to be actionable. Edge
+    // policy, deliberately not in the client.
+    const STUCK_AFTER_MS: u64 = 10 * 60 * 1000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0);
     let client = client(&app, &managed).await?;
     let conversation = parse_id(&conversation)?;
     let contacts = client.contacts()?;
@@ -687,7 +697,13 @@ async fn messages(
                 .ok()
                 .map(|body| String::from_utf8_lossy(&body).into_owned()),
             timestamp_ms: message.timestamp_ms,
-            pending: message.pending,
+            pending: message.owed_since_ms.is_some(),
+            stuck: message
+                .owed_since_ms
+                .is_some_and(|since| now_ms.saturating_sub(since) > STUCK_AFTER_MS),
+            undelivered: message
+                .owed_since_ms
+                .is_some_and(|since| now_ms.saturating_sub(since) > zink_client::OUTBOX_GIVE_UP_MS),
             crossed: message.crossed,
             merged: message.merged,
             blobs: message

@@ -167,6 +167,15 @@ pub struct Message {
     /// True while ≥1 relay is still owed this message (outbox, C4a) —
     /// delivery will be retried; render a "not yet delivered" cue.
     pub pending: bool,
+    /// Pending *and* owed long enough (command-layer policy: 10 minutes)
+    /// that a relay is likely unreachable (R3) — render an actionable
+    /// "can't reach their relay" cue instead of "sending…". A fact about
+    /// our deposits, never a claim about their receipt: the message may
+    /// well have arrived by another path.
+    pub stuck: bool,
+    /// The debt passed the 30-day give-up window: retries stopped
+    /// (relay-lifecycle.md §2) — render "undelivered".
+    pub undelivered: bool,
     /// Causally incomparable with the message above it — they crossed in
     /// flight (D4d, tenet 7). The rendered order is unchanged.
     pub crossed: bool,

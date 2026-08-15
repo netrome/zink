@@ -96,9 +96,13 @@ pub struct HistoryMessage {
     pub timestamp_ms: u64,
     pub body: Result<Vec<u8>, OpenError>,
     pub blob_refs: Vec<BlobRef>,
-    /// True while ≥1 relay is still owed this message (outbox entry
-    /// present) — including entries past the give-up window (undelivered).
-    pub pending: bool,
+    /// `Some(created_ms)` while ≥1 relay is still owed this message
+    /// (outbox entry present) — including entries past the give-up window.
+    /// The value is the oldest entry's stamp: *since when* the debt exists,
+    /// so an edge can distinguish in-flight from stuck from given-up
+    /// (compare against `OUTBOX_GIVE_UP_MS`) without a second field to
+    /// drift. `None` = nothing owed.
+    pub owed_since_ms: Option<u64>,
     /// Membership delta vs this message's parents (groups.md §2): keys
     /// this message added to / dropped from the addressed set — derived
     /// from the signed cores, not a message type. Empty for the genesis
@@ -117,8 +121,8 @@ pub struct HistoryMessage {
     /// **Positive-only** (tenet 7, honesty over false order): a key here
     /// has confirmed; absence means *no confirmation was received*, never
     /// "not delivered" — the recipient may well hold it via the mailbox and
-    /// simply have no way to say so. `pending` remains the only negative
-    /// signal, and it means "we still owe a relay".
+    /// simply have no way to say so. `owed_since_ms` remains the only
+    /// negative signal, and it means "we still owe a relay".
     pub confirmed: Vec<PublicKey>,
 }
 
@@ -346,7 +350,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             .map(|envelope| (envelope.id(), envelope))
             .collect();
         let dag = ClientState::dag_of(&envelopes, conversation)?;
-        let pending = self.state.pending_messages();
+        let owed = self.state.pending_since();
         let confirmed = self.state.acks_in(conversation);
         let crossed = dag.crossed_in_flight();
         Ok(dag
@@ -362,7 +366,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                     timestamp_ms: envelope.core.timestamp_ms,
                     body: envelope.open(&self.device),
                     blob_refs: envelope.core.blob_refs.clone(),
-                    pending: pending.contains(&id),
+                    owed_since_ms: owed.get(&id).copied(),
                     joined,
                     left,
                     crossed: crossed.contains(&id),
@@ -615,14 +619,17 @@ mod tests {
             .expect("stage");
         let _ = a.deliver(&staged).await; // every path fails; queued, not lost
 
-        // Then: no confirmation is claimed, and `pending` — not the empty
-        // confirmation — carries the honest "we still owe a relay".
+        // Then: no confirmation is claimed, and `owed_since_ms` — not the
+        // empty confirmation — carries the honest "we still owe a relay".
         let history = a.history(staged.conversation).expect("history");
         assert!(
             history[0].confirmed.is_empty(),
             "nothing acked, so nothing is claimed"
         );
-        assert!(history[0].pending, "the ledger still owes the delivery");
+        assert!(
+            history[0].owed_since_ms.is_some(),
+            "the ledger still owes the delivery"
+        );
         assert_eq!(
             history[0].body.as_deref(),
             Ok(b"into the void".as_slice()),

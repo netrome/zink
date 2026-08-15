@@ -519,7 +519,11 @@ async fn history(args: &[String]) -> Result<(), String> {
         for key in &message.left {
             println!("  [- {}]", label(&contacts, key));
         }
-        let pending = if message.pending { " [pending]" } else { "" };
+        let pending = if message.owed_since_ms.is_some() {
+            " [pending]"
+        } else {
+            ""
+        };
         // Delivery confirmation (De7): the recipient's *own device* said it
         // stored this — stronger than anything a relay can vouch for.
         // **Positive-only** (tenet 7): nothing is printed for its absence,

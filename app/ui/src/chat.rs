@@ -33,6 +33,7 @@ pub(crate) fn ChatView(
     messages: RwSignal<Vec<Message>>,
     state: RwSignal<Option<AppState>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
+    open_person: impl Fn(String) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
@@ -47,6 +48,10 @@ pub(crate) fn ChatView(
     // default, revealed on demand.
     let show_concurrency = RwSignal::new(false);
     let conversation = StoredValue::new(id);
+    // The stuck cue's tap target (R3): a 1:1 chat is labelled by the
+    // contact's petname, so that's the page with the repair actions. A
+    // group label matches no contact and the cue stays plain text.
+    let chat_label = StoredValue::new(label.clone());
 
     // Fetch (cache-backed) every visible thumbnail not yet loaded.
     Effect::new(move |_| {
@@ -549,7 +554,31 @@ pub(crate) fn ChatView(
                                     }
                                 })
                                 .collect::<Vec<_>>();
-                            let pending = if message.pending { " · sending…" } else { "" };
+                            // Honest send states (R3): our-deposit facts,
+                            // never claims about their receipt. "sending…"
+                            // only while young; a long-owed debt says so.
+                            let pending = if message.undelivered {
+                                " · undelivered — no relay took it in 30 days"
+                            } else if message.stuck {
+                                "" // its own cue below, with the tap-through
+                            } else if message.pending {
+                                " · sending…"
+                            } else {
+                                ""
+                            };
+                            let stuck_person = (message.stuck && !message.undelivered).then(|| {
+                                let target = chat_label.get_value();
+                                state
+                                    .with_untracked(|state| {
+                                        state.as_ref().is_some_and(|state| {
+                                            state
+                                                .contacts
+                                                .iter()
+                                                .any(|contact| contact.petname == target)
+                                        })
+                                    })
+                                    .then_some(target)
+                            });
                             // Delivery confirmation (De7): their device said
                             // it stored this. **Positive-only** (tenet 7) —
                             // nothing is rendered when empty, because an
@@ -600,6 +629,20 @@ pub(crate) fn ChatView(
                                     <span class="dim">
                                         {message.sender} " · " {time_of(message.timestamp_ms)}
                                         {pending} {confirmed} {concurrency}
+                                        {stuck_person.map(|target| match target {
+                                            Some(petname) => view! {
+                                                <span on:click=move |_| open_person(
+                                                    petname.clone(),
+                                                )>
+                                                    " · ⚠ can't reach their relay — tap to check their page"
+                                                </span>
+                                            }
+                                                .into_any(),
+                                            None => view! {
+                                                <span>" · ⚠ can't reach their relay — still trying"</span>
+                                            }
+                                                .into_any(),
+                                        })}
                                     </span>
                                     {(!deltas.is_empty())
                                         .then(|| view! { <div class="dim">{deltas.join(" · ")}</div> })}

@@ -778,7 +778,10 @@ mod tests {
         // the D5 ack, which before De7 was computed and thrown away.
         let history = a.history(receipt.conversation).expect("A history");
         assert_eq!(history[0].confirmed, vec![b.public_key()]);
-        assert!(!history[0].pending, "and nothing is still owed");
+        assert!(
+            history[0].owed_since_ms.is_none(),
+            "and nothing is still owed"
+        );
 
         // …and it survives a reopen: the ack is transient, the record isn't.
         drop(a);
@@ -839,7 +842,10 @@ mod tests {
         let history = a.history(staged.conversation).expect("history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].body.as_deref(), Ok(b"render me now".as_slice()));
-        assert!(history[0].pending, "the ledger owes its delivery");
+        assert!(
+            history[0].owed_since_ms.is_some(),
+            "the ledger owes its delivery"
+        );
         assert_eq!(a.state.outbox().len(), 1);
 
         // …and delivery is a separate step that a crash can't lose: even
@@ -847,7 +853,9 @@ mod tests {
         let report = a.flush_outbox().await.expect("flush");
         assert_eq!(report.pending, 1, "still owed after a failed retry");
         assert!(
-            a.history(staged.conversation).expect("history")[0].pending,
+            a.history(staged.conversation).expect("history")[0]
+                .owed_since_ms
+                .is_some(),
             "and still honestly marked pending"
         );
 

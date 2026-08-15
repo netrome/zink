@@ -1,6 +1,6 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 🟡 in progress (started 2026-08-15) — R1 ✅ R2 ✅.** Project **5-relay-lifecycle**,
+> **Status: 🟡 in progress (started 2026-08-15) — R1 ✅ R2 ✅ R3 ✅.** Project **5-relay-lifecycle**,
 > picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
 > permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
 > (server reinstall, 2026-08-15) hit three compounding walls — see §1.
@@ -207,14 +207,25 @@ recorded per §5.
   **Proof:** 250/250 (~1.1 s; was 245), clippy clean, `wasm32` compiles,
   the real-network outbox smoke (relay restart at the same dial string)
   green. **B3 and the direct-ack half of B4 are dead.**
-- [ ] **R3 · Honest send states in the app.** DTO gains `confirmed`
-  (project-4 §8(a)) and a stuck signal (entry expired, or N consecutive
-  flush failures — threshold decided in-slice with R2's shape). Chat
-  renders: *sending…* → *sent* (deposited or direct-acked) → *delivered*
-  (confirmed by that device, positive-only) — and *can't reach their relay*
-  when stuck, tapping through to the Person view. Wording per §4: our
-  evidence, never their state. *Done when:* B5 is dead and a dead relay
-  produces a visible, actionable state instead of eternal "sending…".
+- [x] **R3 · Honest send states in the app.** ✅ 2026-08-16. The client
+  now exposes *since when*, not just *whether*: `HistoryMessage.pending:
+  bool` became `owed_since_ms: Option<u64>` (the oldest outbox entry's
+  stamp — one field, nothing to drift; the CLI's `[pending]` rides the
+  new field unchanged), sourced from `ClientState::pending_since`;
+  `OUTBOX_GIVE_UP_MS` went public so edges render the same boundary the
+  flush enforces. The `Message` DTO gained `stuck` and `undelivered`,
+  computed at the command layer — stuck = owed > 10 min (edge policy,
+  deliberately not client state), undelivered = past give-up. Chat cue
+  chain, our-deposit facts only: *sending…* (young) → *⚠ can't reach
+  their relay* (stuck — tappable in a 1:1 chat, opening the person page
+  via the label-is-a-petname match; groups get plain text) →
+  *undelivered — no relay took it in 30 days* (given up). `confirmed`
+  ("✓ delivered to X") turned out to **already render** — project-4
+  §8(a) was stale before this project started; only (b)'s wording landed
+  here. **Proof:** 250/250, clippy clean, `wasm32` + `app/ui/build.sh` +
+  src-tauri check clean. **B5 is dead** — a dead relay now produces a
+  visible, actionable state instead of eternal "sending…". (Cues are
+  build-verified; eyeball on the next desktop/phone run.)
 
 **Tier 2 — the management surface**
 
@@ -262,7 +273,7 @@ recorded per §5.
 | Where overrides live | Beside the record, as a new provenance class in `effective_relays` — never mutating the stored record (immutable evidence, who-is-this.md §5). Relays are unsigned in the record, so nothing cryptographic is at stake; provenance honesty is. (R5) |
 | Override rank | **Open — decide in R5.** Tension: the petname precedent says manual wins; but a manual override outranking subject-served answers can go stale and recreate this project's disease. Lean: manual wins while it works, and R3's stuck-surfacing is the honesty valve. |
 | Outbox keying | Resolved at R2: **keep `(message, relay)`, reconcile at flush.** The file format never changed, so pre-R2 ledgers migrate by being flushed once; per-recipient state lives nowhere because it's derivable (sealed recipients + acks + current records). Re-keying by recipient was rejected as a stored duplicate of what reconciliation computes. |
-| Stuck threshold & wording | **Open — decide in R3** with R2's shape. Constraint fixed now: positive-only confirmation, stuck = our-deposit fact. |
+| Stuck threshold & wording | Resolved at R3: the client exposes the *fact* (`owed_since_ms`); thresholds are **edge policy** — stuck at 10 min (a relay restart never alarms), undelivered at the public `OUTBOX_GIVE_UP_MS`. Wording is our-deposit-only ("can't reach *their relay*", never "not delivered"); confirmation stays positive-only. |
 | Relay QR payload | `ZINK-RELAY:` + the existing spec string, no new encoding — the spec format is already the versioned artifact. One scanner, prefix-routed. (R4) |
 | Subject-refresh policy | **Open — decide in R6.** Triggers (which connection events), rate limit, and the failure-eager mode. Fixed now: subject-only, existing-connection-only, learned-store-only. |
 | Revision hint on messages | **Parked** (§8) — a wire change through SPEC §11, proposed only after R6 shows the residual gap (receivers who never get a live channel to the migrated peer). |

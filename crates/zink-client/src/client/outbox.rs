@@ -27,8 +27,9 @@ use super::Client;
 
 /// Outbox entries older than this stop being retried (but stay surfaced):
 /// mirrors the relay's default mailbox retention — past it, recipients'
-/// cursors have moved on and the message is socially dead.
-const OUTBOX_GIVE_UP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// cursors have moved on and the message is socially dead. Public so edges
+/// can render the same boundary ("undelivered", R3) the flush enforces.
+pub const OUTBOX_GIVE_UP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// How many owed deliveries a flush has in flight at once (De6d). Concurrency
 /// is what stops n dead relays costing n deadlines; the *bound* is because
