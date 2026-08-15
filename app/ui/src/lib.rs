@@ -188,6 +188,10 @@ fn App() -> impl IntoView {
                     state=state
                     reload_messages=load_messages
                     open_person=open_person
+                    back=move || {
+                        load_conversations();
+                        view.set(View::Chats);
+                    }
                     ok=ok
                     err=err
                 />

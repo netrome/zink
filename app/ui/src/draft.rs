@@ -74,9 +74,11 @@ pub(crate) fn DraftChatView(
 
     view! {
         <main>
-            <button class="secondary" on:click=move |_| back()>
-                "‹ chats"
-            </button>
+            <div class="picks">
+                <button class="secondary" on:click=move |_| back()>
+                    "‹ chats"
+                </button>
+            </div>
             <h3>{header}</h3>
             <div class="messages">
                 {move || {

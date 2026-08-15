@@ -37,6 +37,7 @@ pub(crate) fn ChatView(
     state: RwSignal<Option<AppState>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
     open_person: impl Fn(String) + Copy + Send + 'static,
+    back: impl Fn() + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
@@ -88,6 +89,32 @@ pub(crate) fn ChatView(
             }
         });
     };
+
+    // Scroll pinning (S3): the list opens at the bottom and follows
+    // arrivals while the reader is there; a reader who scrolled up is
+    // never yanked. `pinned` is where the reader was *before* an update,
+    // kept current by the scroll handler.
+    let list_ref = NodeRef::<leptos::html::Div>::new();
+    let pinned = StoredValue::new(true);
+    let on_scroll = move |_| {
+        if let Some(list) = list_ref.get_untracked() {
+            let slack = list.scroll_height() - list.scroll_top() - list.client_height();
+            pinned.set_value(slack < 60);
+        }
+    };
+    Effect::new(move |_| {
+        messages.track();
+        thumbs.track(); // a late thumbnail grows the list under the reader
+        // After the frame paints the new rows — the effect can run first.
+        request_animation_frame(move || {
+            if !pinned.get_value() {
+                return;
+            }
+            if let Some(list) = list_ref.get_untracked() {
+                list.set_scroll_top(list.scroll_height());
+            }
+        });
+    });
 
     // Fetch (cache-backed) every visible thumbnail not yet loaded.
     Effect::new(move |_| {
@@ -340,6 +367,11 @@ pub(crate) fn ChatView(
 
     view! {
         <main>
+            <div class="picks">
+                <button class="secondary" on:click=move |_| back()>
+                    "‹ chats"
+                </button>
+            </div>
             // The tappable header (S2): title re-derived from membership,
             // the panel one tap away.
             <h3
@@ -624,12 +656,19 @@ pub(crate) fn ChatView(
                         }
                     })
             }}
-            <div class="messages">
+            <div class="messages" node_ref=list_ref on:scroll=on_scroll>
                 {move || {
+                    // Day separators (S3): one dim line whenever the local
+                    // calendar day changes between consecutive messages.
+                    let mut last_day = None;
                     messages
                         .get()
                         .into_iter()
-                        .map(|message| {
+                        .map(move |message| {
+                            let day = day_of(message.timestamp_ms);
+                            let separator = (last_day != Some(day))
+                                .then(|| day_label(message.timestamp_ms));
+                            last_day = Some(day);
                             let class = if message.mine { "msg mine" } else { "msg" };
                             let body = message.text.clone().filter(|text| !text.is_empty());
                             let unopenable = message.text.is_none();
@@ -729,6 +768,8 @@ pub(crate) fn ChatView(
                                 .chain(message.left.iter().map(|name| format!("− {name}")))
                                 .collect();
                             view! {
+                                {separator
+                                    .map(|label| view! { <div class="day">{label}</div> })}
                                 <div class=class>
                                     {avatar_key
                                         .map(|key| {
@@ -816,6 +857,15 @@ pub(crate) fn Composer(
             }
         });
     };
+    // Enter sends where a hardware keyboard is likely (fine pointer); on
+    // touch, Enter stays a newline and the button is the send (S3).
+    let enter_sends = !touch_device();
+    let keydown = move |ev: leptos::ev::KeyboardEvent| {
+        if enter_sends && ev.key() == "Enter" && !ev.shift_key() {
+            ev.prevent_default();
+            send();
+        }
+    };
     view! {
         {move || {
             attachment
@@ -831,19 +881,67 @@ pub(crate) fn Composer(
                     }
                 })
         }}
-        <input type="file" accept="image/*" on:change=attach />
-        <textarea
-            rows="2"
-            placeholder="message"
-            prop:value=move || draft.get()
-            on:input=move |ev| draft.set(event_target_value(&ev))
-        />
-        <button on:click=move |_| send()>"send"</button>
+        <div class="composer-row">
+            // A label wrapping a hidden input: the file dialog behind a
+            // tap-sized 📎 instead of the browser's raw file widget.
+            <label class="attach">
+                "📎"
+                <input type="file" accept="image/*" hidden on:change=attach />
+            </label>
+            <textarea
+                rows="2"
+                placeholder="message"
+                prop:value=move || draft.get()
+                on:input=move |ev| draft.set(event_target_value(&ev))
+                on:keydown=keydown
+            />
+            <button on:click=move |_| send()>"send"</button>
+        </div>
     }
+}
+
+/// Coarse-pointer (touch) detection — the Enter-to-send policy's input.
+fn touch_device() -> bool {
+    window()
+        .match_media("(pointer: coarse)")
+        .ok()
+        .flatten()
+        .map(|query| query.matches())
+        .unwrap_or(false)
 }
 
 /// hh:mm from the sender's wall-clock hint — display only, like the hint.
 fn time_of(timestamp_ms: u64) -> String {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(timestamp_ms as f64));
     format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
+}
+
+/// Local calendar day of a wall-clock hint — the separator grouping key.
+fn day_of(timestamp_ms: u64) -> (u32, u32, u32) {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(timestamp_ms as f64));
+    (date.get_full_year(), date.get_month(), date.get_date())
+}
+
+/// "today" / "yesterday" / "aug 12" (+ year when it differs) — the day
+/// separator text. Display only, from the sender's hint, like `time_of`.
+fn day_label(timestamp_ms: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let now = js_sys::Date::now();
+    let day = day_of(timestamp_ms);
+    if day == day_of(now as u64) {
+        return "today".to_string();
+    }
+    if day == day_of((now - 86_400_000.0) as u64) {
+        return "yesterday".to_string();
+    }
+    // `% 12` keeps a hostile timestamp (Invalid Date → 0-ish fields) from
+    // panicking the render — garbage in, a harmless wrong label out.
+    let month = MONTHS[day.1 as usize % 12];
+    if day.0 == day_of(now as u64).0 {
+        format!("{month} {}", day.2)
+    } else {
+        format!("{month} {} {}", day.2, day.0)
+    }
 }

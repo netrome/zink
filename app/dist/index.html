@@ -118,10 +118,19 @@
     .row b { margin-right: .5rem; }
     .dim { color: var(--muted); font-size: var(--text-sm); }
     .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; padding: .4rem 0; }
+    .day { text-align: center; color: var(--muted); font-size: var(--text-xs); margin-top: .3rem; }
     .msg { max-width: 85%; align-self: flex-start; background: var(--surface-alt);
            border-radius: var(--radius); padding: .4rem .6rem; word-break: break-word; }
     .msg.mine { align-self: flex-end; background: var(--accent-weak); }
     .compose { margin-top: auto; padding-top: .5rem; }
+    /* One composer row (S3): 📎 | textarea | send. */
+    .composer-row { display: flex; gap: .4rem; align-items: flex-end; margin: .2rem 0 .4rem; }
+    .composer-row textarea, .composer-row button { margin: 0; }
+    .composer-row textarea { flex: 1; }
+    .composer-row button { width: auto; }
+    .attach { display: flex; align-items: center; justify-content: center;
+              min-width: var(--tap); min-height: var(--tap); cursor: pointer;
+              border: 1px solid var(--border); border-radius: var(--radius); }
     .thumb { display: block; max-width: 12rem; max-height: 12rem;
              border-radius: var(--radius-sm); margin: .2rem 0; cursor: pointer; }
     .panel { border: 1px solid var(--border); border-radius: var(--radius); padding: .5rem; margin: .4rem 0; background: var(--surface); }

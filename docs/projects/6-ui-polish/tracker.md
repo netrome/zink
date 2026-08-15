@@ -1,6 +1,6 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 🔨 in progress — S1–S2 landed (2026-08-16).** Project **6-ui-polish**,
+> **Status: 🔨 in progress — S1–S3 landed (2026-08-16).** Project **6-ui-polish**,
 > branch `better-selections`. Trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
@@ -243,12 +243,23 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
 
 **Tier 2 — the everyday loop**
 
-- [ ] **S3 · Chat ergonomics.** Scroll pinning (bottom on open; follow
+- [x] **S3 · Chat ergonomics.** Scroll pinning (bottom on open; follow
   arrivals when already at bottom — never yank a reader who scrolled up);
   "‹ chats" back affordance; day-aware timestamps (date separators or
   "tue 14:32" — decide in-slice); attach as a compact 📎 button replacing
   the raw file input; Enter-to-send on desktop (Shift+Enter newline),
   untouched on mobile. *Done when:* U10 is dead.
+  *Landed 2026-08-16:* pinning via a `pinned` flag the scroll handler keeps
+  current (≤60 px slack counts as "at bottom") + a follow effect over
+  messages *and* thumbnails (late thumbs grow the list under the reader),
+  scrolled inside `request_animation_frame` so the frame paints first;
+  compact "‹ chats" rows in chat + draft; **day separators** decided over
+  per-message prefixes — "today" / "yesterday" / "aug 12" (+ year when it
+  differs), rendered when the local calendar day flips; composer became one
+  📎|textarea|send row (hidden input behind a `<label>`); Enter-to-send
+  gated on the `pointer: coarse` media query (one new web-sys feature,
+  `MediaQueryList`). UI-only. Suite 240, clippy clean, `app/ui/build.sh`
+  clean.
 - [ ] **S4 · The paper-cut batch.** Independently small, one slice because
   each is a few lines: armed danger buttons disarm (timeout ~4 s or any
   other interaction); scan-cancel is silent (distinguish cancel from error
@@ -295,6 +306,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
 | Person → conversations | A person's page shows the conversations they're in plus "start a new conversation" — a list, not a single "message" button, because plurality is the model (row above). (S2) |
 | Picker identity handle | Petnames at the app boundary, as today — the command layer resolves names (dto's stated contract); the picker is my-lens presentation. Keys stay out of the webview except at trust moments. |
 | Conversation names | Local-only label, never transmitted — client policy, the conversation-shaped sibling of a petname. Display precedence: local name > joined-petnames default. Storage decided in S6 under the same constraints as read markers. |
+| Enter-to-send | Fine-pointer devices only — `pointer: coarse` decides at composer creation; Shift+Enter stays a newline; touch keeps Enter = newline with the button as the send. Timestamps: day separators over per-message day prefixes — the list stays scannable, the cost is one dim line per day. (S3) |
 | Batch add | One `send_message` with the full `add` vec — one signed membership message. Per-person messages (today's shape) die with the `<select>`. (S2) |
 | Advanced-affordance home | The S2 members panel. Constraint: one tap away, never buried two levels — crossed-cues and introduce-devices are legitimate features, just not always-on. |
 | Snippet in rows | Client-side policy over the local plaintext store; fine by the invariants (nothing new through relays/pushes). Truncation/emptiness shape decided in S5. |
