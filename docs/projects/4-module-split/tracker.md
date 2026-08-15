@@ -263,11 +263,28 @@ opportunistically, as its own commit)
   `Attestation`/`Claim`/`Versioned` queued up to break in M5); the kit
   pins its own dependencies and carves stop rippling into it. **Proof:**
   238/238, clippy clean, `wasm32` compiles; `client.rs` 5,492 → 5,113.
-- [ ] **M5 · `client/contacts.rs` + `client/who_is.rs`.** The trust/identity
-  cluster and the query cluster. `queried` becomes **`AskedOnce`**,
-  private to `who_is.rs`: one method (`first(subject, conversation) ->
-  bool`), test-and-set atomic by construction, the D2b rationale on the
-  type instead of a field comment. `WHO_IS_DIAL_CAP` rides along.
+- [x] **M5 · `client/contacts.rs` + `client/who_is.rs`.** ✅ 2026-08-15.
+  `contacts.rs` (1,513 lines): `Contact` (+`parse`), `ResolvedName`/
+  `LearnedName`/`DeviceEvidence`/`Disavowal`, the nineteen trust/identity
+  methods (add/rename/recognize/vouch/repudiate/disavowals through
+  `resolve_contact`/`effective_relays`/`peer_addr_for`, plus
+  `resolve_name`/`learned_candidates`/`device_evidence`/`dismiss`), and
+  twelve subject tests. `who_is.rs` (1,061 lines): `WHO_IS_DIAL_CAP`,
+  **`AskedOnce`** — the second raw mutex named: one atomic
+  `first(subject, conversation)`, the D2b rationale on the type, a
+  `#[cfg(test)] is_empty` for the stay-silent assertion, and the single
+  lock site on the codebase's `into_inner` stance (was a per-site
+  `.expect("queried lock")` — test-invisible, same argument as the reach
+  ledger) — `Client.queried: Mutex<BTreeSet<…>>` is now `asked: AskedOnce`
+  — plus `WhoIsOutcome`/`WhoIsAnswer`, `valid_endorsements` (demoted
+  `pub(crate)` → private: its only callers are `who_is_among` and its own
+  test), the five query methods, and eleven subject tests. **Visibility
+  ledger** (the cross-cluster seams, all `pub(super)`):
+  `trusted_record_for`/`peer_addr_for`/`effective_relays` (send + the
+  root backfill/rewrap that M7 will claim), `contributed_to` (root
+  `conversations`), `auto_who_is` (recv's arrival hooks). **Proof:**
+  239/239, clippy clean, `wasm32` compiles; `client.rs` → 2,658 lines
+  (7,696 at project start).
 - [ ] **M6 · `client/profile.rs` + `client/history.rs`.** Profile/home-relay
   management + `build_own_record` (still shared with `sync.rs` — now a
   downward import from a small module instead of into the monolith), the
