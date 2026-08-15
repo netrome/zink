@@ -7,12 +7,12 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use rand_core::{OsRng, RngCore};
 use zink_protocol::{MailboxOp, MailboxResult, MessageEnvelope, OpenError};
 
 use crate::error::Error;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
+use crate::ports::rng::Draw;
 use crate::ports::transport::{AcceptUni, Request, Transport};
 
 use super::Client;
@@ -59,7 +59,7 @@ pub struct Received {
     pub body: Result<Vec<u8>, OpenError>,
 }
 
-impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// The post-arrival seam for a direct delivery (D5): the same healing
     /// `recv`/`subscribe` run after a drain — auto-sync the DAG, scoped
     /// who-is for unknown members, re-wrap for paired devices. The edge
@@ -184,12 +184,10 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
                 Ok(()) => {}
                 Err(error) => tracing::warn!(relay, %error, "subscription dropped"),
             }
-            // ±50% jitter so a relay restart doesn't get a thundering herd.
-            let jitter = 0.5 + f64::from(OsRng.next_u32()) / f64::from(u32::MAX);
-            let delay = backoff.mul_f64(jitter);
+            let delay = jittered(backoff, &self.rng);
             tracing::debug!(relay, ?delay, "reconnecting after backoff");
             self.clock.sleep(delay).await;
-            backoff = (backoff * 2).min(Duration::from_secs(60));
+            backoff = backoff.saturating_mul(2).min(Duration::from_secs(60));
         }
     }
 
@@ -342,6 +340,17 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     }
 }
 
+/// The jittered reconnect delay: uniform over [backoff/2, 3·backoff/2), so
+/// a relay restart doesn't get a thundering herd of resubscriptions.
+/// Integer millisecond math end to end — no float detour, none of
+/// `Duration`'s panic-capable arithmetic; the saturations cap values the
+/// 60 s backoff ceiling makes unreachable anyway.
+fn jittered(backoff: Duration, rng: &impl Draw) -> Duration {
+    let base = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX);
+    let offset = rng.draw(base.max(1));
+    Duration::from_millis((base / 2).saturating_add(offset))
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -351,8 +360,27 @@ mod tests {
     use crate::client::test_kit::{mailbox_spec, script_drain, sealed_for, temp_key, temp_root};
     use crate::keystore;
     use crate::ports::clock::TestClock;
+    use crate::ports::rng::TestDraw;
     use crate::ports::transport::TestTransport;
     use zink_protocol::DeviceKey;
+
+    #[test]
+    fn jittered__should_span_half_to_under_three_halves_of_the_backoff() {
+        // Given
+        let backoff = Duration::from_secs(1);
+
+        // When / Then: the extreme draws pin the band's endpoints
+        assert_eq!(jittered(backoff, &TestDraw(0)), Duration::from_millis(500));
+        assert_eq!(
+            jittered(backoff, &TestDraw(u64::MAX)),
+            Duration::from_millis(1499)
+        );
+        // A zero backoff stays an immediate retry, not a panic.
+        assert_eq!(
+            jittered(Duration::ZERO, &TestDraw(u64::MAX)),
+            Duration::ZERO
+        );
+    }
 
     #[tokio::test]
     async fn recv__should_drain_the_healthy_relay_when_another_is_unreachable() {

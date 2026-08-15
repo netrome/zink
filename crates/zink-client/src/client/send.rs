@@ -14,6 +14,7 @@ use zink_protocol::{
 
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
+use crate::ports::rng::Draw;
 use crate::ports::transport::Transport;
 use crate::{blobs, net};
 
@@ -67,7 +68,7 @@ pub struct ReplyContacts {
     pub disavowed: Vec<PublicKey>,
 }
 
-impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// Seal for all recipients, thread into the participant set's
     /// conversation (or start one), deposit once per distinct relay
     /// (idempotent retry), push blobs to each relay's cache.

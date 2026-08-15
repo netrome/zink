@@ -4,4 +4,5 @@
 //! real world) and in each port's `#[cfg(test)]` submodule (the doubles).
 
 pub(crate) mod clock;
+pub(crate) mod rng;
 pub(crate) mod transport;

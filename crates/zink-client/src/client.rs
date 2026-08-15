@@ -13,8 +13,10 @@ use zink_protocol::{
 
 use crate::adapters::iroh::IrohTransport;
 use crate::adapters::system_clock::SystemClock;
+use crate::adapters::system_rng::SystemRng;
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
+use crate::ports::rng::Draw;
 use crate::ports::transport::{Peer, Request, Transport};
 use crate::reach::ReachLedger;
 use crate::state::ClientState;
@@ -59,8 +61,12 @@ impl Default for ClientConfig {
     }
 }
 
-pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock, N: Transport = IrohTransport>
-{
+pub struct Client<
+    C: Clock = SystemClock,
+    W: WallClock = SystemClock,
+    N: Transport = IrohTransport,
+    R: Draw = SystemRng,
+> {
     device: DeviceKey,
     /// The network, behind ports (`crate::ports::transport`,
     /// `docs/design/transport.md`). `IrohTransport` in production.
@@ -73,6 +79,10 @@ pub struct Client<C: Clock = SystemClock, W: WallClock = SystemClock, N: Transpo
     /// Wall time, behind its own port: it moves independently of `clock` in
     /// the real world, so tests can drive them apart.
     wall_clock: W,
+    /// Timing entropy (reconnect jitter), behind a port so no domain code
+    /// draws ambient randomness; see `crate::ports::rng`. `SystemRng` in
+    /// production.
+    rng: R,
     /// The auto-query rate limit (D2b, groups.md §4): (subject, conversation)
     /// pairs already asked this run — a drain loop must not re-broadcast
     /// interest in a key. In-memory on purpose; the manual trigger re-asks.
@@ -144,7 +154,7 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
             IrohTransport::bind(&device, &home_relays, zink_protocol::MAX_SYNC_REQUEST_BYTES)
                 .await?;
         Ok(Self::assemble(
-            device, state, config, clock, wall_clock, transport,
+            device, state, config, clock, wall_clock, transport, SystemRng,
         ))
     }
 
@@ -157,7 +167,33 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
     }
 }
 
+/// The test constructor keeps the production rng: nothing scripts jitter
+/// yet — a draw-injecting sibling appears when a test first drives it.
+#[cfg(test)]
 impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
+    /// A client on injected doubles: no endpoint, no I/O — the network is
+    /// whatever the test scripts.
+    fn with_transport(
+        device: DeviceKey,
+        key_path: &str,
+        config: ClientConfig,
+        clock: C,
+        wall_clock: W,
+        transport: N,
+    ) -> Self {
+        Self::assemble(
+            device,
+            ClientState::open(key_path),
+            config,
+            clock,
+            wall_clock,
+            transport,
+            SystemRng,
+        )
+    }
+}
+
+impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// Wire a client around an already-built transport — shared by
     /// `with_device` (real iroh) and the test constructor (doubles).
     fn assemble(
@@ -167,6 +203,7 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
         clock: C,
         wall_clock: W,
         transport: N,
+        rng: R,
     ) -> Self {
         // Serve peer history sync on our own transport (D0): contacts-only
         // gate (D0c); serves fresh self-records for `who-is-this` (D1a), so
@@ -198,28 +235,8 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
             reach,
             clock,
             wall_clock,
+            rng,
         }
-    }
-
-    /// A client on injected doubles: no endpoint, no I/O — the network is
-    /// whatever the test scripts.
-    #[cfg(test)]
-    fn with_transport(
-        device: DeviceKey,
-        key_path: &str,
-        config: ClientConfig,
-        clock: C,
-        wall_clock: W,
-        transport: N,
-    ) -> Self {
-        Self::assemble(
-            device,
-            ClientState::open(key_path),
-            config,
-            clock,
-            wall_clock,
-            transport,
-        )
     }
 
     /// Register the edge's sink for **directly delivered** messages (D5):

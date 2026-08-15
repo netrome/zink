@@ -10,6 +10,7 @@ use zink_protocol::MessageEnvelope;
 use crate::error::Error;
 use crate::hex;
 use crate::ports::clock::{Clock, WallClock};
+use crate::ports::rng::Draw;
 use crate::ports::transport::Transport;
 
 use super::Client;
@@ -35,7 +36,7 @@ pub struct FlushReport {
     pub expired: usize,
 }
 
-impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// Retry every outstanding delivery (idempotent: deposits dedup by id,
     /// blob pushes by hash). Entries older than the give-up window are left
     /// in place unretried — the relay's retention has expired, the message
