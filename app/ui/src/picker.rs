@@ -17,6 +17,9 @@ const FILTER_AT: usize = 8;
 pub(crate) fn PeoplePicker(
     contacts: Signal<Vec<ContactRow>>,
     selected: RwSignal<BTreeSet<String>>,
+    /// Petnames to hide — e.g. people already in the conversation.
+    #[prop(optional, into)]
+    exclude: Option<Signal<Vec<String>>>,
 ) -> impl IntoView {
     let filter = RwSignal::new(String::new());
 
@@ -91,6 +94,14 @@ pub(crate) fn PeoplePicker(
                     <div class="dim">
                         "no contacts yet — add people in the People tab first"
                     </div>
+                }
+                    .into_any();
+            }
+            let excluded = exclude.map(|exclude| exclude.get()).unwrap_or_default();
+            list.retain(|contact| !excluded.contains(&contact.petname));
+            if list.is_empty() {
+                return view! {
+                    <div class="dim">"everyone you know is already here"</div>
                 }
                     .into_any();
             }

@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AddPreview, AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Inbox,
-    Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview, RelayRow, UnknownMember,
-    WhoIsCandidate, WhoIsReport,
+    AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceRow,
+    FriendLabel, Inbox, Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview, RelayRow,
+    UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -667,6 +667,31 @@ async fn conversations(app: AppHandle, managed: State<'_, ManagedClient>) -> Res
     })
 }
 
+/// The conversation-label rule — "only me" when nobody else is there.
+/// Shared by list rows and the members panel, so the two can't drift.
+fn conversation_label(others: &[String]) -> String {
+    if others.is_empty() {
+        "only me".to_string()
+    } else {
+        others.join(", ")
+    }
+}
+
+/// Display labels for the participants outside the own cluster, deduped per
+/// person (multi-device.md §7): a two-device contact labels once.
+fn other_labels(
+    client: &Client,
+    own: &std::collections::BTreeSet<PublicKey>,
+    participants: &[PublicKey],
+) -> Result<Vec<String>, String> {
+    let other_keys: Vec<_> = participants
+        .iter()
+        .copied()
+        .filter(|key| !own.contains(key))
+        .collect();
+    Ok(client.participant_labels(&other_keys)?)
+}
+
 /// One dto row from a summary: participants labelled minus the own cluster,
 /// "only me" when alone.
 fn conversation_row(
@@ -674,26 +699,64 @@ fn conversation_row(
     own: &std::collections::BTreeSet<PublicKey>,
     summary: &zink_client::ConversationSummary,
 ) -> Result<Conversation, String> {
-    let other_keys: Vec<_> = summary
-        .participants
-        .iter()
-        .copied()
-        .filter(|key| !own.contains(key))
-        .collect();
-    // Deduped per person (multi-device.md §7): a two-device contact
-    // labels once.
-    let others = client.participant_labels(&other_keys)?;
+    let others = other_labels(client, own, &summary.participants)?;
     Ok(Conversation {
         id: hex::encode(&summary.id.0),
-        label: if others.is_empty() {
-            "only me".to_string()
-        } else {
-            others.join(", ")
-        },
+        label: conversation_label(&others),
         message_count: summary.message_count,
         last_timestamp_ms: summary.last_timestamp_ms,
         request: !summary.known,
     })
+}
+
+/// The members panel (project 6 S2): every current member labelled, the
+/// header label re-derived, and the contact petnames among the members —
+/// what the add-picker excludes. Membership is heads-based (groups.md §2);
+/// unknown keys label as short hex (the wild-key panel owns their flow).
+#[tauri::command]
+async fn conversation_members(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    conversation: String,
+) -> Result<ConversationMembers, String> {
+    let client = client(&app, &managed).await?;
+    let id = parse_id(&conversation)?;
+    let membership: Vec<PublicKey> = client.membership(id)?.into_iter().collect();
+    let own = client.own_keys();
+    let others = other_labels(&client, &own, &membership)?;
+    let mut members = vec!["you".to_string()];
+    members.extend(others.iter().cloned());
+    let petnames = client
+        .contacts()?
+        .into_iter()
+        .filter(|(_, record)| record.keys.iter().any(|key| membership.contains(key)))
+        .map(|(petname, _)| petname)
+        .collect();
+    Ok(ConversationMembers {
+        label: conversation_label(&others),
+        members,
+        petnames,
+    })
+}
+
+/// The conversations a person is in (project 6 S2): membership intersects
+/// their key cluster. Newest-first, like `conversations`.
+#[tauri::command]
+async fn person_conversations(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    petname: String,
+) -> Result<Vec<Conversation>, String> {
+    let client = client(&app, &managed).await?;
+    let own = client.own_keys();
+    let keys = client.resolve_contact(&petname)?.keys;
+    let mut rows = Vec::new();
+    for summary in client.conversations()? {
+        if summary.participants.iter().any(|key| keys.contains(key)) {
+            rows.push(conversation_row(&client, &own, &summary)?);
+        }
+    }
+    Ok(rows)
 }
 
 /// The stored conversations whose people-set is exactly the given contacts —
@@ -1273,6 +1336,8 @@ pub fn run() {
             person_detail,
             conversations,
             conversations_with,
+            conversation_members,
+            person_conversations,
             messages,
             send_message,
             fetch_blob,

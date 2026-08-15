@@ -151,7 +151,11 @@ structurally).
   people (discovery, never auto-routing: a new chat is always a *new*
   conversation; several per participant set is a feature, groups.md §3). The
   draft reuses the one composer, so a first message can do anything a reply
-  can. No permanent compose form, no refresh button (live delivery + the 60 s
+  can. Inside a chat, the header is tappable → a **members panel**: current
+  membership (unknown keys as honest short hex), adding people via the picker
+  (one batched membership message), and the advanced affordances
+  (introduce-devices, concurrency cues) — one tap away, never always-on. No
+  permanent compose form, no refresh button (live delivery + the 60 s
   backstop poll cover it; a visible refresh button only sows doubt).
 - **People** — *"who do I know?"* Just the contact list + a **+** (scan / paste
   / pair as focused sub-flows). Tapping a person opens a **detail screen** built

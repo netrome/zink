@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{AppState, Message, OutgoingImage, UnknownMember, WhoIsReport};
+use zink_app_dto::{
+    AppState, ConversationMembers, Message, OutgoingImage, UnknownMember, WhoIsReport,
+};
 
+use crate::picker::PeoplePicker;
 use crate::{avatar_data_url, image, invoke};
 
 /// Fetch one blob of a stored message as a display-ready data URL.
@@ -52,6 +55,39 @@ pub(crate) fn ChatView(
     // contact's petname, so that's the page with the repair actions. A
     // group label matches no contact and the cue stays plain text.
     let chat_label = StoredValue::new(label.clone());
+
+    // The live header label + members panel (S2): membership is heads-based
+    // (groups.md §2) and moves with the DAG, so both re-derive on every
+    // messages change — the open-time `label` is just the first paint.
+    let title = RwSignal::new(label);
+    let members = RwSignal::new(None::<ConversationMembers>);
+    let members_open = RwSignal::new(false);
+    let adding = RwSignal::new(false);
+    let picks = RwSignal::new(BTreeSet::<String>::new());
+    let contacts =
+        Signal::derive(move || state.get().map(|state| state.contacts).unwrap_or_default());
+    let member_names = Signal::derive(move || {
+        members
+            .get()
+            .map(|members| members.petnames)
+            .unwrap_or_default()
+    });
+    let load_members = move || {
+        let id = conversation.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                conversation: &'a str,
+            }
+            let args = Args { conversation: &id };
+            if let Ok(loaded) =
+                invoke::invoke::<ConversationMembers>("conversation_members", &args).await
+            {
+                title.set(loaded.label.clone());
+                members.set(Some(loaded));
+            }
+        });
+    };
 
     // Fetch (cache-backed) every visible thumbnail not yet loaded.
     Effect::new(move |_| {
@@ -199,6 +235,7 @@ pub(crate) fn ChatView(
     Effect::new(move |_| {
         messages.track();
         load_unknowns();
+        load_members();
     });
     let ignore = move |key: String| {
         spawn_local(async move {
@@ -214,13 +251,12 @@ pub(crate) fn ChatView(
         });
     };
 
-    // Add a contact to this conversation (D2c): a message with the grown
+    // Add people to this conversation (D2c): one message with the grown
     // recipient set is the whole mechanism — the signed recipients list
-    // announces the membership change.
-    let add_pick = RwSignal::new(String::new());
-    let add_member = move |_| {
-        let petname = add_pick.get_untracked();
-        if petname.is_empty() {
+    // announces the membership change, however many joined at once.
+    let add_members = move |_| {
+        let names: Vec<String> = picks.get_untracked().into_iter().collect();
+        if names.is_empty() {
             return;
         }
         let id = conversation.get_value();
@@ -231,16 +267,18 @@ pub(crate) fn ChatView(
                 add: Option<Vec<String>>,
                 text: &'a str,
             }
+            let listed = names.join(", ");
             let args = Args {
                 conversation: Some(&id),
-                add: Some(vec![petname.clone()]),
+                add: Some(names),
                 text: "",
             };
             match invoke::invoke::<String>("send_message", &args).await {
                 Ok(_) => {
-                    add_pick.set(String::new());
-                    ok(&format!("added {petname} to the conversation"));
-                    reload_messages(id);
+                    picks.update(|picks| picks.clear());
+                    adding.set(false);
+                    ok(&format!("added {listed} to the conversation"));
+                    reload_messages(id); // membership moved → members re-derive
                 }
                 Err(e) => err(e),
             }
@@ -302,21 +340,112 @@ pub(crate) fn ChatView(
 
     view! {
         <main>
-            <h3>{label}</h3>
-            <div class="picks">
-                <button
-                    class="secondary"
-                    on:click=move |_| show_concurrency.update(|on| *on = !*on)
-                >
-                    {move || {
-                        if show_concurrency.get() {
-                            "hide when messages crossed"
-                        } else {
-                            "show when messages crossed"
+            // The tappable header (S2): title re-derived from membership,
+            // the panel one tap away.
+            <h3
+                class="tappable"
+                on:click=move |_| members_open.update(|open| *open = !*open)
+            >
+                {move || title.get()}
+                " "
+                <span class="dim">
+                    {move || if members_open.get() { "▴" } else { "▾" }}
+                </span>
+            </h3>
+            {move || {
+                members_open
+                    .get()
+                    .then(|| {
+                        view! {
+                            <div class="panel">
+                                <div class="dim">"members"</div>
+                                {move || {
+                                    members
+                                        .get()
+                                        .map(|members| {
+                                            members
+                                                .members
+                                                .into_iter()
+                                                .map(|member| {
+                                                    view! {
+                                                        <div class="row">
+                                                            <b>{member}</b>
+                                                        </div>
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>()
+                                        })
+                                }}
+                                {move || {
+                                    if adding.get() {
+                                        view! {
+                                            <PeoplePicker
+                                                contacts=contacts
+                                                selected=picks
+                                                exclude=member_names
+                                            />
+                                            <div class="picks">
+                                                <button
+                                                    disabled=move || picks.with(|picks| picks.is_empty())
+                                                    on:click=add_members
+                                                >
+                                                    "add"
+                                                </button>
+                                                <button
+                                                    class="secondary"
+                                                    on:click=move |_| {
+                                                        adding.set(false);
+                                                        picks.update(|picks| picks.clear());
+                                                    }
+                                                >
+                                                    "cancel"
+                                                </button>
+                                            </div>
+                                        }
+                                            .into_any()
+                                    } else {
+                                        view! {
+                                            <button
+                                                class="secondary"
+                                                on:click=move |_| adding.set(true)
+                                            >
+                                                "+ add people"
+                                            </button>
+                                        }
+                                            .into_any()
+                                    }
+                                }}
+                                // Advanced, rare affordances — one tap away
+                                // instead of always-on (S2).
+                                {move || {
+                                    state
+                                        .get()
+                                        .map(|state| !state.devices.is_empty())
+                                        .unwrap_or(false)
+                                        .then(|| {
+                                            view! {
+                                                <button class="secondary" on:click=introduce>
+                                                    "introduce my devices"
+                                                </button>
+                                            }
+                                        })
+                                }}
+                                <button
+                                    class="secondary"
+                                    on:click=move |_| show_concurrency.update(|on| *on = !*on)
+                                >
+                                    {move || {
+                                        if show_concurrency.get() {
+                                            "hide when messages crossed"
+                                        } else {
+                                            "show when messages crossed"
+                                        }
+                                    }}
+                                </button>
+                            </div>
                         }
-                    }}
-                </button>
-            </div>
+                    })
+            }}
             {move || {
                 let list = unknowns.get();
                 (!list.is_empty())
@@ -644,41 +773,6 @@ pub(crate) fn ChatView(
                 }}
             </div>
             <div class="compose">
-                <div class="picks">
-                    <select on:change=move |ev| add_pick.set(event_target_value(&ev))>
-                        <option value="" selected disabled>
-                            "add to conversation…"
-                        </option>
-                        {move || {
-                            state
-                                .get()
-                                .map(|state| state.contacts)
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|contact| {
-                                    let value = contact.petname.clone();
-                                    view! { <option value=value>{contact.petname}</option> }
-                                })
-                                .collect::<Vec<_>>()
-                        }}
-                    </select>
-                    <button class="secondary" on:click=add_member>
-                        "add"
-                    </button>
-                    {move || {
-                        state
-                            .get()
-                            .map(|state| !state.devices.is_empty())
-                            .unwrap_or(false)
-                            .then(|| {
-                                view! {
-                                    <button class="secondary" on:click=introduce>
-                                        "introduce my devices"
-                                    </button>
-                                }
-                            })
-                    }}
-                </div>
                 <Composer draft=draft attachment=attachment send=send err=err />
             </div>
             {move || {

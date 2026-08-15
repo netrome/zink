@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{PersonDetail, WhoIsReport};
+use zink_app_dto::{Conversation, PersonDetail, WhoIsReport};
 
 use crate::{avatar_data_url, image, invoke};
 
@@ -16,12 +16,31 @@ pub(crate) fn PersonView(
     petname: String,
     reload: impl Fn() + Copy + Send + 'static,
     back: impl Fn() + Copy + Send + 'static,
+    open_chat: impl Fn(String, String) + Copy + Send + 'static,
+    start_draft: impl Fn(Vec<String>) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let petname = StoredValue::new(petname);
     let detail = RwSignal::new(None::<PersonDetail>);
     let avatar = RwSignal::new(None::<String>);
+    // The conversations they're in (S2) — membership ∩ their cluster.
+    let chats = RwSignal::new(Vec::<Conversation>::new());
+    let load_chats = move || {
+        let name = petname.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                petname: &'a str,
+            }
+            let args = Args { petname: &name };
+            if let Ok(list) =
+                invoke::invoke::<Vec<Conversation>>("person_conversations", &args).await
+            {
+                chats.set(list);
+            }
+        });
+    };
     // The editable petname (my lens) — prefilled from the loaded detail.
     let rename_to = RwSignal::new(String::new());
     // Repudiation is armed-then-confirmed (two taps) — it publishes.
@@ -72,10 +91,11 @@ pub(crate) fn PersonView(
             match invoke::invoke::<serde::de::IgnoredAny>("rename_contact", &args).await {
                 Ok(_) => {
                     // The view now tracks the new name (person_detail is
-                    // keyed by petname).
+                    // keyed by petname; conversation labels carry it too).
                     petname.set_value(new.clone());
                     reload();
                     load_detail();
+                    load_chats();
                     ok(&format!("renamed to {new}"));
                 }
                 Err(e) => err(e),
@@ -83,6 +103,7 @@ pub(crate) fn PersonView(
         });
     };
     load_detail();
+    load_chats();
 
     let toggle_vouch = move || {
         let Some(current) = detail.get_untracked() else {
@@ -323,6 +344,49 @@ pub(crate) fn PersonView(
                                     }
                                 })
                                 .collect::<Vec<_>>()}
+                            // Their conversations (S2): plurality is the
+                            // model — several chats with the same people is
+                            // a feature, so a list, never one "message"
+                            // button.
+                            <div class="dim">"conversations with them"</div>
+                            {move || {
+                                let list = chats.get();
+                                if list.is_empty() {
+                                    view! {
+                                        <div class="row">
+                                            <span class="dim">"none yet"</span>
+                                        </div>
+                                    }
+                                        .into_any()
+                                } else {
+                                    list.into_iter()
+                                        .map(|conversation| {
+                                            let (id, chat_label) = (
+                                                conversation.id.clone(),
+                                                conversation.label.clone(),
+                                            );
+                                            view! {
+                                                <div
+                                                    class="row"
+                                                    on:click=move |_| open_chat(
+                                                        id.clone(),
+                                                        chat_label.clone(),
+                                                    )
+                                                >
+                                                    <b>{conversation.label}</b>
+                                                    <span class="dim">
+                                                        {format!("{} message(s)", conversation.message_count)}
+                                                    </span>
+                                                </div>
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .into_any()
+                                }
+                            }}
+                            <button on:click=move |_| {
+                                start_draft(vec![petname.get_value()])
+                            }>"start a new conversation"</button>
                             // Their self-claim.
                             <div class="dim">"they call themselves"</div>
                             <div class="row">

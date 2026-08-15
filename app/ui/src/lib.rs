@@ -208,6 +208,8 @@ fn App() -> impl IntoView {
                     petname=petname
                     reload=load_state
                     back=move || view.set(View::People)
+                    open_chat=open_chat
+                    start_draft=start_draft
                     ok=ok
                     err=err
                 />

@@ -275,6 +275,22 @@ pub struct WhoIsCandidate {
     pub payload: Option<String>,
 }
 
+/// The members panel (project 6 S2): the conversation's current membership,
+/// presentation-shaped, plus the re-derived header label — so a membership
+/// change updates the title instead of leaving the open-time label stale.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConversationMembers {
+    /// The chat-header label — other participants, petname-resolved,
+    /// "only me" when alone.
+    pub label: String,
+    /// Every current member: "you", then petnames / device names / short
+    /// hex for keys nobody recognizes (the wild-key panel owns their flow).
+    pub members: Vec<String>,
+    /// The contact petnames among the members — what the add-picker
+    /// excludes.
+    pub petnames: Vec<String>,
+}
+
 /// One blob reference of a message.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BlobInfo {

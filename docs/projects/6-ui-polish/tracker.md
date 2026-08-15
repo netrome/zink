@@ -1,6 +1,6 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 🔨 in progress — S1 landed (2026-08-15).** Project **6-ui-polish**,
+> **Status: 🔨 in progress — S1–S2 landed (2026-08-16).** Project **6-ui-polish**,
 > branch `better-selections`. Trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
@@ -216,7 +216,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   zink-client wasm32 + desktop `cargo check` + `app/ui/build.sh` clean.
   Graduated: groups.md §3 (index = send-by-name policy, never identity),
   ui-design-system.md §2 (picker pattern) + §3 (draft-chat flow).
-- [ ] **S2 · The members panel + a person's conversations.** New
+- [x] **S2 · The members panel + a person's conversations.** New
   `membership` command (labels via the existing `history.rs::membership` +
   `participant_labels`), serving two surfaces. Chat header becomes tappable
   → panel: current members (unknown keys rendered honestly), add via the S1
@@ -229,6 +229,17 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   relocate into the members panel — advanced affordances, one tap away
   instead of always-on. *Done when:* U2, U3, U4, and the composer-row
   clutter are dead.
+  *Landed 2026-08-16:* `conversation_members` + `person_conversations`
+  commands, `ConversationMembers` dto (`conversation_label` / `other_labels`
+  extracted so list rows and the header can't drift); chat header tappable →
+  panel with members, the S1 picker (new optional `exclude` prop), one
+  batched `add` message, introduce-devices + crossed-cues relocated; the
+  header title re-derives from membership on every messages change (U3
+  dead); the permanent `<select>` deleted (U2 dead by deletion); Person view
+  lists their conversations + "start a new conversation" pre-selecting them
+  (U4 dead). Suite 240, clippy clean (workspace + desktop shell),
+  `app/ui/build.sh` clean. Graduated: ui-design-system.md §3 members-panel
+  sentence.
 
 **Tier 2 — the everyday loop**
 
