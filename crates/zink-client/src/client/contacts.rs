@@ -102,6 +102,48 @@ impl RecordUpdate {
     }
 }
 
+/// Where a relay resolution's entries came from (who-is-this.md §7 + R5):
+/// the winning provenance class — one source per resolution, because each
+/// class is a single artifact (one override file, one learned answer, one
+/// stored record).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RelaySource {
+    /// A manual override you set (R5) — wins while you keep it. Going
+    /// stale is surfaced by the send-state cues (R3), and clearing it is
+    /// yours too: the petname rule, applied to routing.
+    Override,
+    /// Served by the subject themself over an authenticated connection.
+    SubjectServed { received_ms: u64 },
+    /// The record you scanned / explicitly added or updated.
+    Scanned,
+    /// A contact's answer about them — third-hand, only ever decisive in
+    /// the one-way-add bootstrap (who-is-this.md §7).
+    Hearsay { received_ms: u64 },
+}
+
+/// One relay-resolution outcome: the winning class's entries + provenance.
+pub struct RelayResolution {
+    pub relays: Vec<RelayEntry>,
+    pub source: RelaySource,
+}
+
+/// The person-view relay panel (R5): provenance + per-relay debt.
+pub struct RelayStatus {
+    pub source: RelaySource,
+    pub relays: Vec<RelayHealth>,
+}
+
+/// One effective relay with what the outbox still owes it. The debt is
+/// per *relay* (the ledger's grain), not per recipient — on a relay
+/// shared across contacts the count includes other people's messages.
+pub struct RelayHealth {
+    /// Full spec (`dial[#relay-url]`).
+    pub spec: String,
+    pub owed: usize,
+    /// Oldest owed entry's stamp — `None` when nothing is owed.
+    pub owed_since_ms: Option<u64>,
+}
+
 /// The contacts sharing at least one key with the record — the identity
 /// evidence add/update/preview all triage on (multi-device.md §4).
 fn overlapping<'a>(
@@ -575,6 +617,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// The relay entries to reach a person at, resolved at read time
     /// (who-is-this.md §7) — nothing stored is ever mutated. Provenance
     /// classes, first non-empty class wins, latest receipt within one:
+    /// a **manual override** (R5 — yours, like a petname) >
     /// **subject-served** (authenticated by the connection key) > the
     /// **user-added record** (authenticated by the scan / explicit add) >
     /// **contact-served** hearsay (only ever decisive in the one-way-add
@@ -585,6 +628,25 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         key: PublicKey,
         stored: Option<&ContactRecord>,
     ) -> Vec<RelayEntry> {
+        self.resolve_relays(key, stored)
+            .map(|resolution| resolution.relays)
+            .unwrap_or_default()
+    }
+
+    /// `effective_relays` with the winning class named — what the person
+    /// view renders as provenance (R5). `None`: nothing anywhere names a
+    /// relay for this key.
+    pub(super) fn resolve_relays(
+        &self,
+        key: PublicKey,
+        stored: Option<&ContactRecord>,
+    ) -> Option<RelayResolution> {
+        if let Some(relays) = self.state.relay_override(stored) {
+            return Some(RelayResolution {
+                relays,
+                source: RelaySource::Override,
+            });
+        }
         let learned = self.state.learned(&key);
         let best = |from_subject: bool| {
             learned
@@ -592,16 +654,98 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                 .filter(|entry| (entry.responder == key) == from_subject)
                 .filter(|entry| !entry.record.relays.is_empty())
                 .max_by_key(|entry| entry.received_ms)
-                .map(|entry| entry.record.relays.clone())
+                .map(|entry| (entry.record.relays.clone(), entry.received_ms))
         };
-        best(true)
-            .or_else(|| {
-                stored
-                    .filter(|record| !record.relays.is_empty())
-                    .map(|record| record.relays.clone())
+        if let Some((relays, received_ms)) = best(true) {
+            return Some(RelayResolution {
+                relays,
+                source: RelaySource::SubjectServed { received_ms },
+            });
+        }
+        if let Some(record) = stored.filter(|record| !record.relays.is_empty()) {
+            return Some(RelayResolution {
+                relays: record.relays.clone(),
+                source: RelaySource::Scanned,
+            });
+        }
+        let (relays, received_ms) = best(false)?;
+        Some(RelayResolution {
+            relays,
+            source: RelaySource::Hearsay { received_ms },
+        })
+    }
+
+    /// Set (or clear, with an empty list) the manual relay override for a
+    /// contact (R5): stored beside the record, never inside it. Wins
+    /// resolution while present; an explicit record update
+    /// (`update_contact` / a confirmed rescan) clears it — the fresh scan
+    /// supersedes the patch. Specs validate before anything persists; the
+    /// scanned `ZINK-RELAY:` form is accepted.
+    pub fn set_relay_override(&self, petname: &str, specs: &[String]) -> Result<(), Error> {
+        let contacts = self.state.contacts()?;
+        let (_, record) = contacts
+            .iter()
+            .find(|(name, _)| name == petname)
+            .ok_or_else(|| Error::NotAContact(petname.to_string()))?;
+        let key = record
+            .keys
+            .first()
+            .ok_or_else(|| Error::InvalidRecord("stored record has no keys".into()))?;
+        if specs.is_empty() {
+            self.state.clear_relay_override(key);
+            return Ok(());
+        }
+        let entries: Vec<RelayEntry> = specs
+            .iter()
+            .map(|spec| RelayEntry::from_spec(spec))
+            .collect();
+        for entry in &entries {
+            // Validate early, before any state changes (the Contact::parse
+            // rule).
+            crate::adapters::iroh::parse_dial(&entry.mailbox)?;
+        }
+        self.state.save_relay_override(key, &entries)
+    }
+
+    /// The person-view relay panel (R5): the relays a send to this contact
+    /// would use right now, the provenance class they came from, and what
+    /// the outbox still owes each of them.
+    pub fn relay_status(&self, petname: &str) -> Result<RelayStatus, Error> {
+        let contacts = self.state.contacts()?;
+        let (_, record) = contacts
+            .iter()
+            .find(|(name, _)| name == petname)
+            .ok_or_else(|| Error::NotAContact(petname.to_string()))?;
+        let key = record
+            .keys
+            .first()
+            .copied()
+            .ok_or_else(|| Error::InvalidRecord("stored record has no keys".into()))?;
+        let resolution = self
+            .resolve_relays(key, Some(record))
+            .ok_or_else(|| Error::InvalidRecord("no relays resolve for this contact".into()))?;
+        let mut owed: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+        for entry in self.state.outbox() {
+            let slot = owed.entry(entry.relay).or_insert((0, entry.created_ms));
+            slot.0 += 1;
+            slot.1 = slot.1.min(entry.created_ms);
+        }
+        let relays = resolution
+            .relays
+            .iter()
+            .map(|entry| {
+                let debt = owed.get(&entry.mailbox);
+                RelayHealth {
+                    spec: entry.to_spec(),
+                    owed: debt.map(|(count, _)| *count).unwrap_or(0),
+                    owed_since_ms: debt.map(|(_, since)| *since),
+                }
             })
-            .or_else(|| best(false))
-            .unwrap_or_default()
+            .collect();
+        Ok(RelayStatus {
+            source: resolution.source,
+            relays,
+        })
     }
 
     /// The dialable peer address for a person: their key, routed via the
@@ -810,7 +954,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
 mod tests {
     use super::*;
     use crate::client::test_kit::{
-        befriend, chain, dir_bytes, loop_client, mailbox_only, signed_record, temp_key, temp_root,
+        befriend, chain, dir_bytes, loop_client, mailbox_only, mailbox_spec, signed_record,
+        temp_key, temp_root,
     };
     use crate::ports::transport::Loopback;
     use zink_protocol::DeviceKey;
@@ -1021,6 +1166,147 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(temp_root("overlap-collision"));
+    }
+
+    #[tokio::test]
+    async fn set_relay_override__should_win_until_cleared() {
+        // Given: carol stored with relay X and a *newer* subject-served
+        // answer naming relay Y — the strongest non-manual class
+        let a = Client::open_or_create(&temp_key("override-wins", "a"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([50; 32]);
+        let relay_z = DeviceKey::from_seed([51; 32]).public();
+        let stored = ContactRecord::new(
+            vec![carol.public()],
+            vec![],
+            mailbox_only("xx@203.0.113.1:1"),
+        );
+        a.add_contact(&stored, Some("carol".to_string()))
+            .expect("add");
+        let served = ContactRecord::new(
+            vec![carol.public()],
+            vec![],
+            mailbox_only("yy@203.0.113.2:2"),
+        );
+        a.state
+            .save_learned(&carol.public(), &carol.public(), &served, &[], 1)
+            .expect("learn subject-served");
+
+        // When: a manual override, pasted in the scanned QR form
+        a.set_relay_override("carol", &[format!("ZINK-RELAY:{}", mailbox_spec(&relay_z))])
+            .expect("set override");
+
+        // Then: the override beats even the subject's own answer
+        let contact = a.resolve_contact("carol").expect("resolve");
+        assert_eq!(contact.relays, vec![mailbox_spec(&relay_z)]);
+        let status = a.relay_status("carol").expect("status");
+        assert_eq!(status.source, RelaySource::Override);
+
+        // And: clearing it (an empty list) falls back to subject-served
+        a.set_relay_override("carol", &[]).expect("clear");
+        let contact = a.resolve_contact("carol").expect("resolve");
+        assert_eq!(contact.relays, vec!["yy@203.0.113.2:2".to_string()]);
+        assert_eq!(
+            a.relay_status("carol").expect("status").source,
+            RelaySource::SubjectServed { received_ms: 1 }
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("override-wins"));
+    }
+
+    #[tokio::test]
+    async fn set_relay_override__should_reject_an_invalid_spec() {
+        // Given: bob stored
+        let a = Client::open_or_create(&temp_key("override-invalid", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([52; 32]);
+        a.add_contact(
+            &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
+            Some("bob".to_string()),
+        )
+        .expect("add");
+
+        // When / Then: a malformed dial is refused before anything persists
+        assert!(
+            a.set_relay_override("bob", &["not-a-dial".to_string()])
+                .is_err()
+        );
+        assert_eq!(
+            a.relay_status("bob").expect("status").source,
+            RelaySource::Scanned,
+            "no override took effect"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("override-invalid"));
+    }
+
+    #[tokio::test]
+    async fn update_contact__should_clear_a_relay_override() {
+        // Given: bob stored with an override patching his relay
+        let a = Client::open_or_create(&temp_key("override-super", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([53; 32]);
+        let relay = DeviceKey::from_seed([54; 32]).public();
+        a.add_contact(
+            &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
+            Some("bob".to_string()),
+        )
+        .expect("add");
+        a.set_relay_override("bob", &[mailbox_spec(&relay)])
+            .expect("set override");
+
+        // When: an explicit record update (the confirmed rescan)
+        let fresh =
+            ContactRecord::new(vec![bob.public()], vec![], mailbox_only("cc@203.0.113.7:7"));
+        a.update_contact(&fresh).expect("update");
+
+        // Then: the fresh scan supersedes the patch
+        let status = a.relay_status("bob").expect("status");
+        assert_eq!(status.source, RelaySource::Scanned);
+        assert_eq!(
+            a.resolve_contact("bob").expect("resolve").relays,
+            vec!["cc@203.0.113.7:7".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("override-super"));
+    }
+
+    #[tokio::test]
+    async fn relay_status__should_report_provenance_and_debt() {
+        // Given: bob stored on relay A, with one outbox entry owed to A
+        let a = Client::open_or_create(&temp_key("relay-status", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([55; 32]);
+        let relay = DeviceKey::from_seed([56; 32]).public();
+        a.add_contact(
+            &ContactRecord::new(
+                vec![bob.public()],
+                vec![],
+                mailbox_only(&mailbox_spec(&relay)),
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add");
+        let message = zink_protocol::MessageId([7; 32]);
+        a.state
+            .add_outbox(message, &mailbox_spec(&relay), message, 5)
+            .expect("owe");
+
+        // When
+        let status = a.relay_status("bob").expect("status");
+
+        // Then: the stored record is the source, and the debt shows
+        assert_eq!(status.source, RelaySource::Scanned);
+        assert_eq!(status.relays.len(), 1);
+        assert_eq!(status.relays[0].spec, mailbox_spec(&relay));
+        assert_eq!(status.relays[0].owed, 1);
+        assert_eq!(status.relays[0].owed_since_ms, Some(5));
+
+        let _ = std::fs::remove_dir_all(temp_root("relay-status"));
     }
 
     #[tokio::test]

@@ -169,11 +169,15 @@ stance the DAG takes).
 At dial / fan-out time, the relays for a subject resolve by provenance
 class, latest-received within a class:
 
-1. **Subject-served** learned record — authenticated by the connection key
+1. **A manual relay override** (added at R5 — relay-lifecycle.md §5) —
+   the user's explicit patch, stored *beside* the contact record, never
+   inside it. Wins the way a petname wins naming; cleared explicitly, or
+   superseded by a confirmed record update.
+2. **Subject-served** learned record — authenticated by the connection key
    (only the key-holder can produce one).
-2. **The contact-store record** — authenticated by the out-of-band scan (or
+3. **The contact-store record** — authenticated by the out-of-band scan (or
    the explicit promotion).
-3. **Contact-served** learned records — third-hand; used only when nothing
+4. **Contact-served** learned records — third-hand; used only when nothing
    better exists, which is precisely the one-way-add bootstrap where it's
    the whole point.
 

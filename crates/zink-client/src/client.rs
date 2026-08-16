@@ -27,7 +27,8 @@ mod send;
 mod who_is;
 
 pub use contacts::{
-    Contact, DeviceEvidence, Disavowal, LearnedName, RecordMatch, RecordUpdate, ResolvedName,
+    Contact, DeviceEvidence, Disavowal, LearnedName, RecordMatch, RecordUpdate, RelayHealth,
+    RelaySource, RelayStatus, ResolvedName,
 };
 pub use history::{ConversationSummary, HistoryMessage, Inbox, MAX_MESSAGE_REQUESTS, triage};
 pub use outbox::{FlushReport, OUTBOX_GIVE_UP_MS};

@@ -107,6 +107,25 @@ pub struct PersonDetail {
     pub friends: Vec<FriendLabel>,
     /// Render-ready disavowal warnings (D4c) — context for a trust decision.
     pub disavowals: Vec<String>,
+    /// Render-ready provenance for `relays` (R5): "you set these by hand",
+    /// "served by them · 2 h ago", "from your scan", "heard from a
+    /// contact · …".
+    pub relay_source: String,
+    /// The relays a message to them would use right now (R5).
+    pub relays: Vec<RelayRow>,
+    /// Whether a manual override is in effect — drives the clear button.
+    pub relay_override: bool,
+}
+
+/// One effective relay for a person (R5).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RelayRow {
+    /// Full spec (`dial[#relay-url]`).
+    pub spec: String,
+    /// Render-ready debt line ("⚠ 2 message(s) queued for this relay ·
+    /// oldest 3 d ago") — `None` = nothing queued. Per *relay*, so on a
+    /// relay shared across contacts it can include other people's messages.
+    pub owed: Option<String>,
 }
 
 /// One vouched name from the friends' lens: a name, and the petnames of the

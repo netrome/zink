@@ -1,6 +1,6 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 🟡 in progress (started 2026-08-15) — R1–R4 ✅.** Project **5-relay-lifecycle**,
+> **Status: 🟡 in progress (started 2026-08-15) — R1–R5 ✅, Tier 3 remains.** Project **5-relay-lifecycle**,
 > picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
 > permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
 > (server reinstall, 2026-08-15) hit three compounding walls — see §1.
@@ -254,14 +254,34 @@ recorded per §5.
   relay printed the payload + warning with exit 0, and
   `--relay "ZINK-RELAY:<spec>"` was accepted verbatim. **B6 is dead** —
   phone-adds-relay is scan → save, zero transcription.
-- [ ] **R5 · Per-contact relay panel.** Person view shows the *effective*
-  relays with provenance and freshness — "from your scan · Jul 26", "served
-  by them · yesterday", "you set this · today" — plus last-deposit outcome
-  per relay, the existing refresh (`who_is`) action, and add/remove of a
-  **manual override**. Client: overrides live beside the stored record
-  (never inside it — the scan stays immutable evidence, §4), a new class in
-  `effective_relays`; rank decided in-slice (§7 has the lean and the
-  tension). *Done when:* B2 is dead — the wall in §1 has a door.
+- [x] **R5 · Per-contact relay panel.** ✅ 2026-08-16. Client: resolution
+  became provenance-aware — `resolve_relays` returns the winning class
+  (`RelaySource::{Override, SubjectServed{received_ms}, Scanned,
+  Hearsay{received_ms}}`), `effective_relays` is now a thin wrapper, so
+  every send/dial path picked up the override for free. Overrides live in
+  `contacts/<stem>.relays` **beside** the record (immutable-evidence
+  stance kept), set/cleared via `set_relay_override(petname, specs)`
+  (empty = clear; validates before persisting; accepts the `ZINK-RELAY:`
+  form), and **a confirmed record update clears them** — the rescan
+  supersedes the patch (`replace_contact`). Rank resolved (§7):
+  **manual wins while kept**, R3's stuck cues are the honesty valve.
+  `relay_status(petname)` feeds the panel: effective relays + source +
+  per-relay outbox debt (count + oldest stamp — the honest "last-deposit
+  outcome" we actually have; scan-time freshness isn't recorded, so
+  "from the record you scanned" renders dateless rather than invented).
+  App: the person page gained "their relays" — provenance line
+  ("you set these by hand · served by them · 2 h ago · …"), spec rows
+  with "⚠ n message(s) queued" warnings, an override textarea + set
+  button, and a clear button when one is active; the existing who-is
+  refresh sits right there. Four new tests (override wins subject-served
+  and falls back on clear; invalid spec refused before persisting; rescan
+  clears the override; status reports provenance + debt). Graduated:
+  who-is-this.md §7 precedence renumbered with the override on top;
+  relay-lifecycle.md §5 records the rank tension and why manual wins.
+  **Proof:** 255/255, clippy clean, `wasm32` + `app/ui/build.sh` +
+  src-tauri check clean. **B2 is dead** — the §1 wall has a door, even
+  without a rescan. (Panel is build-verified; eyeball with R1/R3's cues
+  on the next desktop run.)
 
 **Tier 3 — self-healing + close**
 
@@ -288,7 +308,7 @@ recorded per §5.
 | Rescan guard | **Kept, confirm relocated.** The petname-match confirm was the right rule with unusable ergonomics (retype a petname nobody remembers). The explicit act becomes a rendered preview + confirm; the client API distinguishes new-vs-update so no layer auto-rewrites an anchor. (R1) |
 | Empty petname on update | Resolved sharper at R1: `update_contact` has **no petname parameter** — an update never renames, so the API can't express the mistake. The self-claim default survives only for genuinely new contacts, where it's the right prefill. |
 | Where overrides live | Beside the record, as a new provenance class in `effective_relays` — never mutating the stored record (immutable evidence, who-is-this.md §5). Relays are unsigned in the record, so nothing cryptographic is at stake; provenance honesty is. (R5) |
-| Override rank | **Open — decide in R5.** Tension: the petname precedent says manual wins; but a manual override outranking subject-served answers can go stale and recreate this project's disease. Lean: manual wins while it works, and R3's stuck-surfacing is the honesty valve. |
+| Override rank | Resolved at R5, as leaned: **manual wins while kept** — the petname precedent, applied to routing. The staleness cost is accepted because the honesty valve ships first (R3's stuck cues render on the same page as the clear button), and a confirmed rescan clears the override outright — fresher truth adopted explicitly is never shadowed by an old patch. relay-lifecycle.md §5. |
 | Outbox keying | Resolved at R2: **keep `(message, relay)`, reconcile at flush.** The file format never changed, so pre-R2 ledgers migrate by being flushed once; per-recipient state lives nowhere because it's derivable (sealed recipients + acks + current records). Re-keying by recipient was rejected as a stored duplicate of what reconciliation computes. |
 | Stuck threshold & wording | Resolved at R3: the client exposes the *fact* (`owed_since_ms`); thresholds are **edge policy** — stuck at 10 min (a relay restart never alarms), undelivered at the public `OUTBOX_GIVE_UP_MS`. Wording is our-deposit-only ("can't reach *their relay*", never "not delivered"); confirmation stays positive-only. |
 | Relay QR payload | Resolved at R4: `ZINK-RELAY:` + the existing spec string, no new encoding — the spec format is already the versioned artifact. Prefix-stripping lives in `RelayEntry::from_spec`, so every spec-accepting surface takes the scanned form for free. QR per bound socket (each — the operator picks). |

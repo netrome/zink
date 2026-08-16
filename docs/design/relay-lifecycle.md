@@ -78,7 +78,34 @@ inference.
   *target*; the no-per-entry-backoff position (live-delivery.md §2
   known-remaining) is unchanged.
 
-## 5. Keeping records current (R6, unwritten)
+## 5. Manual overrides: the user's patch, ranked like a petname
+
+R5 adds a per-contact **relay override**: specs stored *beside* the stored
+record (`contacts/<stem>.relays`), never inside it — the scan stays
+immutable evidence — and a top-ranked class in read-time resolution
+(who-is-this.md §7). The rank was the contested call:
+
+- **Manual wins while it is kept.** The petname precedent: an explicit
+  local act is the user's lens, and no network input outranks it. The
+  cost — an override can go stale and recreate the very disease this
+  project treats — is accepted because the honesty valve already exists:
+  R3's stuck cues say *"can't reach their relay"* on the person's own
+  page, right next to the clear button.
+- **An explicit record update clears it.** A confirmed rescan
+  (`update_contact`) is the user adopting fresher truth; keeping the patch
+  would silently shadow it. Symmetric with what created it: overrides are
+  set by one explicit act and removed by another (clear, or rescan).
+- **Overrides are an escape hatch, not a path.** The normal repair is a
+  rescan (R1) or the subject-refresh (§6); the override exists for the
+  case where neither is at hand — a relay died and the contact told you
+  the new spec over any other channel.
+
+The person view renders the *effective* relays with their provenance
+class named and the outbox's per-relay debt beside them — the panel where
+"why aren't my messages arriving" gets an answer and every answer has an
+action.
+
+## 6. Keeping records current (R6, unwritten)
 
 Reconciliation is only as good as the records it reads. The healing loop —
 opportunistic `who_is` against a contact over any already-authenticated

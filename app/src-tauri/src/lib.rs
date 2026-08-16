@@ -10,10 +10,10 @@ use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
     AddPreview, AppState, BlobInfo, ContactRow, Conversation, DeviceRow, FriendLabel, Inbox,
-    Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview, UnknownMember, WhoIsCandidate,
-    WhoIsReport,
+    Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview, RelayRow, UnknownMember,
+    WhoIsCandidate, WhoIsReport,
 };
-use zink_client::{Client, RecordMatch, RecordUpdate, ResolvedName, hex};
+use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
 
 /// The one `Client` for the app's lifetime, created on first use. A single
@@ -563,6 +563,18 @@ async fn person_detail(
             .collect(),
         None => vec![],
     };
+    // The relay panel (R5): effective relays + provenance + per-relay debt.
+    let status = client.relay_status(&petname)?;
+    let relay_source = match status.source {
+        RelaySource::Override => "you set these by hand — their record is not in use".to_string(),
+        RelaySource::SubjectServed { received_ms } => {
+            format!("served by them · {}", ago(received_ms))
+        }
+        RelaySource::Scanned => "from the record you scanned".to_string(),
+        RelaySource::Hearsay { received_ms } => {
+            format!("heard from a contact · {}", ago(received_ms))
+        }
+    };
     Ok(PersonDetail {
         avatar_key: primary.map(|key| hex::encode(&key.0)).unwrap_or_default(),
         keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
@@ -576,8 +588,55 @@ async fn person_detail(
             None => vec![],
         },
         friends,
+        relay_override: status.source == RelaySource::Override,
+        relays: status
+            .relays
+            .into_iter()
+            .map(|relay| RelayRow {
+                spec: relay.spec,
+                owed: (relay.owed > 0).then(|| {
+                    let since = relay
+                        .owed_since_ms
+                        .map(|ms| format!(" · oldest {}", ago(ms)))
+                        .unwrap_or_default();
+                    format!("⚠ {} message(s) queued for this relay{since}", relay.owed)
+                }),
+            })
+            .collect(),
+        relay_source,
         petname,
     })
+}
+
+/// Relative wall time for provenance lines ("2 h ago") — presentation at
+/// the edge, deliberately coarse.
+fn ago(then_ms: u64) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0);
+    let elapsed = now_ms.saturating_sub(then_ms);
+    match elapsed {
+        ms if ms < 60_000 => "just now".to_string(),
+        ms if ms < 60 * 60_000 => format!("{} min ago", ms / 60_000),
+        ms if ms < 24 * 60 * 60_000 => format!("{} h ago", ms / (60 * 60_000)),
+        ms => format!("{} d ago", ms / (24 * 60 * 60_000)),
+    }
+}
+
+/// Set (or clear, with an empty list) the manual relay override for a
+/// contact (R5) — the person page's escape hatch when their record is
+/// stale and a rescan isn't at hand.
+#[tauri::command]
+async fn set_relay_override(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    petname: String,
+    relays: Vec<String>,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    Ok(client.set_relay_override(&petname, &relays)?)
 }
 
 /// The conversation list, rendered from the stored DAG (not from a recv).
@@ -1146,6 +1205,7 @@ pub fn run() {
             preview_contact,
             update_contact,
             rename_contact,
+            set_relay_override,
             set_local_avatar,
             clear_local_avatar,
             person_detail,

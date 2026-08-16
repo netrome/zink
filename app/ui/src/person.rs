@@ -166,6 +166,38 @@ pub(crate) fn PersonView(
         });
     };
 
+    // Manual relay override (R5, my lens like the petname): the escape
+    // hatch when their record is stale and a rescan isn't at hand. Wins
+    // resolution until cleared — or until a confirmed rescan supersedes it.
+    let override_input = RwSignal::new(String::new());
+    let set_override = move |relays: Vec<String>| {
+        let name = petname.get_value();
+        let cleared = relays.is_empty();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                petname: &'a str,
+                relays: &'a [String],
+            }
+            let args = Args {
+                petname: &name,
+                relays: &relays,
+            };
+            match invoke::invoke::<serde::de::IgnoredAny>("set_relay_override", &args).await {
+                Ok(_) => {
+                    override_input.set(String::new());
+                    load_detail();
+                    ok(if cleared {
+                        "override cleared — their record is back in use"
+                    } else {
+                        "override set — your relays win until you clear them or rescan"
+                    });
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     // A local photo for them (U6, my lens): a photo *I* chose, stored on
     // this device only — never published. Overrides their self-claim
     // everywhere their avatar shows.
@@ -337,6 +369,59 @@ pub(crate) fn PersonView(
                                     }
                                 })
                                 .collect::<Vec<_>>()}
+                            // Their relays (R5): what a message to them
+                            // would use right now — provenance named, the
+                            // manual override as the escape hatch.
+                            <div class="dim">"their relays — where messages to them wait"</div>
+                            <div class="row">
+                                <span class="dim">{person.relay_source.clone()}</span>
+                            </div>
+                            {person
+                                .relays
+                                .clone()
+                                .into_iter()
+                                .map(|relay| {
+                                    view! {
+                                        <div class="dim" id="record-text">{relay.spec}</div>
+                                        {relay
+                                            .owed
+                                            .map(|line| view! { <div class="dim">{line}</div> })}
+                                    }
+                                })
+                                .collect::<Vec<_>>()}
+                            <textarea
+                                rows="2"
+                                placeholder="override: paste relay spec(s) or a ZINK-RELAY code"
+                                prop:value=move || override_input.get()
+                                on:input=move |ev| override_input.set(event_target_value(&ev))
+                            />
+                            <button
+                                class="secondary"
+                                on:click=move |_| {
+                                    let specs: Vec<String> = override_input
+                                        .get_untracked()
+                                        .split_whitespace()
+                                        .map(str::to_string)
+                                        .collect();
+                                    if !specs.is_empty() {
+                                        set_override(specs);
+                                    }
+                                }
+                            >
+                                "override their relays"
+                            </button>
+                            {person
+                                .relay_override
+                                .then(|| {
+                                    view! {
+                                        <button
+                                            class="secondary"
+                                            on:click=move |_| set_override(Vec::new())
+                                        >
+                                            "clear override — use their record"
+                                        </button>
+                                    }
+                                })}
                             // Actions, in context. Vouching *is* sharing your
                             // name for them — say so plainly (the friends'
                             // lens above is the other side of this act).

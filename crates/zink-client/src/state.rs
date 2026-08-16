@@ -676,12 +676,46 @@ impl ClientState {
         let (Some(old_key), Some(new_key)) = (old.keys.first(), new.keys.first()) else {
             return Ok(());
         };
+        // An explicit record update supersedes any manual relay patch (R5):
+        // the override was set against the *old* anchor, and keeping it
+        // would silently shadow the truth the user just adopted.
+        self.clear_relay_override(old_key);
+        self.clear_relay_override(new_key);
         if old_key != new_key {
             let stem = self.contact_stem(old_key);
             let _ = std::fs::remove_file(stem.with_extension("record"));
             let _ = std::fs::remove_file(stem.with_extension("name"));
         }
         Ok(())
+    }
+
+    /// The manual relay override for a contact, if set (R5,
+    /// relay-lifecycle.md): specs stored *beside* the record — never
+    /// inside it, the scanned record stays immutable evidence. Keyed by
+    /// the record's first key, like the record itself.
+    pub fn relay_override(&self, record: Option<&ContactRecord>) -> Option<Vec<RelayEntry>> {
+        let key = record?.keys.first()?;
+        let content =
+            std::fs::read_to_string(self.contact_stem(key).with_extension("relays")).ok()?;
+        let relays: Vec<RelayEntry> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(RelayEntry::from_spec)
+            .collect();
+        (!relays.is_empty()).then_some(relays)
+    }
+
+    pub fn save_relay_override(&self, key: &PublicKey, relays: &[RelayEntry]) -> Result<(), Error> {
+        let specs: Vec<String> = relays.iter().map(RelayEntry::to_spec).collect();
+        std::fs::write(
+            self.contact_stem(key).with_extension("relays"),
+            specs.join("\n"),
+        )
+        .map_err(|e| Error::Storage(format!("write relay override: {e}")))
+    }
+
+    pub fn clear_relay_override(&self, key: &PublicKey) {
+        let _ = std::fs::remove_file(self.contact_stem(key).with_extension("relays"));
     }
 
     /// All stored contacts as `(petname, record)`, petname-sorted.
