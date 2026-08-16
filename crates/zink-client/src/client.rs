@@ -90,6 +90,9 @@ pub struct Client<
     rng: R,
     /// The auto-query rate limit; the rationale lives on `who_is::AskedOnce`.
     asked: who_is::AskedOnce,
+    /// The R6 subject-refresh rate limit; rationale on
+    /// `who_is::RefreshLedger`.
+    refreshed: who_is::RefreshLedger,
     /// The client is also a server: this task pulls inbound sync requests
     /// (peer history sync, D0; direct delivery, D5) off the transport for as
     /// long as the client lives. Aborted on drop.
@@ -233,6 +236,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             state,
             config,
             asked: who_is::AskedOnce::default(),
+            refreshed: who_is::RefreshLedger::default(),
             _serve_task: serve_task,
             direct_sink,
             reach,

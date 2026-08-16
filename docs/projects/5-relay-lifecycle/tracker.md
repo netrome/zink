@@ -1,6 +1,6 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 🟡 in progress (started 2026-08-15) — R1–R5 ✅, Tier 3 remains.** Project **5-relay-lifecycle**,
+> **Status: 🟡 in progress (started 2026-08-15) — R1–R6 ✅, R7 remains.** Project **5-relay-lifecycle**,
 > picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
 > permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
 > (server reinstall, 2026-08-15) hit three compounding walls — see §1.
@@ -285,15 +285,31 @@ recorded per §5.
 
 **Tier 3 — self-healing + close**
 
-- [ ] **R6 · Subject-refresh over live channels.** Whenever an authenticated
-  connection to a contact exists — inbound serve, successful outbound dial,
-  direct-delivery ack — run `who_is(them)` *against them*, rate-limited
-  (order-of-daily per contact; eager when their deposits are currently
-  failing — exact policy decided in-slice). Answers land as subject-served
-  learned records, which already win read-time resolution — so with R2,
-  sends heal with **no user action on either side**. Write
-  `relay-lifecycle.md` here (§5). *Done when:* the §1 scenario heals with no
-  rescan: two contacts who merely keep chatting converge on the new relay.
+- [x] **R6 · Subject-refresh over live channels.** ✅ 2026-08-16. Two
+  triggers: `auto_refresh` joined the arrival hook chain (all four
+  drain/direct sites in `recv.rs`) — each *contact* sender is asked
+  `WhoIs(them)` over a **bare dial-by-key first** (no route hints: it
+  succeeds exactly when the transport still holds the path they arrived
+  on; the stored route is the fallback), capped like every who-is dial —
+  and `deliver_direct` asks the recipient **on the very connection that
+  just acked** (`refresh_on`, the shared one-connection core). Policy
+  resolved (§7): `RefreshLedger` (in-memory, `AskedOnce`'s pattern +
+  poisoning stance; timestamps in as data) — once per subject per day
+  while healthy, **floored at 5 minutes while the outbox owes that
+  subject's relays**; a heal while sick flushes at once and R2 retargets
+  in the same pass. Inbound-serve as a trigger shipped as the bare-dial
+  arrival path (the port surface has no serve-side request verb; the
+  warm path makes the dial-back equivalent). Answers validate like every
+  who-is answer and land learned-store-only, subject-served class.
+  Four new tests: the heal-over-live-channel money test (stale record →
+  one arrival → resolution follows the fresh profile, stored record
+  untouched), the ledger unit-tested with fabricated stamps (daily gate,
+  sick floor, restamp), once-per-run + stranger-never-asked (the privacy
+  gate), and the ack-rides-back outbound trigger. Graduated:
+  **relay-lifecycle.md §6** written; **who-is-this.md §5** gained the
+  second carve-out (+ §2 decision row). **Proof:** 259/259, clippy
+  clean, `wasm32` compiles (client-only slice). *Done-when met:* the §1
+  scenario heals with no rescan — merely keep chatting.
 - [ ] **R7 · The migration drill + graduate.** One in-process scenario test
   on the loopback/doubles kit replaying 2026-08-15 end to end: two contacts
   chatting → one side's relay replaced *and* profile renamed → prove each
@@ -312,7 +328,7 @@ recorded per §5.
 | Outbox keying | Resolved at R2: **keep `(message, relay)`, reconcile at flush.** The file format never changed, so pre-R2 ledgers migrate by being flushed once; per-recipient state lives nowhere because it's derivable (sealed recipients + acks + current records). Re-keying by recipient was rejected as a stored duplicate of what reconciliation computes. |
 | Stuck threshold & wording | Resolved at R3: the client exposes the *fact* (`owed_since_ms`); thresholds are **edge policy** — stuck at 10 min (a relay restart never alarms), undelivered at the public `OUTBOX_GIVE_UP_MS`. Wording is our-deposit-only ("can't reach *their relay*", never "not delivered"); confirmation stays positive-only. |
 | Relay QR payload | Resolved at R4: `ZINK-RELAY:` + the existing spec string, no new encoding — the spec format is already the versioned artifact. Prefix-stripping lives in `RelayEntry::from_spec`, so every spec-accepting surface takes the scanned form for free. QR per bound socket (each — the operator picks). |
-| Subject-refresh policy | **Open — decide in R6.** Triggers (which connection events), rate limit, and the failure-eager mode. Fixed now: subject-only, existing-connection-only, learned-store-only. |
+| Subject-refresh policy | Resolved at R6: triggers = arrival hooks (drains + direct deliveries) and the post-`Stored`-ack connection; route = bare dial-by-key first (the live-path premise), stored route fallback; rate = daily per subject, 5-minute floor while their deposits are owed (`RefreshLedger`, in-memory — a restart re-asks, which is cheap and self-correcting); a heal while sick flushes immediately. Subject-only, existing-channel-only, learned-store-only — as fixed upfront. |
 | Revision hint on messages | **Parked** (§8) — a wire change through SPEC §11, proposed only after R6 shows the residual gap (receivers who never get a live channel to the migrated peer). |
 
 ## 8. Follow-ups / parked

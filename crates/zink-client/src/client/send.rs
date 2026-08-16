@@ -527,6 +527,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                 // merely received.
                 Ok(SyncResult::Stored) => {
                     self.reach.note_delivered(&key, now);
+                    // R6 outbound trigger: this channel is live and
+                    // authenticated — refresh their self-record while it's
+                    // here (rate-limited, order-of-daily), so *our* view of
+                    // their relays stays current without a rescan.
+                    if self.refreshed.due(&key, now, false) {
+                        let _ = self.refresh_on(&connection, key).await;
+                    }
                     Some(key)
                 }
                 Ok(SyncResult::NotHeld) => {

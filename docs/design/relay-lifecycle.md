@@ -105,8 +105,37 @@ class named and the outbox's per-relay debt beside them — the panel where
 "why aren't my messages arriving" gets an answer and every answer has an
 action.
 
-## 6. Keeping records current (R6, unwritten)
+## 6. Keeping records current: the subject-refresh (R6)
 
-Reconciliation is only as good as the records it reads. The healing loop —
-opportunistic `who_is` against a contact over any already-authenticated
-connection — lands at R6 and will be documented here.
+Reconciliation (§2) is only as good as the records it reads. R6 closes the
+loop: **whenever a channel to a contact is already live, ask them about
+themself.**
+
+- **Triggers.** Message arrival (drains and direct deliveries — the
+  `auto_*` hook chain) refreshes each *contact* sender; a successful
+  direct-delivery `Stored` ack refreshes the recipient over the very same
+  connection. Both are channels that exist anyway — the refresh adds one
+  request, never a session.
+- **Route.** Bare dial-by-key first — no route hints, so it succeeds
+  exactly when the transport still holds the path they arrived on (the
+  live-channel premise) — then the stored route as fallback. Capped like
+  every who-is dial; failures are silent (best-effort, like every heal).
+- **Rate limit** (`RefreshLedger` — in-memory like `AskedOnce`, a restart
+  re-asks): once per subject per day while healthy, floored at minutes
+  while the outbox owes that subject's relays — the sick case retries
+  eagerly because it is the whole point. A heal while sick flushes the
+  outbox at once, and §2's reconciliation retargets the debt in the same
+  pass.
+- **Privacy: zero new surface.** The only party ever asked is the subject,
+  about themself, on an authenticated channel they are using. Nothing is
+  revealed to any third party — who-is-this.md §5's no-third-party stance
+  stands untouched; this is its second scoped carve-out (the first was
+  D2b's conversation-scoped query).
+- **Stores.** Answers land in the *learned* store as the subject-served
+  class (§7 of who-is-this.md; below only the §5 manual override); the
+  contact store is never written by network input, same as everywhere.
+
+Together, the migration story heals end to end with no user action: A
+reinstalls her relay; B's next arrival from A — she merely keeps chatting
+— re-learns her record over the live path, the outbox retargets (§2), and
+the stuck marker clears (R3). Neither side touched a QR.

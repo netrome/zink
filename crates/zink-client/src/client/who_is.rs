@@ -4,7 +4,7 @@
 //! `AskedOnce` to one broadcast of interest per (subject, conversation)
 //! per run.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use crate::hex;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::Draw;
-use crate::ports::transport::Transport;
+use crate::ports::transport::{Request, Transport};
 
 use super::{Client, Received};
 
@@ -50,6 +50,45 @@ impl AskedOnce {
     /// guards no invariant, and a lost note costs one duplicate broadcast.
     fn set(&self) -> MutexGuard<'_, BTreeSet<([u8; 32], [u8; 32])>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One subject-refresh ask per subject per this while healthy —
+/// "order-of-daily" (R6, relay-lifecycle.md §6).
+const REFRESH_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The eager floor while the outbox owes the subject's relays: every
+/// arrival may retry the ask, but never more often than this.
+const REFRESH_SICK_FLOOR_MS: u64 = 5 * 60 * 1000;
+
+/// The subject-refresh rate limit (R6): a test-and-note ledger, in-memory
+/// on purpose like [`AskedOnce`] — a restart re-asks, which costs one
+/// round trip on a channel that exists anyway and self-corrects. Timestamps
+/// come in as data (`now`), the transport-port rule applied to state.
+#[derive(Default)]
+pub(super) struct RefreshLedger(Mutex<BTreeMap<[u8; 32], u64>>);
+
+impl RefreshLedger {
+    /// Atomic test-and-note: `true` = this caller asks now and the clock
+    /// restarts; `false` = asked recently enough. `sick` (deposits to this
+    /// subject currently owed) swaps the daily interval for the eager
+    /// floor — the stale-relay case is the whole point.
+    pub(super) fn due(&self, subject: &PublicKey, now: u64, sick: bool) -> bool {
+        let interval = if sick {
+            REFRESH_SICK_FLOOR_MS
+        } else {
+            REFRESH_INTERVAL_MS
+        };
+        // Same poisoning stance as `AskedOnce`: no invariant guarded, a
+        // lost note costs one duplicate ask.
+        let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match last.get(&subject.0) {
+            Some(&at) if now.saturating_sub(at) < interval => false,
+            _ => {
+                last.insert(subject.0, now);
+                true
+            }
+        }
     }
 }
 
@@ -333,6 +372,112 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             }
         }
     }
+
+    /// Opportunistic subject-refresh (R6, relay-lifecycle.md §6): after an
+    /// arrival, ask each *contact* sender about themself over the channel
+    /// that just proved live — a bare dial-by-key first (no route hints:
+    /// it succeeds exactly when the transport still holds the path they
+    /// arrived on), the stored route as fallback. Answers land as
+    /// subject-served learned records, the class that wins relay
+    /// resolution (who-is-this.md §7) — so a moved relay heals while two
+    /// people merely keep chatting, and a heal while deposits are owed
+    /// flushes the outbox at once (R2 retargets it). Privacy-clean by
+    /// construction: the only party ever asked is the subject, about
+    /// themself — the §5 no-third-party stance stands untouched.
+    pub(super) async fn auto_refresh(&self, received: &[Received]) {
+        let Ok(contacts) = self.state.contacts() else {
+            return;
+        };
+        let own = self.own_keys();
+        let senders: BTreeSet<PublicKey> = received
+            .iter()
+            .map(|message| message.envelope.core.sender)
+            .filter(|sender| !own.contains(sender))
+            .collect();
+        let owed: BTreeSet<String> = self
+            .state
+            .outbox()
+            .into_iter()
+            .map(|entry| entry.relay)
+            .collect();
+        for subject in senders {
+            // Contacts only: a dial costs; strangers resolve via the D2b
+            // scoped auto-query and the manual flows instead.
+            let Some((_, record)) = contacts
+                .iter()
+                .find(|(_, record)| record.keys.contains(&subject))
+            else {
+                continue;
+            };
+            let relays = self.effective_relays(subject, Some(record));
+            let sick = relays.iter().any(|entry| owed.contains(&entry.mailbox));
+            let now = self.wall_clock.now_ms();
+            if !self.refreshed.due(&subject, now, sick) {
+                continue;
+            }
+            let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
+            let mut routes = Vec::new();
+            if let Ok(bare) = crate::adapters::iroh::validated_peer(subject, Vec::new()) {
+                routes.push(bare);
+            }
+            if let Ok(routed) = self.peer_addr_for(subject, Some(record)) {
+                routes.push(routed);
+            }
+            let mut healed = false;
+            for addr in routes {
+                match net::connect_peer(&self.transport, &addr, SYNC_ALPN, timeout, &self.clock)
+                    .await
+                {
+                    Ok(connection) => {
+                        healed = self.refresh_on(&connection, subject).await;
+                        // Reached them — their answer (or decline) is final.
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "refresh: route failed; trying the next")
+                    }
+                }
+            }
+            if healed && sick {
+                // Fresh relays with messages owed: retarget right now (R2)
+                // instead of waiting for the next drain's flush.
+                let _ = self.flush_outbox().await;
+            }
+        }
+    }
+
+    /// The one-connection core both R6 triggers share (the arrival hook
+    /// above; the send path after a `Stored` ack): `WhoIs(subject)` asked
+    /// *of the subject*, validated like every who-is answer, stored as the
+    /// subject-served class. `true` = a fresh record landed.
+    pub(super) async fn refresh_on(&self, connection: &impl Request, subject: PublicKey) -> bool {
+        match net::sync_request(connection, SyncOp::WhoIs { key: subject }).await {
+            Ok(SyncResult::Known {
+                record: served,
+                endorsements,
+            }) => {
+                if !served.keys.contains(&subject) {
+                    tracing::warn!("refresh: answer does not name the subject; dropped");
+                    return false;
+                }
+                let endorsements = valid_endorsements(subject, subject, endorsements);
+                self.state
+                    .save_learned(
+                        &subject,
+                        &subject,
+                        &served,
+                        &endorsements,
+                        self.wall_clock.now_ms(),
+                    )
+                    .is_ok()
+            }
+            Ok(_) => false,
+            Err(error) => {
+                tracing::debug!(%error, "refresh: request failed");
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,11 +489,184 @@ mod tests {
         befriend, deposited_envelopes, deposited_frame, dir_bytes, loop_client, mailbox_only,
         mailbox_spec, message, routed_record, script_drain, signed_record, temp_key, temp_root,
     };
-    use crate::client::{ClientConfig, ResolvedName};
+    use crate::client::{ClientConfig, RelaySource, ResolvedName};
     use crate::keystore;
     use crate::ports::clock::TestClock;
     use crate::ports::transport::{Loopback, TestTransport};
     use zink_protocol::{Attestation, Claim, DeviceKey, RelayEntry, SyncResponse, Versioned};
+
+    #[test]
+    fn refresh_ledger__should_gate_daily_and_floor_when_sick() {
+        // Given
+        let ledger = RefreshLedger::default();
+        let subject = DeviceKey::from_seed([1; 32]).public();
+
+        // When / Then: the first ask is always due; healthy re-asks wait
+        // out the daily interval, and a granted ask restarts the clock
+        assert!(ledger.due(&subject, 1_000, false));
+        assert!(!ledger.due(&subject, 1_000 + REFRESH_INTERVAL_MS - 1, false));
+        assert!(ledger.due(&subject, 1_000 + REFRESH_INTERVAL_MS, false));
+
+        // And: sickness swaps in the eager floor — sooner than a day, but
+        // still a floor, so arrivals can't turn into an ask storm
+        let stamped = 1_000 + REFRESH_INTERVAL_MS;
+        assert!(!ledger.due(&subject, stamped + REFRESH_SICK_FLOOR_MS - 1, true));
+        assert!(ledger.due(&subject, stamped + REFRESH_SICK_FLOOR_MS, true));
+    }
+
+    #[tokio::test]
+    async fn auto_refresh__should_heal_a_stale_record_over_a_live_channel() {
+        // Given: bob holds anna under a stale record (dead relay); anna's
+        // actual profile names a fresh one, and she serves bob (mutual).
+        // A message from her arrives — the live channel.
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("refresh-heal", "anna", &wire);
+        let (b, _b_net, _b_clock) = loop_client("refresh-heal", "bob", &wire);
+        a.state
+            .save_profile(
+                "anna",
+                &[RelayEntry {
+                    mailbox: "fresh@203.0.113.9:9".to_string(),
+                    relay_url: Some("http://203.0.113.9:10".to_string()),
+                }],
+            )
+            .expect("profile");
+        befriend(&a.state, b.public_key());
+        b.add_contact(
+            &ContactRecord::new(
+                vec![a.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "stale@203.0.113.1:1".to_string(),
+                    relay_url: Some("http://203.0.113.1:1".to_string()),
+                }],
+            ),
+            Some("anna".to_string()),
+        )
+        .expect("add anna");
+        let received = [Received {
+            envelope: message(&a.device, vec![b.public_key()], None, vec![], 0, 0),
+            relay: None,
+            body: Ok(vec![]),
+        }];
+
+        // When: the arrival hooks run, nothing else
+        b.after_direct(&received).await;
+
+        // Then: relay resolution follows anna's fresh profile — healed by
+        // merely receiving from her, no rescan anywhere; her stored record
+        // is untouched (the learned store took the answer)
+        let contact = b.resolve_contact("anna").expect("resolve");
+        assert_eq!(contact.relays, vec!["fresh@203.0.113.9:9".to_string()]);
+        assert!(matches!(
+            b.relay_status("anna").expect("status").source,
+            RelaySource::SubjectServed { .. }
+        ));
+
+        let _ = std::fs::remove_dir_all(temp_root("refresh-heal"));
+    }
+
+    #[tokio::test]
+    async fn auto_refresh__should_ask_once_and_only_contacts() {
+        // Given: the heal setup, plus a stranger among the senders
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("refresh-gate", "anna", &wire);
+        let (b, b_net, _b_clock) = loop_client("refresh-gate", "bob", &wire);
+        a.state
+            .save_profile(
+                "anna",
+                &[RelayEntry {
+                    mailbox: "fresh@203.0.113.9:9".to_string(),
+                    relay_url: Some("http://203.0.113.9:10".to_string()),
+                }],
+            )
+            .expect("profile");
+        befriend(&a.state, b.public_key());
+        b.add_contact(
+            &ContactRecord::new(
+                vec![a.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "stale@203.0.113.1:1".to_string(),
+                    relay_url: Some("http://203.0.113.1:1".to_string()),
+                }],
+            ),
+            Some("anna".to_string()),
+        )
+        .expect("add anna");
+        let stranger = DeviceKey::from_seed([77; 32]);
+        let received = [
+            Received {
+                envelope: message(&a.device, vec![b.public_key()], None, vec![], 0, 0),
+                relay: None,
+                body: Ok(vec![]),
+            },
+            Received {
+                envelope: message(&stranger, vec![b.public_key()], None, vec![], 0, 0),
+                relay: None,
+                body: Ok(vec![]),
+            },
+        ];
+
+        // When: the same arrivals hook twice in one run
+        b.auto_refresh(&received).await;
+        b.auto_refresh(&received).await;
+
+        // Then: one ask for the contact, none ever for the stranger — the
+        // privacy line (§5) holds even for the subject-only query
+        assert_eq!(b_net.dial.dialed(&a.public_key()), 1);
+        assert_eq!(b_net.dial.dialed(&stranger.public()), 0);
+
+        let _ = std::fs::remove_dir_all(temp_root("refresh-gate"));
+    }
+
+    #[tokio::test]
+    async fn deliver_direct__should_refresh_the_recipients_record_on_ack() {
+        // Given: anna sends to bob direct (mutual contacts, bob's real
+        // handler stores and acks); bob's profile is fresh
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("refresh-send", "anna", &wire);
+        let (b, _b_net, _b_clock) = loop_client("refresh-send", "bob", &wire);
+        befriend(&b.state, a.public_key());
+        b.state
+            .save_profile(
+                "bob",
+                &[RelayEntry {
+                    mailbox: "bb@203.0.113.2:2".to_string(),
+                    relay_url: Some("http://203.0.113.2:2".to_string()),
+                }],
+            )
+            .expect("profile");
+        let relay = DeviceKey::from_seed([78; 32]).public();
+        a.add_contact(
+            &routed_record(b.public_key(), &relay),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+
+        // When
+        let receipt = a
+            .send(
+                &[a.resolve_contact("bob").expect("resolve")],
+                b"hey".to_vec(),
+                vec![],
+            )
+            .await
+            .expect("send");
+
+        // Then: the ack rode back with bob's self-served record — anna's
+        // view of his relays stays current without a rescan
+        assert_eq!(receipt.direct_recipients, 1);
+        let learned = a.state.learned(&b.public_key());
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].responder, b.public_key());
+        assert_eq!(
+            learned[0].record.relays[0].mailbox,
+            "bb@203.0.113.2:2".to_string()
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("refresh-send"));
+    }
 
     #[tokio::test]
     async fn auto_query__should_learn_an_added_members_record_during_recv() {
