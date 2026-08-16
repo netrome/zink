@@ -58,8 +58,33 @@ fn App() -> impl IntoView {
     let conversations = RwSignal::new(Inbox::default());
     let messages = RwSignal::new(Vec::<Message>::new());
     let status = RwSignal::new((String::new(), ""));
+    // Screen state that must survive a tab bounce (S4, U8): views remount
+    // on every switch, so anything half-typed lives up here, in
+    // App-lifetime signals the views receive.
+    let me_form = me::MeForm::default();
+    let new_chat_picker = chats::NewChatPicker::default();
+    let add_contact_form = people::AddContactForm::default();
+    // Half-typed replies, keyed by conversation.
+    let chat_drafts = RwSignal::new(std::collections::HashMap::<String, String>::new());
 
-    let flash = move |text: String, class: &'static str| status.set((text, class));
+    // A stale ok-flash reads as fresh reassurance — fade it. Errors stay
+    // until replaced or tapped away (tenet 7: problems don't self-dismiss).
+    let flash_generation = StoredValue::new(0u64);
+    let flash = move |text: String, class: &'static str| {
+        let this = flash_generation.get_value() + 1;
+        flash_generation.set_value(this);
+        status.set((text, class));
+        if class == "ok" {
+            set_timeout(
+                move || {
+                    if flash_generation.get_value() == this {
+                        status.set((String::new(), ""));
+                    }
+                },
+                std::time::Duration::from_secs(4),
+            );
+        }
+    };
     let ok = move |text: &str| flash(text.to_string(), "ok");
     let err = move |text: String| flash(format!("❌ {text}"), "err");
 
@@ -128,6 +153,8 @@ fn App() -> impl IntoView {
     });
 
     let open_chat = move |id: String, label: String| {
+        // Don't flash the previous chat's rows under the new header (S4).
+        messages.set(Vec::new());
         load_messages(id.clone());
         view.set(View::Chat { id, label });
     };
@@ -157,6 +184,7 @@ fn App() -> impl IntoView {
                 <div
                     id="status"
                     class=move || status.get().1
+                    on:click=move |_| status.set((String::new(), ""))
                 >
                     {move || status.get().0}
                 </div>
@@ -165,6 +193,7 @@ fn App() -> impl IntoView {
                 <ChatsView
                     conversations=conversations
                     state=state
+                    picker=new_chat_picker
                     open_chat=open_chat
                     start_draft=start_draft
                 />
@@ -186,6 +215,7 @@ fn App() -> impl IntoView {
                     label=label
                     messages=messages
                     state=state
+                    drafts=chat_drafts
                     reload_messages=load_messages
                     open_person=open_person
                     back=move || {
@@ -201,6 +231,7 @@ fn App() -> impl IntoView {
                 <PeopleView
                     state=state
                     reload=load_state
+                    form=add_contact_form
                     open_person=open_person
                     ok=ok
                     err=err
@@ -220,7 +251,7 @@ fn App() -> impl IntoView {
             }
             .into_any(),
             View::Me => view! {
-                <MeView state=state reload=load_state ok=ok err=err />
+                <MeView state=state reload=load_state form=me_form ok=ok err=err />
             }
             .into_any(),
         }}
@@ -258,6 +289,15 @@ fn App() -> impl IntoView {
             }
                 .into_any()
         }}
+    }
+}
+
+/// Forward a scan failure unless it's the user's own cancel — the plugin
+/// rejects with exactly "cancelled" (Android and iOS alike), and a cancel
+/// deserves no red banner (S4).
+fn scan_failed(err: impl Fn(String), e: String) {
+    if !e.contains("cancelled") {
+        err(e);
     }
 }
 

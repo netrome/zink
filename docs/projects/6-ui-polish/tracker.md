@@ -1,6 +1,6 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 🔨 in progress — S1–S3 landed (2026-08-16).** Project **6-ui-polish**,
+> **Status: 🔨 in progress — S1–S4 landed (2026-08-16).** Project **6-ui-polish**,
 > branch `better-selections`. Trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
@@ -260,7 +260,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   gated on the `pointer: coarse` media query (one new web-sys feature,
   `MediaQueryList`). UI-only. Suite 240, clippy clean, `app/ui/build.sh`
   clean.
-- [ ] **S4 · The paper-cut batch.** Independently small, one slice because
+- [x] **S4 · The paper-cut batch.** Independently small, one slice because
   each is a few lines: armed danger buttons disarm (timeout ~4 s or any
   other interaction); scan-cancel is silent (distinguish cancel from error
   at the two scan sites); status flashes auto-clear (ok after ~4 s; errors
@@ -268,6 +268,20 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   buttons while the invoke runs; `open_chat` clears the stale message list
   before switching; in-progress edits survive a tab bounce (U8 — smallest
   fix per §4). *Done when:* U6–U9 are dead.
+  *Landed 2026-08-16:* disarm via 4 s `set_timeout` (me's is key-compared,
+  so arming device B doesn't shorten B's window when A's expires);
+  scan-cancel matched against the plugin's literal `"cancelled"` rejection
+  (verified in its Android + iOS sources) in one `scan_failed` helper; ok
+  flashes fade after 4 s behind a generation counter, errors stay until
+  replaced or tapped (the status line is now tap-to-dismiss); in-flight
+  guards + disabled buttons on chat send, draft/genesis send, and the
+  members-panel add; `open_chat` clears `messages` first (U9 dead); U8 by
+  state-lifting per §4's lean — `MeForm` (with a `dirty` flag so prefill
+  never clobbers typing, fixing the background-reload wipe too),
+  `NewChatPicker`, `AddContactForm`, and a per-conversation drafts map
+  feeding the chat composer, all App-lifetime. Person-view's rename field
+  deliberately not lifted (a short retype; revisit only if it bites).
+  UI-only. Suite 240, clippy clean, `app/ui/build.sh` clean.
 
 **Tier 3 — the lists + close**
 
@@ -311,7 +325,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
 | Advanced-affordance home | The S2 members panel. Constraint: one tap away, never buried two levels — crossed-cues and introduce-devices are legitimate features, just not always-on. |
 | Snippet in rows | Client-side policy over the local plaintext store; fine by the invariants (nothing new through relays/pushes). Truncation/emptiness shape decided in S5. |
 | Read-marker storage | **Open — decide in S7.** App-layer store vs `zink-client` state. Constraints fixed now: local-only, never transmitted, never a protocol concept; if it lands in `zink-client`, wasm32 must stay clean and an ADR is considered at close (§5). |
-| Edit-survival fix (U8) | **Open — decide in S4.** Lift sub-state to parent signals vs keep views mounted and toggle visibility. Constraint: smallest change that preserves edits; no router rewrite (§4). |
+| Edit-survival fix (U8) | **Decided (2026-08-16): lift, don't keep-mounted.** Each screen's in-progress edits live in a small per-module struct of App-lifetime signals (`MeForm`, `NewChatPicker`, `AddContactForm`, the chat-drafts map), destructured inside the view so the code body barely changes. Keep-mounted was rejected: Chat/Person/Draft are per-instance (id/petname/picks), so they can't pre-mount, and half the benefit would be lost anyway. `MeForm.dirty` doubles as the fix for the prefill-clobbers-typing bug — one mechanism, both wipes. (S4) |
 
 ## 8. Follow-ups / parked
 

@@ -40,12 +40,19 @@ pub(crate) fn DraftChatView(
         }
     });
 
+    // In flight → the button disables and re-taps drop (S4): a double-tap
+    // on the genesis send must not start two conversations.
+    let sending = RwSignal::new(false);
     let send = move || {
+        if sending.get_untracked() {
+            return;
+        }
         let body = draft.get_untracked();
         let image = attachment.get_untracked().map(|(image, _)| image);
         if body.trim().is_empty() && image.is_none() {
             return;
         }
+        sending.set(true);
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
@@ -60,7 +67,9 @@ pub(crate) fn DraftChatView(
                 text: &body,
                 image,
             };
-            match invoke::invoke::<String>("send_message", &args).await {
+            let result = invoke::invoke::<String>("send_message", &args).await;
+            sending.set(false);
+            match result {
                 Ok(conversation) => {
                     // Stored, not yet delivered — the message's own
                     // "sending…" marker is the truth from here.
@@ -125,7 +134,13 @@ pub(crate) fn DraftChatView(
                 </div>
             </div>
             <div class="compose">
-                <Composer draft=draft attachment=attachment send=send err=err />
+                <Composer
+                    draft=draft
+                    attachment=attachment
+                    send=send
+                    sending=sending
+                    err=err
+                />
             </div>
         </main>
     }

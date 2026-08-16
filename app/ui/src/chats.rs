@@ -5,6 +5,23 @@ use zink_app_dto::{AppState, Conversation, Inbox};
 
 use crate::picker::PeoplePicker;
 
+/// The new-chat picker's in-progress selection (S4, U8): App-lifetime
+/// signals, so a tab bounce (which remounts the view) can't destroy picks.
+#[derive(Clone, Copy)]
+pub(crate) struct NewChatPicker {
+    pub picking: RwSignal<bool>,
+    pub selected: RwSignal<BTreeSet<String>>,
+}
+
+impl Default for NewChatPicker {
+    fn default() -> Self {
+        Self {
+            picking: RwSignal::new(false),
+            selected: RwSignal::new(BTreeSet::new()),
+        }
+    }
+}
+
 /// Conversation list. Starting a new chat is a deliberate "+" action: pick
 /// people in the shared picker, then land in a draft chat whose first send
 /// is the genesis (project 6 §7 — a new chat is always a new conversation).
@@ -14,12 +31,13 @@ use crate::picker::PeoplePicker;
 pub(crate) fn ChatsView(
     conversations: RwSignal<Inbox>,
     state: RwSignal<Option<AppState>>,
+    picker: NewChatPicker,
     open_chat: impl Fn(String, String) + Copy + Send + 'static,
     start_draft: impl Fn(Vec<String>) + Copy + Send + 'static,
 ) -> impl IntoView {
-    let selected = RwSignal::new(BTreeSet::<String>::new());
-    // Whether the "new chat" picker is open (vs the plain list).
-    let picking = RwSignal::new(false);
+    // Whether the "new chat" picker is open (vs the plain list), plus the
+    // picks — App-owned, surviving a tab bounce.
+    let NewChatPicker { picking, selected } = picker;
     let contacts =
         Signal::derive(move || state.get().map(|state| state.contacts).unwrap_or_default());
 

@@ -512,6 +512,14 @@ pub(crate) fn PersonView(
                                                     repudiate();
                                                 } else {
                                                     armed.set(true);
+                                                    // Armed-forever is a
+                                                    // footgun (S4): an
+                                                    // untouched confirm
+                                                    // disarms itself.
+                                                    set_timeout(
+                                                        move || armed.set(false),
+                                                        std::time::Duration::from_secs(4),
+                                                    );
                                                 }
                                             }
                                         >

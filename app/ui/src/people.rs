@@ -17,6 +17,25 @@ struct PendingUpdate {
     changes: Vec<String>,
 }
 
+/// The add-contact form's in-progress edits (S4, U8): App-lifetime signals,
+/// so a tab bounce (which remounts the view) can't destroy typing.
+#[derive(Clone, Copy)]
+pub(crate) struct AddContactForm {
+    pub adding: RwSignal<bool>,
+    pub paste: RwSignal<String>,
+    pub new_name: RwSignal<String>,
+}
+
+impl Default for AddContactForm {
+    fn default() -> Self {
+        Self {
+            adding: RwSignal::new(false),
+            paste: RwSignal::new(String::new()),
+            new_name: RwSignal::new(String::new()),
+        }
+    }
+}
+
 /// "People" — your contacts. The list is a plain, tappable list (a row opens
 /// the person-detail lens, U4); adding a contact (scan / paste) hides behind a
 /// "+" so the list stays clean, and the per-contact trust actions moved onto
@@ -26,16 +45,19 @@ struct PendingUpdate {
 pub(crate) fn PeopleView(
     state: RwSignal<Option<AppState>>,
     reload: impl Fn() + Copy + Send + 'static,
+    form: AddContactForm,
     open_person: impl Fn(String) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
-    let paste = RwSignal::new(String::new());
-    // Whether the add-contact form is open (vs the plain list).
-    let adding = RwSignal::new(false);
-    // Optional petname to set at add time (my lens); empty → their
-    // self-claimed name. Applies to both the scan and paste paths.
-    let new_name = RwSignal::new(String::new());
+    // `adding` is whether the form is open (vs the plain list); `new_name`
+    // is the optional petname to set at add time (my lens; empty → their
+    // self-claimed name), for both the scan and paste paths.
+    let AddContactForm {
+        adding,
+        paste,
+        new_name,
+    } = form;
 
     // A scanned record matching an existing contact, awaiting the confirm
     // card (R1) — Some switches the composer to the card.
@@ -181,8 +203,7 @@ pub(crate) fn PeopleView(
             scanning.set(false);
             match result {
                 Ok(scanned) => submit(scanned.content),
-                // A cancelled scan also lands here — worth no red banner.
-                Err(e) => err(e),
+                Err(e) => crate::scan_failed(err, e),
             }
         });
     };

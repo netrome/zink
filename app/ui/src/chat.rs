@@ -35,13 +35,28 @@ pub(crate) fn ChatView(
     label: String,
     messages: RwSignal<Vec<Message>>,
     state: RwSignal<Option<AppState>>,
+    drafts: RwSignal<HashMap<String, String>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
     open_person: impl Fn(String) + Copy + Send + 'static,
     back: impl Fn() + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
-    let draft = RwSignal::new(String::new());
+    let conversation = StoredValue::new(id);
+    // The half-typed reply survives leaving the chat (S4, U8): the text
+    // lives in the App-owned drafts map, keyed by conversation.
+    let draft = RwSignal::new(drafts.with_untracked(|drafts| {
+        drafts
+            .get(&conversation.get_value())
+            .cloned()
+            .unwrap_or_default()
+    }));
+    Effect::new(move |_| {
+        let text = draft.get();
+        drafts.update(|drafts| {
+            drafts.insert(conversation.get_value(), text);
+        });
+    });
     let attachment = RwSignal::new(None::<(OutgoingImage, String)>);
     // hash → data URL; present-but-empty marks an in-flight fetch.
     let thumbs = RwSignal::new(HashMap::<String, String>::new());
@@ -51,7 +66,6 @@ pub(crate) fn ChatView(
     // (crossed / merged, tenet 7) are advanced honesty data — hidden by
     // default, revealed on demand.
     let show_concurrency = RwSignal::new(false);
-    let conversation = StoredValue::new(id);
     // The stuck cue's tap target (R3): a 1:1 chat is labelled by the
     // contact's petname, so that's the page with the repair actions. A
     // group label matches no contact and the cue stays plain text.
@@ -281,11 +295,16 @@ pub(crate) fn ChatView(
     // Add people to this conversation (D2c): one message with the grown
     // recipient set is the whole mechanism — the signed recipients list
     // announces the membership change, however many joined at once.
+    let add_inflight = RwSignal::new(false);
     let add_members = move |_| {
+        if add_inflight.get_untracked() {
+            return;
+        }
         let names: Vec<String> = picks.get_untracked().into_iter().collect();
         if names.is_empty() {
             return;
         }
+        add_inflight.set(true);
         let id = conversation.get_value();
         spawn_local(async move {
             #[derive(Serialize)]
@@ -300,7 +319,9 @@ pub(crate) fn ChatView(
                 add: Some(names),
                 text: "",
             };
-            match invoke::invoke::<String>("send_message", &args).await {
+            let result = invoke::invoke::<String>("send_message", &args).await;
+            add_inflight.set(false);
+            match result {
                 Ok(_) => {
                     picks.update(|picks| picks.clear());
                     adding.set(false);
@@ -333,12 +354,19 @@ pub(crate) fn ChatView(
         });
     };
 
+    // In flight → the button disables and re-taps drop (S4): staging is
+    // fast but not instant, and a double-tap must not send twice.
+    let sending = RwSignal::new(false);
     let send = move || {
+        if sending.get_untracked() {
+            return;
+        }
         let body = draft.get_untracked();
         let image = attachment.get_untracked().map(|(image, _)| image);
         if body.trim().is_empty() && image.is_none() {
             return;
         }
+        sending.set(true);
         let id = conversation.get_value();
         spawn_local(async move {
             #[derive(Serialize)]
@@ -354,7 +382,9 @@ pub(crate) fn ChatView(
                 text: &body,
                 image,
             };
-            match invoke::invoke::<String>("send_message", &args).await {
+            let result = invoke::invoke::<String>("send_message", &args).await;
+            sending.set(false);
+            match result {
                 Ok(_) => {
                     draft.set(String::new());
                     attachment.set(None);
@@ -418,7 +448,10 @@ pub(crate) fn ChatView(
                                             />
                                             <div class="picks">
                                                 <button
-                                                    disabled=move || picks.with(|picks| picks.is_empty())
+                                                    disabled=move || {
+                                                        add_inflight.get()
+                                                            || picks.with(|picks| picks.is_empty())
+                                                    }
                                                     on:click=add_members
                                                 >
                                                     "add"
@@ -814,7 +847,13 @@ pub(crate) fn ChatView(
                 }}
             </div>
             <div class="compose">
-                <Composer draft=draft attachment=attachment send=send err=err />
+                <Composer
+                    draft=draft
+                    attachment=attachment
+                    send=send
+                    sending=sending
+                    err=err
+                />
             </div>
             {move || {
                 viewer
@@ -843,6 +882,9 @@ pub(crate) fn Composer(
     draft: RwSignal<String>,
     attachment: RwSignal<Option<(OutgoingImage, String)>>,
     send: impl Fn() + Copy + Send + 'static,
+    /// True while the caller's send is in flight — disables the button
+    /// (S4); the caller's own guard covers the Enter path.
+    sending: RwSignal<bool>,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     let attach = move |ev: leptos::ev::Event| {
@@ -895,7 +937,9 @@ pub(crate) fn Composer(
                 on:input=move |ev| draft.set(event_target_value(&ev))
                 on:keydown=keydown
             />
-            <button on:click=move |_| send()>"send"</button>
+            <button disabled=move || sending.get() on:click=move |_| send()>
+                "send"
+            </button>
         </div>
     }
 }

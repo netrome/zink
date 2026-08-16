@@ -5,6 +5,29 @@ use zink_app_dto::{AppState, QrPayload, RELAY_QR_PREFIX, RecordPreview};
 
 use crate::{NoArgs, avatar_data_url, image, invoke};
 
+/// The Me form's in-progress edits (S4, U8): App-lifetime signals, so a tab
+/// bounce (which remounts the view) can't destroy typing.
+#[derive(Clone, Copy)]
+pub(crate) struct MeForm {
+    pub name: RwSignal<String>,
+    pub relays: RwSignal<Vec<String>>,
+    pub new_relay: RwSignal<String>,
+    /// Set by any edit, cleared on save — blocks the prefill from
+    /// clobbering typing when a (background) reload lands.
+    pub dirty: RwSignal<bool>,
+}
+
+impl Default for MeForm {
+    fn default() -> Self {
+        Self {
+            name: RwSignal::new(String::new()),
+            relays: RwSignal::new(Vec::new()),
+            new_relay: RwSignal::new(String::new()),
+            dirty: RwSignal::new(false),
+        }
+    }
+}
+
 /// "Me" — your own identity: profile (name, home relay, avatar, QR), your
 /// recognized devices, and device pairing. The C2/D3e flows, unchanged — the
 /// U2 screen split just homes them here. Its scan always pairs (previews a
@@ -13,20 +36,28 @@ use crate::{NoArgs, avatar_data_url, image, invoke};
 pub(crate) fn MeView(
     state: RwSignal<Option<AppState>>,
     reload: impl Fn() + Copy + Send + 'static,
+    form: MeForm,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
-    let name = RwSignal::new(String::new());
     // The home-relay set (U5 multi-relay), edited locally and persisted on
     // save; `new_relay` is the add field.
-    let relays = RwSignal::new(Vec::<String>::new());
-    let new_relay = RwSignal::new(String::new());
+    let MeForm {
+        name,
+        relays,
+        new_relay,
+        dirty,
+    } = form;
     // Pairing paste buffer (a device record to recognize).
     let paste = RwSignal::new(String::new());
 
-    // Prefill the form from the loaded profile (once per state change).
+    // Prefill the form from the loaded profile — but never over typing
+    // (S4): `dirty` blocks the refill until a save re-syncs it.
     Effect::new(move |_| {
         if let Some(state) = state.get() {
+            if dirty.get_untracked() {
+                return;
+            }
             if let Some(profile_name) = state.name {
                 name.set(profile_name);
             }
@@ -56,9 +87,11 @@ pub(crate) fn MeView(
     let add_relay = move |_| {
         stage_relay(&new_relay.get_untracked());
         new_relay.set(String::new());
+        dirty.set(true);
     };
     let remove_relay = move |value: String| {
         relays.update(|list| list.retain(|relay| relay != &value));
+        dirty.set(true);
     };
 
     let save = move |_| {
@@ -75,6 +108,8 @@ pub(crate) fn MeView(
             };
             match invoke::invoke::<QrPayload>("set_profile", &args).await {
                 Ok(_) => {
+                    // Saved — the reload's prefill may take over again.
+                    dirty.set(false);
                     reload();
                     ok("profile saved — let a friend scan your code");
                 }
@@ -246,8 +281,7 @@ pub(crate) fn MeView(
                     ok("relay added to the list — save to apply");
                 }
                 Ok(scanned) => preview(scanned.content),
-                // A cancelled scan also lands here — worth no red banner.
-                Err(e) => err(e),
+                Err(e) => crate::scan_failed(err, e),
             }
         });
     };
@@ -277,7 +311,10 @@ pub(crate) fn MeView(
             <input
                 placeholder="how contacts see you"
                 prop:value=move || name.get()
-                on:input=move |ev| name.set(event_target_value(&ev))
+                on:input=move |ev| {
+                    name.set(event_target_value(&ev));
+                    dirty.set(true);
+                }
             />
             <h3>"your relays"</h3>
             <div class="dim">
@@ -389,6 +426,20 @@ pub(crate) fn MeView(
                                                 repudiate(arm_key.clone());
                                             } else {
                                                 armed.set(Some(arm_key.clone()));
+                                                // Armed-forever is a footgun
+                                                // (S4): an untouched confirm
+                                                // disarms itself.
+                                                let timeout_key = arm_key.clone();
+                                                set_timeout(
+                                                    move || {
+                                                        if armed.get_untracked().as_deref()
+                                                            == Some(timeout_key.as_str())
+                                                        {
+                                                            armed.set(None);
+                                                        }
+                                                    },
+                                                    std::time::Duration::from_secs(4),
+                                                );
                                             }
                                         }
                                     >
