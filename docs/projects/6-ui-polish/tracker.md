@@ -1,6 +1,6 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 🔨 in progress — S1–S4 landed (2026-08-16).** Project **6-ui-polish**,
+> **Status: 🔨 in progress — S1–S5 landed (2026-08-17).** Project **6-ui-polish**,
 > branch `better-selections`. Trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
@@ -285,12 +285,31 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
 
 **Tier 3 — the lists + close**
 
-- [ ] **S5 · Rows that inform.** Chats rows: relative last-message time
+- [x] **S5 · Rows that inform.** Chats rows: relative last-message time
   (DTO already carries `last_timestamp_ms`) + a one-line snippet (new DTO
   field off the local store — client-side policy, §4) replacing
   `{n} message(s)`. People rows: dim second line (self-claimed name when it
   differs from the petname), guaranteed alphabetical order. *Done when:*
   U11 is dead except unread.
+  *Landed 2026-08-17:* `ConversationSummary` gains `last`
+  (sender/opened-body/has-blobs, computed from the envelopes
+  `conversations()` already iterates; +1 focused test); dto `Conversation`
+  gains preformatted `snippet` ("you: hi" / "alice: 📎 image" /
+  "🔒 can't read this yet"; speaker named in groups only, ≤120 chars) and
+  `ContactRow` gains `self_name`; one shared `ConversationRow` component
+  (label + hh:mm-today-else-day time, snippet beneath) adopted by chats,
+  the draft's discovery list, and the person view; People rows sorted
+  case-insensitively with a dim "calls themselves …" line. **Flake found
+  and pinned to mechanism** while holding the floor: two tests shared the
+  `"gate"` temp namespace (`backfill.rs` gate test vs `send.rs` push-gate
+  test), so one test's `remove_dir_all` cleanup deleted the other's live
+  stores mid-run → the serve gate's contact read *fails closed* → a
+  served-nothing `Ok(0)` — pre-existing on the committed HEAD (fails ~1/3
+  under parallelism, green alone/single-threaded). Fix: unique namespaces
+  (`pushgate`; my new S1 test had introduced the same class via `"fresh"`
+  vs who_is — renamed `newchat`); a sweep found no other cross-test
+  namespace collision. Suite 241 ×5 green, clippy clean (workspace +
+  desktop shell), wasm32 + `app/ui/build.sh` clean.
 - [ ] **S6 · Conversation names.** A local-only label per conversation — my
   lens for a conversation, the conversation-shaped sibling of a petname.
   Set/edit from the S2 members panel; display precedence local name >

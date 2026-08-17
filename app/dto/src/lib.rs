@@ -70,6 +70,9 @@ pub struct AddPreview {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ContactRow {
     pub petname: String,
+    /// Their verified self-claimed name, if any — a row's dim second line
+    /// when it differs from the petname (S5).
+    pub self_name: Option<String>,
     /// The record's first key, hex — the row's avatar / `who_is` handle.
     pub key: String,
     /// The full cluster of keys grouped under this person, hex — cluster-first
@@ -153,6 +156,10 @@ pub struct Conversation {
     pub message_count: usize,
     /// Wall-clock hint of the newest message — display ordering only.
     pub last_timestamp_ms: u64,
+    /// One-line preview of the newest message, preformatted ("you: hi",
+    /// "alice: 📎 image", "🔒 can't read this yet"); empty when there is
+    /// nothing to preview. Local plaintext, client-side policy (S5).
+    pub snippet: String,
     /// Nobody you know has *written* here yet (groups.md §6), so this sits
     /// in the requests queue rather than the main list. Not a verdict: a
     /// contact's first message promotes it with nothing lost.

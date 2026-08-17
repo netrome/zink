@@ -721,7 +721,7 @@ mod tests {
     async fn stage_send_new__should_start_a_second_conversation_with_the_same_people() {
         // Given: an existing conversation for {A, B}, indexed — the set a
         // plain `send` would thread into
-        let key_path = temp_key("fresh", "a");
+        let key_path = temp_key("newchat", "a");
         keystore::create(&key_path).expect("key");
         let a = Client::open_with(&key_path, ClientConfig::default())
             .await
@@ -759,7 +759,7 @@ mod tests {
             "the index re-points to the latest writer, like any send"
         );
 
-        let _ = std::fs::remove_dir_all(temp_root("fresh"));
+        let _ = std::fs::remove_dir_all(temp_root("newchat"));
     }
 
     #[tokio::test]
@@ -1442,8 +1442,12 @@ mod tests {
         // caps and the quarantine view are the policy), never straight to
         // our disk.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("gate", "a", &wire);
-        let (b, _b_net, _b_clock) = loop_client("gate", "b", &wire);
+        // "pushgate", not "gate": the backfill gate test owns that temp
+        // namespace, and a shared one means one test's cleanup deletes the
+        // other's live stores mid-run (the gate reads then fail closed —
+        // a served-nothing that flaked the suite).
+        let (a, _a_net, _a_clock) = loop_client("pushgate", "a", &wire);
+        let (b, _b_net, _b_clock) = loop_client("pushgate", "b", &wire);
         let relay_b = DeviceKey::from_seed([135; 32]).public();
         a.add_contact(
             &routed_record(b.public_key(), &relay_b),
@@ -1459,7 +1463,7 @@ mod tests {
         assert!(acked.is_empty(), "a stranger's push is declined");
         assert!(b.state.find_envelope(for_b.id()).is_none());
 
-        let _ = std::fs::remove_dir_all(temp_root("gate"));
+        let _ = std::fs::remove_dir_all(temp_root("pushgate"));
     }
 
     #[tokio::test]

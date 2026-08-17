@@ -291,10 +291,15 @@ pub(crate) fn PeopleView(
                     view! {
                         <button on:click=move |_| adding.set(true)>"+ add contact"</button>
                         {move || {
-                            let contacts = state
+                            let mut contacts = state
                                 .get()
                                 .map(|state| state.contacts)
                                 .unwrap_or_default();
+                            // Alphabetical, guaranteed (S5) — same order as
+                            // the picker.
+                            contacts.sort_by(|a, b| {
+                                a.petname.to_lowercase().cmp(&b.petname.to_lowercase())
+                            });
                             if contacts.is_empty() {
                                 view! {
                                     <div class="dim">
@@ -309,6 +314,12 @@ pub(crate) fn PeopleView(
                                         let petname = contact.petname.clone();
                                         let avatar_key = contact.key.clone();
                                         let has_warning = !contact.disavowals.is_empty();
+                                        // Their self-claim, dim, only when
+                                        // it adds anything (S5).
+                                        let self_name = contact
+                                            .self_name
+                                            .clone()
+                                            .filter(|name| *name != contact.petname);
                                         view! {
                                             <div
                                                 class="row"
@@ -327,6 +338,14 @@ pub(crate) fn PeopleView(
                                                 <b>{contact.petname}</b>
                                                 {has_warning
                                                     .then(|| view! { <span class="dim">"⚠"</span> })}
+                                                {self_name
+                                                    .map(|name| {
+                                                        view! {
+                                                            <div class="dim">
+                                                                {format!("calls themselves {name}")}
+                                                            </div>
+                                                        }
+                                                    })}
                                             </div>
                                         }
                                     })

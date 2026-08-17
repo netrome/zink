@@ -204,6 +204,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
                 let key = record.keys.first().copied();
                 rows.push(ContactRow {
                     petname,
+                    self_name: record.self_claimed_name().map(str::to_string),
                     key: key.map(|key| hex::encode(&key.0)).unwrap_or_default(),
                     keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
                     vouched: key.map(|key| client.vouches(&key)).unwrap_or(false),
@@ -700,11 +701,47 @@ fn conversation_row(
     summary: &zink_client::ConversationSummary,
 ) -> Result<Conversation, String> {
     let others = other_labels(client, own, &summary.participants)?;
+    // The row preview (S5): "who: what" — client-side policy over the
+    // local plaintext store; nothing new transits a relay.
+    let snippet = match &summary.last {
+        None => String::new(),
+        Some(last) => {
+            let what = match &last.body {
+                None => "🔒 can't read this yet".to_string(),
+                Some(bytes) => {
+                    let text = String::from_utf8_lossy(bytes);
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        text.chars().take(120).collect()
+                    } else if last.has_blobs {
+                        "📎 image".to_string()
+                    } else {
+                        String::new() // a bare membership change — no preview
+                    }
+                }
+            };
+            if what.is_empty() {
+                String::new()
+            } else if own.contains(&last.sender) {
+                format!("you: {what}")
+            } else if others.len() > 1 {
+                // A group names the speaker; a 1:1's label already does.
+                let who = client
+                    .participant_labels(&[last.sender])?
+                    .pop()
+                    .unwrap_or_default();
+                format!("{who}: {what}")
+            } else {
+                what
+            }
+        }
+    };
     Ok(Conversation {
         id: hex::encode(&summary.id.0),
         label: conversation_label(&others),
         message_count: summary.message_count,
         last_timestamp_ms: summary.last_timestamp_ms,
+        snippet,
         request: !summary.known,
     })
 }

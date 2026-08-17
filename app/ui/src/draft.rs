@@ -4,6 +4,7 @@ use serde::Serialize;
 use zink_app_dto::{Conversation, OutgoingImage};
 
 use crate::chat::Composer;
+use crate::chats::ConversationRow;
 use crate::invoke;
 
 /// A chat that does not exist yet (project 6 S1): people picked, no genesis.
@@ -105,20 +106,11 @@ pub(crate) fn DraftChatView(
                                     {list
                                         .into_iter()
                                         .map(|conversation| {
-                                            let (id, label) = (
-                                                conversation.id.clone(),
-                                                conversation.label.clone(),
-                                            );
                                             view! {
-                                                <div
-                                                    class="row"
-                                                    on:click=move |_| open_chat(id.clone(), label.clone())
-                                                >
-                                                    <b>{conversation.label}</b>
-                                                    <span class="dim">
-                                                        {format!("{} message(s)", conversation.message_count)}
-                                                    </span>
-                                                </div>
+                                                <ConversationRow
+                                                    conversation=conversation
+                                                    open=open_chat
+                                                />
                                             }
                                         })
                                         .collect::<Vec<_>>()}

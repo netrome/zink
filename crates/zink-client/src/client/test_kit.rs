@@ -386,6 +386,7 @@ pub(crate) fn summary(id: u8, known: bool, first_seen_ms: u64) -> ConversationSu
         last_timestamp_ms: 0,
         known,
         first_seen_ms,
+        last: None,
     }
 }
 

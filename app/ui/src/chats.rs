@@ -22,6 +22,37 @@ impl Default for NewChatPicker {
     }
 }
 
+/// One conversation row (S5): label + relative time on the first line, a
+/// one-line preview beneath. Shared by the chats list, the draft's
+/// discovery list, and the person view's conversations.
+#[component]
+pub(crate) fn ConversationRow(
+    conversation: Conversation,
+    open: impl Fn(String, String) + Copy + Send + 'static,
+) -> impl IntoView {
+    let (id, label) = (conversation.id.clone(), conversation.label.clone());
+    view! {
+        <div class="row" on:click=move |_| open(id.clone(), label.clone())>
+            <div class="row-top">
+                <b>{conversation.label}</b>
+                <span class="dim">{when(conversation.last_timestamp_ms)}</span>
+            </div>
+            {(!conversation.snippet.is_empty())
+                .then(|| view! { <div class="dim snippet">{conversation.snippet}</div> })}
+        </div>
+    }
+}
+
+/// Row-sized relative time: hh:mm today, else the day ("yesterday",
+/// "aug 12") — the sender's wall-clock hint, display only.
+fn when(timestamp_ms: u64) -> String {
+    if crate::chat::day_of(timestamp_ms) == crate::chat::day_of(js_sys::Date::now() as u64) {
+        crate::chat::time_of(timestamp_ms)
+    } else {
+        crate::chat::day_label(timestamp_ms)
+    }
+}
+
 /// Conversation list. Starting a new chat is a deliberate "+" action: pick
 /// people in the shared picker, then land in a draft chat whose first send
 /// is the genesis (project 6 §7 — a new chat is always a new conversation).
@@ -80,20 +111,11 @@ pub(crate) fn ChatsView(
                         {move || {
                             let inbox = conversations.get();
                             let row = |conversation: Conversation| {
-                                let (id, label) = (
-                                    conversation.id.clone(),
-                                    conversation.label.clone(),
-                                );
                                 view! {
-                                    <div
-                                        class="row"
-                                        on:click=move |_| open_chat(id.clone(), label.clone())
-                                    >
-                                        <b>{conversation.label}</b>
-                                        <span class="dim">
-                                            {format!("{} message(s)", conversation.message_count)}
-                                        </span>
-                                    </div>
+                                    <ConversationRow
+                                        conversation=conversation
+                                        open=open_chat
+                                    />
                                 }
                             };
                             if inbox.conversations.is_empty() && inbox.requests.is_empty() {

@@ -39,6 +39,20 @@ pub struct ConversationSummary {
     /// When this device first stored anything here — our clock, not the
     /// sender's. What the requests queue orders and evicts by.
     pub first_seen_ms: u64,
+    /// The newest stored message (by wall-clock hint, matching
+    /// `last_timestamp_ms`) — what a list row previews. `None` only for
+    /// a summary built without envelopes (test fixtures). Wording is the
+    /// edge's policy.
+    pub last: Option<LastMessage>,
+}
+
+/// A conversation's newest message, summary-shaped for list previews.
+pub struct LastMessage {
+    pub sender: PublicKey,
+    /// The opened body; `None` when this device cannot open it.
+    pub body: Option<Vec<u8>>,
+    /// Whether blobs ride along (an image-only message has an empty body).
+    pub has_blobs: bool,
 }
 
 /// A conversation list split by the contributing-contact rule (groups.md §6).
@@ -294,6 +308,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                 // conversation from disk, once per conversation, per render.
                 known: self.contributed_to(&envelopes, &contacts, &own),
                 first_seen_ms: self.state.first_seen_ms(id),
+                last: envelopes
+                    .iter()
+                    .max_by_key(|envelope| envelope.core.timestamp_ms)
+                    .map(|envelope| LastMessage {
+                        sender: envelope.core.sender,
+                        body: envelope.open(&self.device).ok(),
+                        has_blobs: !envelope.core.blob_refs.is_empty(),
+                    }),
             });
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_timestamp_ms));
@@ -394,6 +416,51 @@ mod tests {
     use crate::ports::clock::TestClock;
     use crate::ports::transport::{Loopback, TestTransport};
     use zink_protocol::{ContactRecord, DeviceKey, RelayEntry};
+
+    #[tokio::test]
+    async fn conversations__should_carry_the_newest_message_as_the_preview() {
+        // Given: a stored conversation — an old genesis and a newer sealed
+        // reply this device can open
+        let client = Client::open_or_create(&temp_key("preview", "viewer"))
+            .await
+            .expect("open");
+        let sender = DeviceKey::from_seed([4; 32]);
+        let genesis = message(&sender, vec![client.public_key()], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        let newer = zink_protocol::MessageEnvelope::seal(
+            zink_protocol::MessageDraft {
+                conversation: Some(conversation),
+                parents: vec![genesis.id()],
+                recipients: vec![client.public_key()],
+                seq: 1,
+                logical: 1,
+                timestamp_ms: 5,
+                plaintext: b"the newest words".to_vec(),
+                blobs: vec![],
+            },
+            &sender,
+            &mut rand_core::OsRng,
+        )
+        .expect("seal")
+        .envelope;
+        for envelope in [&genesis, &newer] {
+            client
+                .state
+                .store_envelope(conversation, envelope)
+                .expect("store");
+        }
+
+        // When: listing conversations
+        let summaries = client.conversations().expect("list");
+
+        // Then: the summary previews the newest message, body opened
+        let last = summaries[0].last.as_ref().expect("preview");
+        assert_eq!(last.sender, sender.public());
+        assert_eq!(last.body.as_deref(), Some(b"the newest words".as_slice()));
+        assert!(!last.has_blobs);
+
+        let _ = std::fs::remove_dir_all(temp_root("preview"));
+    }
 
     #[tokio::test]
     async fn membership__should_follow_the_heads_not_the_full_history() {

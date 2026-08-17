@@ -3,6 +3,7 @@ use leptos::task::spawn_local;
 use serde::Serialize;
 use zink_app_dto::{Conversation, PersonDetail, WhoIsReport};
 
+use crate::chats::ConversationRow;
 use crate::{avatar_data_url, image, invoke};
 
 /// The person-detail lens (U4, design/ui-design-system.md §1): one contact rendered as
@@ -361,23 +362,11 @@ pub(crate) fn PersonView(
                                 } else {
                                     list.into_iter()
                                         .map(|conversation| {
-                                            let (id, chat_label) = (
-                                                conversation.id.clone(),
-                                                conversation.label.clone(),
-                                            );
                                             view! {
-                                                <div
-                                                    class="row"
-                                                    on:click=move |_| open_chat(
-                                                        id.clone(),
-                                                        chat_label.clone(),
-                                                    )
-                                                >
-                                                    <b>{conversation.label}</b>
-                                                    <span class="dim">
-                                                        {format!("{} message(s)", conversation.message_count)}
-                                                    </span>
-                                                </div>
+                                                <ConversationRow
+                                                    conversation=conversation
+                                                    open=open_chat
+                                                />
                                             }
                                         })
                                         .collect::<Vec<_>>()

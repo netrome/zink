@@ -955,20 +955,20 @@ fn touch_device() -> bool {
 }
 
 /// hh:mm from the sender's wall-clock hint — display only, like the hint.
-fn time_of(timestamp_ms: u64) -> String {
+pub(crate) fn time_of(timestamp_ms: u64) -> String {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(timestamp_ms as f64));
     format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
 }
 
 /// Local calendar day of a wall-clock hint — the separator grouping key.
-fn day_of(timestamp_ms: u64) -> (u32, u32, u32) {
+pub(crate) fn day_of(timestamp_ms: u64) -> (u32, u32, u32) {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(timestamp_ms as f64));
     (date.get_full_year(), date.get_month(), date.get_date())
 }
 
 /// "today" / "yesterday" / "aug 12" (+ year when it differs) — the day
 /// separator text. Display only, from the sender's hint, like `time_of`.
-fn day_label(timestamp_ms: u64) -> String {
+pub(crate) fn day_label(timestamp_ms: u64) -> String {
     const MONTHS: [&str; 12] = [
         "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
     ];
