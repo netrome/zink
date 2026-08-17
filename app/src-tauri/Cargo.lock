@@ -7848,6 +7848,7 @@ dependencies = [
  "data-encoding",
  "iroh",
  "qrcode",
+ "rustls",
  "serde",
  "tauri",
  "tauri-build",

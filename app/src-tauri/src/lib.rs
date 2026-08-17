@@ -1174,6 +1174,13 @@ fn init_diagnostics(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // iroh's reqwest is built in "no provider" rustls mode: the process must
+    // install a default crypto provider before any client is built or it
+    // panics (aborts on mobile). Ring to match what iroh already links.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     let builder = tauri::Builder::default()
         .manage(ManagedClient {
             client: tokio::sync::OnceCell::new(),

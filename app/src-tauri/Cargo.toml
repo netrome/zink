@@ -19,6 +19,9 @@ tauri-build = { version = "2", features = [] }
 data-encoding = "2"
 iroh = "1.0.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+# Process-default crypto provider for iroh's reqwest (see run()); already in
+# the tree via iroh — a direct edge, not a new dependency.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-barcode-scanner = "2.4.5"
