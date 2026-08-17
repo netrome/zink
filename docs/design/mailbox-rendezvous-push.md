@@ -89,11 +89,15 @@ connection. Same user-visible result, no second delivery path. See
   relay (cheap) or several (redundant) with no dup problem.
 - **Online delivery** for two live peers still uses a direct iroh connection
   (relay-routed for browsers); the mailbox is the store for when the target isn't live.
-- **Freshness ⚠️:** relay lists change. The ContactRecord propagates lazily — handed
-  over at QR add-time, re-fetched via `who-is-this`, and piggybacked as a version hint
-  on messages (a peer seeing a newer version pulls the update). A device should keep an
-  abandoned relay alive for a grace period. Brief mis-delivery windows are tolerated
-  (best-effort, tenet 6).
+- **Freshness — resolved (project 5, 2026-08-16;
+  [relay-lifecycle.md](./relay-lifecycle.md)):** relay lists change, and the client
+  heals: records re-fetch via `who-is-this` — automatically from the subject over any
+  live channel (§6 there) — a re-scan updates the stored record in place, and the
+  outbox re-resolves owed deliveries against current records instead of pinning dial
+  strings (§2 there). The message-borne version hint stayed unshipped (a SPEC §11
+  candidate if the residual gap ever bites). A device should keep an abandoned relay
+  alive for a grace period. Brief mis-delivery windows are tolerated (best-effort,
+  tenet 6).
 
 ---
 

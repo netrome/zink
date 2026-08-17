@@ -174,9 +174,13 @@ natural place to later hand over an initial capability grant (§8) so a new cont
 can message you from the start.
 
 **Freshness.** `relays` is the rendezvous anchor for offline delivery, so it must stay
-reasonably current. It propagates lazily — via the QR at add-time, `who-is-this`, and a
-version hint piggybacked on messages — and a device keeps an abandoned relay alive for a
-grace period. Brief mis-delivery windows are tolerated (best-effort, tenet 6).
+reasonably current. It propagates lazily — via the QR at add-time (a re-scan updates the
+stored record in place) and `who-is-this`, including the automatic *subject-refresh* a
+client runs over already-live channels; senders re-resolve owed deliveries against
+current records rather than pinning dial strings (both: design/relay-lifecycle.md). A
+version hint piggybacked on messages remains a possible future addition (§11 gate). A
+device keeps an abandoned relay alive for a grace period; brief mis-delivery windows are
+tolerated (best-effort, tenet 6).
 
 ---
 

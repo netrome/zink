@@ -365,11 +365,145 @@ mod test_kit;
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use super::test_kit::{befriend, open_homed, spawn_test_relay, temp_key, temp_root};
+    use std::time::Duration;
+
+    use super::test_kit::{
+        befriend, deposited_envelopes, deposited_frame, loop_client, mailbox_spec, message,
+        open_homed, spawn_test_relay, temp_key, temp_root,
+    };
     use super::*;
     use crate::hex;
-    use crate::ports::transport::Home;
-    use zink_protocol::{ContactRecord, RelayEntry};
+    use crate::ports::transport::{Home, Loopback};
+    use zink_protocol::{ContactRecord, DeviceKey, RelayEntry};
+
+    #[tokio::test]
+    async fn migration_drill__should_heal_the_reinstalled_relay_end_to_end() {
+        // The project-5 capstone (5-relay-lifecycle §1, the 2026-08-15
+        // story): anna's server is reinstalled — new relay, renamed
+        // profile — while bob still holds her old record. Every wall from
+        // the real migration must now be a door, each layer proven on the
+        // same state.
+        const DEADLINE: Duration = Duration::from_secs(10);
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("drill", "anna", &wire);
+        let (b, b_net, b_clock) = loop_client("drill", "bob", &wire);
+        let relay_old = DeviceKey::from_seed([120; 32]).public();
+        let relay_new = DeviceKey::from_seed([121; 32]).public();
+
+        // Given: anna, profiled on the old relay, serves bob; bob added
+        // her from her real record — petname defaulted from her self-claim
+        a.state
+            .save_profile(
+                "Anna",
+                &[RelayEntry {
+                    mailbox: mailbox_spec(&relay_old),
+                    relay_url: None,
+                }],
+            )
+            .expect("anna's profile");
+        befriend(&a.state, b.public_key());
+        let original = a.my_record().expect("original record");
+        let petname = b.add_contact(&original, None).expect("bob adds anna");
+        assert_eq!(petname, "Anna");
+
+        // When: her relay is gone and bob's send times out — the honest
+        // "sending…" (owed, retried, surfaced)
+        b_net.dial.hold(&relay_old);
+        let recipients = [b.resolve_contact("Anna").expect("resolve")];
+        let (result, ()) = tokio::join!(
+            b.send(&recipients, b"are you there?".to_vec(), vec![]),
+            async {
+                b_clock.wait_for_sleepers(1).await;
+                b_clock.advance(DEADLINE);
+            },
+        );
+        assert!(matches!(result, Err(Error::AllRelaysPending(_))));
+        let (stuck_id, conversation) = {
+            let entry = &b.state.outbox()[0];
+            (entry.message, entry.conversation)
+        };
+        assert!(
+            b.history(conversation).expect("history")[0]
+                .owed_since_ms
+                .is_some(),
+            "the marker says sending…"
+        );
+
+        // …anna reinstalls: new relay, renamed profile (revision bumped,
+        // as a real set_profile rename does)
+        a.state
+            .save_profile(
+                "Ann",
+                &[RelayEntry {
+                    mailbox: mailbox_spec(&relay_new),
+                    relay_url: None,
+                }],
+            )
+            .expect("anna migrates");
+        a.state.save_profile_revision(1).expect("bump");
+
+        // Layer 1+2 — subject-refresh (R6) + outbox re-target (R2): one
+        // message from anna arrives over the live channel. Nothing else.
+        let relay_conn = b_net.dial.connect(&relay_new);
+        relay_conn.reply(deposited_frame());
+        let received = [Received {
+            envelope: message(&a.device, vec![b.public_key()], None, vec![], 0, 0),
+            relay: None,
+            body: Ok(vec![]),
+        }];
+        b.after_direct(&received).await;
+
+        // Then: resolution follows her fresh profile, the stuck message
+        // followed her to the NEW relay, the marker converged — and bob's
+        // stored record was never touched by any of it
+        assert_eq!(
+            b.resolve_contact("Anna").expect("resolve").relays,
+            vec![mailbox_spec(&relay_new)]
+        );
+        assert!(matches!(
+            b.relay_status("Anna").expect("status").source,
+            RelaySource::SubjectServed { .. }
+        ));
+        assert!(
+            deposited_envelopes(&relay_conn)
+                .iter()
+                .any(|envelope| envelope.id() == stuck_id),
+            "the owed message was deposited to the new relay"
+        );
+        assert!(b.state.outbox().is_empty(), "the debt is settled");
+        assert!(
+            b.history(conversation).expect("history")[0]
+                .owed_since_ms
+                .is_none(),
+            "the marker converged to the truth"
+        );
+        assert_eq!(
+            b.contacts().expect("contacts")[0].1,
+            original,
+            "healing never wrote the trust anchor"
+        );
+
+        // Layer 3 — rescan-as-update (R1): her renamed record previews as
+        // an update of the same entry — the diff a confirm card renders —
+        // and applies while keeping bob's petname
+        let renamed = a.my_record().expect("renamed record");
+        let RecordMatch::Update(update) = b.preview_contact(&renamed).expect("preview") else {
+            panic!("expected an update match");
+        };
+        assert_eq!(update.petname, "Anna");
+        assert_eq!(update.old_name.as_deref(), Some("Anna"));
+        assert_eq!(update.new_name.as_deref(), Some("Ann"));
+        assert_eq!(update.relays_added, vec![mailbox_spec(&relay_new)]);
+        assert_eq!(update.relays_removed, vec![mailbox_spec(&relay_old)]);
+        assert_eq!(b.update_contact(&renamed).expect("update"), "Anna");
+        assert_eq!(
+            b.contacts().expect("contacts")[0].1,
+            renamed,
+            "the explicit act replaced the anchor"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("drill"));
+    }
 
     #[tokio::test]
     async fn homed_endpoint__should_report_online_without_waiting_out_probe_timeout() {

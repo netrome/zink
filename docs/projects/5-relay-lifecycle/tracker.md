@@ -1,9 +1,20 @@
 # Relay lifecycle: scan, heal, and honest delivery state
 
-> **Status: 🟡 in progress (started 2026-08-15) — R1–R6 ✅, R7 remains.** Project **5-relay-lifecycle**,
-> picking up the project-4 §8 parked item ("stale relay entries make 'sending…'
-> permanent") and the SPEC §3.6 freshness ⚠️. Trigger: a real relay migration
-> (server reinstall, 2026-08-15) hit three compounding walls — see §1.
+> **Status: ✅ complete (2026-08-16).** Project **5-relay-lifecycle** — relays
+> stopped being assumed static. A relay migration is now *start the new
+> relay, scan its QR* (printed at startup); contacts converge automatically
+> over channels that already exist (the R6 subject-refresh feeding R2's
+> outbox reconciliation); the send marker tells the truth and offers the
+> repair (R3); and every automatic mechanism has an inspectable manual
+> counterpart (R1's rescan-as-update, R5's per-contact relay panel +
+> override). The 2026-08-15 migration story that triggered the project is
+> replayed end to end by the R7 drill — every wall is now a door. Durable
+> knowledge graduated to **design/relay-lifecycle.md** (new),
+> who-is-this.md §5/§7, live-delivery.md §2, SPEC §3.6, and
+> mailbox-rendezvous-push.md §4 (⚠️ resolved). Suite 239 → **260/260,
+> ~1.1 s**; one dependency added (`qrcode` into `zink-relay`, already in
+> the workspace). Originally picked up from the project-4 §8 parked item;
+> trigger and the three walls in §1.
 
 Governed by the standard slice discipline (AGENTS.md): small vertical slices,
 each runnable and tested before the next. This project is **client + app +
@@ -310,12 +321,28 @@ recorded per §5.
   second carve-out (+ §2 decision row). **Proof:** 259/259, clippy
   clean, `wasm32` compiles (client-only slice). *Done-when met:* the §1
   scenario heals with no rescan — merely keep chatting.
-- [ ] **R7 · The migration drill + graduate.** One in-process scenario test
-  on the loopback/doubles kit replaying 2026-08-15 end to end: two contacts
-  chatting → one side's relay replaced *and* profile renamed → prove each
-  layer independently (rescan-as-update path, outbox re-target, subject
-  refresh) and that the send marker converges to the truth. Re-measure,
-  graduate per §5, README row.
+- [x] **R7 · The migration drill + graduate.** ✅ 2026-08-16. The drill
+  (`client.rs::migration_drill__should_heal_the_reinstalled_relay_end_to_end`,
+  48 ms, loopback + scripted relays + fake clocks): anna profiled on relay
+  A, bob adds her from her *real* `my_record` (petname defaults from the
+  self-claim — R1's add path) → relay A dies, bob's send times out, the
+  marker honestly says sending (`owed_since_ms`) → anna reinstalls on
+  relay B *and* renames Anna→Ann (revision bumped) → **one message from
+  her arrives** and, with no other action: resolution follows her fresh
+  profile (subject-served — R6), the stuck message is deposited to relay
+  B (release + re-target — R2, asserted on the scripted conn's actual
+  deposits), the outbox empties and **the marker converges** (R3's
+  fact), with bob's stored record byte-untouched → then the rescan layer
+  on the same state: her renamed record previews as an update of "Anna"
+  with the exact name/relay diff and applies keeping the petname (R1).
+  Graduations completed: SPEC §3.6 freshness rewritten to name the
+  shipped mechanisms (version hint honestly marked unshipped, §11 gate);
+  mailbox-rendezvous-push.md §4's freshness ⚠️ resolved with pointers.
+  **ADR decided: none** — the "records heal over authenticated channels"
+  stance is fully carried by relay-lifecycle.md §6 + the who-is-this §5
+  carve-out; an ADR would only duplicate. **Final measure: 260/260,
+  ~1.1 s wall** (project-4's floor held; +21 tests over the project),
+  clippy clean, `wasm32` + `app/ui/build.sh` clean.
 
 ## 7. Decisions log
 
