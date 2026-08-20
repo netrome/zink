@@ -17,6 +17,8 @@ Start a new effort as the next number: `docs/projects/N-name/`.
 | 4 | Module split — carve `client.rs` (and `app/ui`), keep `Client` | ✅ complete (2026-08-15) | [4-module-split/tracker.md](./4-module-split/tracker.md) |
 | 5 | Relay lifecycle — scan, heal, and honest delivery state | ✅ complete (2026-08-16) | [5-relay-lifecycle/tracker.md](./5-relay-lifecycle/tracker.md) |
 | 6 | UI polish — people-picking, membership, everyday ergonomics | ✅ complete (2026-08-20) | [6-ui-polish/tracker.md](./6-ui-polish/tracker.md) |
+| 7 | Shared conversation names — my lens travels, theirs renders | 💡 proposed (2026-08-20) | [7-shared-conversation-names/tracker.md](./7-shared-conversation-names/tracker.md) |
+| 8 | Identity preview — tap any identifier, see who this is | 💡 proposed (2026-08-20) | [8-identity-preview/tracker.md](./8-identity-preview/tracker.md) |
 
 *Projects 1–2 closed the same day; project 2 ran parallel to the tail of
 project 1. Projects 3–4 are the post-MVP engineering-excellence iterations:
