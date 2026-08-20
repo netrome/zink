@@ -545,6 +545,24 @@ impl ClientState {
         Some((hash, key, revision))
     }
 
+    /// This device's self-claimed device label ("phone", "laptop") plus its
+    /// own supersession revision (per-claim-kind scope, SPEC §3.2), as
+    /// `profile.device` (`label\nrevision`).
+    pub fn save_device_label(&self, label: &str, revision: u64) -> Result<(), Error> {
+        let path = self.root.join("profile.device");
+        create_parent(&path)?;
+        write_atomic(&path, format!("{label}\n{revision}\n").as_bytes())
+            .map_err(|e| Error::Storage(format!("write device label: {e}")))
+    }
+
+    pub fn device_label_meta(&self) -> Option<(String, u64)> {
+        let content = std::fs::read_to_string(self.root.join("profile.device")).ok()?;
+        let mut lines = content.lines();
+        let label = lines.next()?.trim();
+        let revision = lines.next()?.trim().parse().ok()?;
+        (!label.is_empty()).then(|| (label.to_string(), revision))
+    }
+
     /// Store a contact under a petname. The record is kept in wire form;
     /// the petname is a sibling file (local convention, never protocol).
     pub fn save_contact(&self, petname: &str, record: &ContactRecord) -> Result<(), Error> {

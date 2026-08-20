@@ -92,6 +92,27 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         self.state.profile_name()
     }
 
+    /// Set this device's label — the device qualifier beside the person
+    /// name ("phone", "laptop"; SPEC §3.2 `DeviceLabel`). Optional, and
+    /// superseded independently of the name: a relabel bumps its own
+    /// revision, a rename never touches it.
+    pub fn set_device_label(&self, label: &str) -> Result<(), Error> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(Error::InvalidInput("device label must not be empty".into()));
+        }
+        let revision = match self.state.device_label_meta() {
+            Some((previous, revision)) if previous == label => revision,
+            Some((_, revision)) => revision + 1,
+            None => 0,
+        };
+        self.state.save_device_label(label, revision)
+    }
+
+    pub fn device_label(&self) -> Option<String> {
+        self.state.device_label_meta().map(|(label, _)| label)
+    }
+
     /// The home relays' mailbox dial strings — what the mailbox paths
     /// (recv, subscribe, register) dial.
     pub fn home_relays(&self) -> Vec<String> {
@@ -337,6 +358,11 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
         )
     };
     let mut attestations = vec![self_claim(Claim::Name(name), state.profile_revision())];
+    // The device label (S1, profile pages): the qualifier beside the name,
+    // its own claim kind so the two supersede independently (SPEC §3.2).
+    if let Some((label, revision)) = state.device_label_meta() {
+        attestations.push(self_claim(Claim::DeviceLabel(label), revision));
+    }
     // The avatar claim (D1d): hash + key together, under the signature —
     // whoever holds the record can fetch and decrypt; relays cannot.
     if let Some((hash, key, revision)) = state.avatar_meta() {
@@ -394,6 +420,39 @@ mod tests {
         assert_eq!(revision(&a), 1);
 
         let _ = std::fs::remove_dir_all(temp_root("rev"));
+    }
+
+    #[tokio::test]
+    async fn set_device_label__should_supersede_independently_of_the_name() {
+        // Given
+        let a = Client::open_or_create(&temp_key("label", "me"))
+            .await
+            .expect("open");
+        let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
+        a.set_profile("mårten", std::slice::from_ref(&relay))
+            .await
+            .expect("profile");
+
+        // When: label set, re-set unchanged, relabeled — then a rename
+        a.set_device_label("phone").expect("set");
+        let set = a.my_record().expect("record");
+        a.set_device_label("phone").expect("re-set");
+        let re_set = a.my_record().expect("record");
+        a.set_device_label("laptop").expect("relabel");
+        a.set_profile("mårten ii", std::slice::from_ref(&relay))
+            .await
+            .expect("rename");
+        let renamed = a.my_record().expect("record");
+
+        // Then: the label supersedes on change only, and the rename bumps
+        // the name's revision without touching the label's (SPEC §3.2
+        // per-claim-kind scopes)
+        assert_eq!(set.self_device_label_claim(), Some(("phone", 0)));
+        assert_eq!(re_set.self_device_label_claim(), Some(("phone", 0)));
+        assert_eq!(renamed.self_device_label_claim(), Some(("laptop", 1)));
+        assert_eq!(renamed.self_name_claim(), Some(("mårten ii", 1)));
+
+        let _ = std::fs::remove_dir_all(temp_root("label"));
     }
 
     #[tokio::test]

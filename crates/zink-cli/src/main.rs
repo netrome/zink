@@ -77,7 +77,8 @@ async fn main() -> ExitCode {
 const USAGE: &str = "usage:
   zink-cli keygen <key-file>
   zink-cli pubkey <key-file>
-  zink-cli my-record --key <file> [--name <name>] [--relay <relay> ...] [--qr]
+  zink-cli my-record --key <file> [--name <name>] [--device <label>]
+                     [--relay <relay> ...] [--qr]
   zink-cli contact-add --key <file> [--name <petname>] <ZINK:...>
   zink-cli contact-update --key <file> <ZINK:...>
   zink-cli contacts --key <file>
@@ -150,6 +151,15 @@ async fn my_record(args: &[String]) -> Result<(), String> {
         return Err(format!("no home relay yet — pass --relay\n{USAGE}"));
     }
     client.set_profile(&name, &relays).await?;
+    // The device label (S1): optional, kept when not re-passed, like the
+    // name. `Name` is the person, `DeviceLabel` the device (SPEC §3.2).
+    if let Some(label) = optional(&flags, "--device")? {
+        client.set_device_label(&label)?;
+    }
+    match client.device_label() {
+        Some(label) => eprintln!("profile: {name} · {label}"),
+        None => eprintln!("profile: {name}"),
+    }
     // Print first, register best-effort after (R4, 5-relay-lifecycle §8):
     // a user whose relay just died must still be able to produce the very
     // record/QR that re-homes them — failing before the print walled off
@@ -289,8 +299,12 @@ async fn devices(args: &[String]) -> Result<(), String> {
         println!("no recognized devices");
     }
     for (key, record) in devices {
+        let label = record
+            .self_device_label()
+            .map(|label| format!(" · {label}"))
+            .unwrap_or_default();
         println!(
-            "{}  ({})",
+            "{}{label}  ({})",
             record.self_claimed_name().unwrap_or("<unnamed>"),
             &hex::encode(&key.0)[..8],
         );
@@ -699,8 +713,13 @@ async fn who_is(args: &[String]) -> Result<(), String> {
             .record
             .self_claimed_name()
             .unwrap_or("(no valid self-claim)");
+        let device = answer
+            .record
+            .self_device_label()
+            .map(|label| format!(", their {label:?}"))
+            .unwrap_or_default();
         println!(
-            "{} holds a record: calls themself {name:?} — {}",
+            "{} holds a record: calls themself {name:?}{device} — {}",
             answer.responder_petname,
             answer.record.to_qr_string()
         );

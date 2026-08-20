@@ -1,14 +1,18 @@
-# zink — MVP Specification (draft)
+# zink — Protocol Specification
 
 A small, p2p-first chat protocol and app built on [iroh 1.0](https://www.iroh.computer/blog/v1),
-for me and my close friends. Specifies the **MVP feature set**, the **protocol
-building blocks**, and the **high-level system components**. It is a protocol first,
+for me and my close friends. Specifies the **protocol building blocks**, the
+**high-level system components**, and the feature set. It is a protocol first,
 with clients and relays as independent implementations.
 
 Read [DESIGN-PHILOSOPHY.md](./DESIGN-PHILOSOPHY.md) first — this document is
 downstream of it.
 
-Status: **draft, converged on core model.**
+Status: **living document.** It describes the protocol *as it currently is* —
+normative sections carry no history. Resolved decisions, with dates, rationale,
+and links to the design docs that argued them, accumulate in §11; past states
+of any section live in git (the MVP-era spec is the tree at the project-1
+close, 2026-07-26).
 
 ---
 
@@ -64,6 +68,7 @@ Attestation {                          // id = BLAKE3(borsh(...)); sig is Ed2551
   attester:  key
   subject:   key
   claim:     name <label> | avatar <blob-ref> | same-person-as <key> | negative
+             | device-label <label>
   revision:  u64                        // supersession counter — see below
   sig
 }
@@ -88,6 +93,12 @@ Uses, all the same primitive:
   about others. This is what makes "everyone can set profile pictures for other
   people" work: clients aggregate contacts' claims, weighted by trust, and show
   *"your friends call them …"*.
+- **Label my device** — a self-issued `device-label` ("phone", "laptop") beside the
+  person-level `name`, so one string never carries both ("mårten laptop"). It names
+  the device, never the person; supersession is per claim kind, so renaming the
+  person never disturbs the label. Person-name drift across one person's devices is
+  legitimate (profiles are per-device and never sync) and resolves by revision and
+  agreement like everything else.
 
 **Supersession — one mechanism.** The highest `revision` wins, scoped per
 `(attester, subject, claim-kind, + the linked key for same-person-as)`. So bumping
@@ -147,9 +158,11 @@ renders a QR / link encoding your **rendezvous record** —
 
 ```
 ContactRecord {
-  keys:          [key]              // current device keys
+  keys:          [key]              // the publishing device's key first; any
+                                    // further keys are advisory identity
+                                    // evidence, never addressing (§11)
   attestations:  [Attestation]      // self-attestations (name, avatar, same-person-as links)
-  relays:        [RelayEntry]       // my relay services, one entry each:
+  relays:        [RelayEntry]       // the publishing device's relay services:
                                     //   mailbox    — dial string (deposits/drains)
                                     //   relay_url  — the same service's iroh relay
                                     //                URL (optional; peer dial-by-key)
@@ -172,6 +185,12 @@ yields the **mutual** link clients weight highest (§3.2); a deliberately one-wa
 recognition is legitimate and receive-only (multi-device.md §3). It's also the
 natural place to later hand over an initial capability grant (§8) so a new contact
 can message you from the start.
+
+**Relays bind to the publishing device.** A record's `relays` are the rendezvous
+of the device whose record it is — never of any *other* key the record lists. A
+person's devices need not share relays, so relays for a key resolve only through
+that key's own records, and a key with no routable record of its own is honestly
+unroutable (§11).
 
 **Freshness.** `relays` is the rendezvous anchor for offline delivery, so it must stay
 reasonably current. It propagates lazily — via the QR at add-time (a re-scan updates the
@@ -523,6 +542,9 @@ custom conversation views — is **client policy/UX**.
 | Re-wrap op | **`GetKeys{ids}` on the peer sync ALPN → `Wraps{(id, KeyWrap)}` re-sealed to the caller's connection key; batch-capped both sides (`MAX_GET_KEYS_IDS`); served to recognized own devices only — anyone else gets `NotHeld`** | One bounded op is the whole "new device reads old history" story (§5.2 — cheap, no body re-encryption, ids never move); "willingness to re-wrap" stays at its narrowest until the recovery flows (D4+) need more ([multi-device.md](../docs/design/multi-device.md) §6, resolved 2026-07-19). |
 | Endorsements | **The `WhoIs` answer carries the responder's own signed claims about the subject (`Known{record, endorsements}`); an endorsement counts only when its `attester` IS the answering connection key** | §3.5's "return their attestations about that key", cashed in; relaying others' claims would be second-hand gossip, so the attester-is-responder rule keeps hop limit 1 structural for the whole trust layer ([web-of-trust.md](../docs/design/web-of-trust.md) §3, resolved 2026-07-21). |
 | `Negative` evaluation | **Read-time only, per the §3.2 voiding rule; a repudiation is published in the issuer's record and served as an endorsement. Addressing exclusion is per-observer policy — MVP: only a disavowal from the observer's own keys or from *the same person* (shared contact entry, or any held `same-person-as` between attester and key — the same-person scoping ignores voiding: a voided link no longer clusters but still scopes whose word counts); third-party negatives warn, never exclude** | §3.3's "a repudiated key drops out of the set" made precise; nothing is enforced, deleted, or arbitrated — mutual disavowals surface, and explicit sends to a disavowed entry still work (the manual override) ([web-of-trust.md](../docs/design/web-of-trust.md) §4, resolved 2026-07-21). |
+
+| Person vs device names | **Two self-claim kinds: `name` names the person ("Mårten"), `device-label` the device ("phone", "laptop") — each issued per device, superseding independently (revision is already scoped per claim kind). Variant appended in-place at v1 (pre-deployment norm)** | One self-claimed string carried two meanings ("mårten laptop"); split, clients render "Mårten · laptop", prefill person and device separately, and cluster by agreeing person names — while profiles stay per-device: person-name drift across one person's devices is legitimate and resolves by revision + agreement ([7-profile-pages](../docs/projects/7-profile-pages/tracker.md) S1, resolved 2026-08-20). |
+| Record relays bind to the publishing device | **A record's `relays` are the rendezvous of the device that published it — its own key, listed first; further listed keys are advisory identity evidence, never addressing. Relays for a key resolve only through that key's own records (read-time provenance classes unchanged); a key with no routable record is unroutable — the existing unroutable-members rule applies** | One relay set must never smear across a key set: a person's devices need not share relays, and depositing for a sibling at the publisher's mailboxes stores what nobody drains while faking the delivery cue. Every record built today is single-key, so no live path smears; structural enforcement (the `Contact` shape carries one relay set per entry) lands with the person-entry addressing rework ([7-profile-pages](../docs/projects/7-profile-pages/tracker.md) S1, resolved 2026-08-20). |
 
 **Still to pin down (implementation-level):** sync-time head/`seq` exchange, relay
 discovery/config UX, and the

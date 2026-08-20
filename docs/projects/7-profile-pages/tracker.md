@@ -49,11 +49,21 @@ per-device detail. Around it, the model work that keeps it honest:
 
 ## Slices
 
-- **S1 · SPEC + protocol.** `Claim::DeviceLabel`; the multi-key-record
-  relay question; resolution helper beside `self_claimed_name`; profile
-  set/edit; pairing/onboarding prefill split (your name / this device).
-  *Done when:* SPEC §3.2/§11 updated; unit tests — independent
-  supersession, hostile claims drop; CLI set/show.
+- **S1 · SPEC + protocol — done (2026-08-20).** `Claim::DeviceLabel`; the
+  multi-key-record relay question; resolution helper beside
+  `self_claimed_name`; profile set/edit. *Done when:* SPEC §3.2/§11
+  updated; unit tests — independent supersession, hostile claims drop;
+  CLI set/show.
+  *(As built: variant appended at v1, tags stable;
+  `self_device_label_claim` mirrors the name helper; the label persists
+  as `profile.device` with its own revision, set-if-changed like the
+  name; CLI `my-record --device <label>`, label rendered by `who-is` and
+  `devices`. The relay question resolved as "relays bind to the
+  publishing device" (SPEC §3.6 + §11); structural enforcement rides S2's
+  addressing rework — every record built today is single-key, so no live
+  path smears. SPEC's header now states its living-document status.
+  Prefill composition ("Mårten · laptop") is rendering — moved to S3 with
+  the onboarding split.)*
 - **S2 · Person entries.** Local store, overlap resolution, label
   collision, send-by-name over clusters, `participant_labels` reads
   person entries. Migration: one person per existing contact entry;

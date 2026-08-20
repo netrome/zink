@@ -139,6 +139,32 @@ impl ContactRecord {
             .max_by_key(|(_, revision)| *revision)
     }
 
+    /// The device qualifier this device claims for itself ("phone",
+    /// "laptop") — the `DeviceLabel` sibling of `self_claimed_name`, same
+    /// validation, independent supersession (SPEC §3.2: revision is scoped
+    /// per claim kind, so a rename never disturbs the label).
+    pub fn self_device_label(&self) -> Option<&str> {
+        self.self_device_label_claim().map(|(label, _)| label)
+    }
+
+    /// `self_device_label` with its `revision` — for comparing answers
+    /// that disagree, exactly like `self_name_claim`.
+    pub fn self_device_label_claim(&self) -> Option<(&str, u64)> {
+        self.attestations
+            .iter()
+            .filter_map(|signed| {
+                let attestation = &signed.attestation;
+                let Claim::DeviceLabel(label) = &attestation.claim else {
+                    return None;
+                };
+                let self_issued = attestation.attester == attestation.subject
+                    && self.keys.contains(&attestation.attester);
+                (self_issued && signed.verify().is_ok())
+                    .then_some((label.as_str(), attestation.revision))
+            })
+            .max_by_key(|(_, revision)| *revision)
+    }
+
     /// The verified self-issued `Avatar` claim at the highest revision
     /// (SPEC §3.2 supersession) — `(ciphertext hash, content key,
     /// revision)`. Validation mirrors `self_name_claim`: forged signatures,
@@ -407,6 +433,99 @@ mod tests {
         // Then: supersession picks the valid rename, not order or forgery
         assert_eq!(record.self_name_claim(), Some(("Alice II", 3)));
         assert_eq!(record.self_claimed_name(), Some("Alice II"));
+    }
+
+    fn label_attestation(
+        attester: &DeviceKey,
+        label: &str,
+        revision: u64,
+        signer: &DeviceKey,
+    ) -> SignedAttestation {
+        SignedAttestation::new(
+            Attestation {
+                version: Attestation::CURRENT,
+                attester: attester.public(),
+                subject: attester.public(),
+                claim: Claim::DeviceLabel(label.to_string()),
+                revision,
+            },
+            signer,
+        )
+    }
+
+    #[test]
+    fn self_device_label__should_supersede_independently_of_the_name() {
+        // Given: a name renamed twice (revision 2) and a device label still
+        // at revision 0 — per-claim-kind revision scopes (SPEC §3.2)
+        let me = device_key(1);
+        let renamed = SignedAttestation::new(
+            Attestation {
+                version: Attestation::CURRENT,
+                attester: me.public(),
+                subject: me.public(),
+                claim: Claim::Name("Mårten II".to_string()),
+                revision: 2,
+            },
+            &me,
+        );
+        let record = ContactRecord::new(
+            vec![me.public()],
+            vec![renamed, label_attestation(&me, "laptop", 0, &me)],
+            vec![],
+        );
+
+        // When / Then: both resolve; neither disturbs the other
+        assert_eq!(record.self_claimed_name(), Some("Mårten II"));
+        assert_eq!(record.self_device_label_claim(), Some(("laptop", 0)));
+    }
+
+    #[test]
+    fn self_device_label__should_pick_the_highest_revision_and_ignore_forgeries() {
+        // Given: a valid label, its valid supersession, and a forged claim
+        // at a yet-higher revision
+        let me = device_key(1);
+        let forger = device_key(9);
+        let record = ContactRecord::new(
+            vec![me.public()],
+            vec![
+                label_attestation(&me, "phone", 0, &me),
+                label_attestation(&me, "toaster", 9, &forger), // won't verify
+                label_attestation(&me, "laptop", 1, &me),
+            ],
+            vec![],
+        );
+
+        // When / Then
+        assert_eq!(record.self_device_label_claim(), Some(("laptop", 1)));
+    }
+
+    #[test]
+    fn self_device_label__should_ignore_third_party_and_outside_key_claims() {
+        // Given: a label self-claimed by a key outside the record, and one
+        // *about* me signed by me (subject ≠ attester)
+        let me = device_key(1);
+        let outsider = device_key(9);
+        let third_party = SignedAttestation::new(
+            Attestation {
+                version: Attestation::CURRENT,
+                attester: me.public(),
+                subject: outsider.public(),
+                claim: Claim::DeviceLabel("car".to_string()),
+                revision: 0,
+            },
+            &me,
+        );
+        let record = ContactRecord::new(
+            vec![me.public()],
+            vec![
+                label_attestation(&outsider, "fridge", 0, &outsider),
+                third_party,
+            ],
+            vec![],
+        );
+
+        // When / Then
+        assert_eq!(record.self_device_label(), None);
     }
 
     #[test]

@@ -90,6 +90,12 @@ pub enum Claim {
     SamePersonAs(PublicKey),
     /// Active disavowal: "I do not / no longer recognise this key."
     Negative,
+    /// The device qualifier beside the person's `Name` — "phone", "laptop".
+    /// Split from `Name` so a self-claim stops overloading one string
+    /// ("mårten laptop"): `Name` is the person, `DeviceLabel` the device.
+    /// Supersedes independently per claim kind (SPEC §3.2). (Variant
+    /// appended in-place at v1 pre-deployment, 2026-08-20 — tags stable.)
+    DeviceLabel(String),
 }
 
 /// An attestation id: `BLAKE3(borsh(Attestation))`.
@@ -227,6 +233,7 @@ mod tests {
             },
             Claim::SamePersonAs(device_key(9).public()),
             Claim::Negative,
+            Claim::DeviceLabel("Alice".to_string()),
         ];
 
         // When
