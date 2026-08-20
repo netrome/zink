@@ -160,6 +160,9 @@ pub struct Conversation {
     /// "alice: 📎 image", "🔒 can't read this yet"); empty when there is
     /// nothing to preview. Local plaintext, client-side policy (S5).
     pub snippet: String,
+    /// Stored messages this device hasn't rendered yet (S7) — the row
+    /// badge. Local presentation state, never a receipt to anyone.
+    pub unread: usize,
     /// Nobody you know has *written* here yet (groups.md §6), so this sits
     /// in the requests queue rather than the main list. Not a verdict: a
     /// contact's first message promotes it with nothing lost.

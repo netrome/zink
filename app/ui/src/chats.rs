@@ -35,7 +35,11 @@ pub(crate) fn ConversationRow(
         <div class="row" on:click=move |_| open(id.clone(), label.clone())>
             <div class="row-top">
                 <b>{conversation.label}</b>
-                <span class="dim">{when(conversation.last_timestamp_ms)}</span>
+                <span class="row-meta">
+                    {(conversation.unread > 0)
+                        .then(|| view! { <span class="badge">{conversation.unread}</span> })}
+                    <span class="dim">{when(conversation.last_timestamp_ms)}</span>
+                </span>
             </div>
             {(!conversation.snippet.is_empty())
                 .then(|| view! { <div class="dim snippet">{conversation.snippet}</div> })}

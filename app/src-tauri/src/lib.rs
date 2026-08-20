@@ -761,6 +761,7 @@ fn conversation_row(
         message_count: summary.message_count,
         last_timestamp_ms: summary.last_timestamp_ms,
         snippet,
+        unread: summary.unread,
         request: !summary.known,
     })
 }
@@ -898,6 +899,12 @@ async fn messages(
         .unwrap_or(0);
     let client = client(&app, &managed).await?;
     let conversation = parse_id(&conversation)?;
+    // Rendering is reading (S7): this command runs on open and on every
+    // arrival while the chat is showing, which is exactly the unread
+    // marker's truth. The side effect is this layer's policy — the client
+    // API stays an explicit `mark_conversation_read`. Best-effort: a
+    // failed marker never blocks the render.
+    let _ = client.mark_conversation_read(conversation);
     let contacts = client.contacts()?;
     let me = client.public_key();
     // Own sibling devices (D3c): label by their self-claimed name, and

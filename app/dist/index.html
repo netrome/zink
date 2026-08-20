@@ -118,7 +118,12 @@
     .row b { margin-right: .5rem; }
     /* Conversation rows (S5): label + relative time, preview beneath. */
     .row-top { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; }
+    .row-meta { display: flex; align-items: center; gap: .4rem; }
     .snippet { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Unread badge (S7): rows and the Chats tab. */
+    .badge { background: var(--accent); color: #fff; border-radius: 999px;
+             padding: 0 .45rem; font-size: var(--text-xs); font-weight: 600;
+             min-width: 1.2rem; text-align: center; display: inline-block; }
     .dim { color: var(--muted); font-size: var(--text-sm); }
     .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; padding: .4rem 0; }
     .day { text-align: center; color: var(--muted); font-size: var(--text-xs); margin-top: .3rem; }

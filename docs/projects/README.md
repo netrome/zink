@@ -16,7 +16,7 @@ Start a new effort as the next number: `docs/projects/N-name/`.
 | 3 | Ports & adapters — time + transport behind traits (client-side) | ✅ complete (2026-08-14) | [3-ports-and-adapters/tracker.md](./3-ports-and-adapters/tracker.md) |
 | 4 | Module split — carve `client.rs` (and `app/ui`), keep `Client` | ✅ complete (2026-08-15) | [4-module-split/tracker.md](./4-module-split/tracker.md) |
 | 5 | Relay lifecycle — scan, heal, and honest delivery state | ✅ complete (2026-08-16) | [5-relay-lifecycle/tracker.md](./5-relay-lifecycle/tracker.md) |
-| 6 | UI polish — people-picking, membership, everyday ergonomics | 📋 scoped (2026-08-15) | [6-ui-polish/tracker.md](./6-ui-polish/tracker.md) |
+| 6 | UI polish — people-picking, membership, everyday ergonomics | ✅ complete (2026-08-20) | [6-ui-polish/tracker.md](./6-ui-polish/tracker.md) |
 
 *Projects 1–2 closed the same day; project 2 ran parallel to the tail of
 project 1. Projects 3–4 are the post-MVP engineering-excellence iterations:

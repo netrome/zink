@@ -48,6 +48,10 @@ pub struct ConversationSummary {
     /// S6) — my lens, never transmitted. Whether it outranks the
     /// participant-derived label is the edge's policy.
     pub local_name: Option<String>,
+    /// Stored messages this device hasn't rendered yet (project 6 S7):
+    /// `message_count` minus the read marker. Local presentation state;
+    /// how to badge it is the edge's policy.
+    pub unread: usize,
 }
 
 /// A conversation's newest message, summary-shaped for list previews.
@@ -321,6 +325,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                         has_blobs: !envelope.core.blob_refs.is_empty(),
                     }),
                 local_name: self.state.conversation_name(id),
+                unread: envelopes.len().saturating_sub(self.state.read_count(id)),
             });
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_timestamp_ms));
@@ -342,6 +347,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// [`Self::set_conversation_name`].
     pub fn conversation_name(&self, conversation: MessageId) -> Option<String> {
         self.state.conversation_name(conversation)
+    }
+
+    /// Mark a conversation read: the unread baseline becomes everything
+    /// currently stored (project 6 S7). The edge calls this when it
+    /// renders the conversation — local presentation state, never
+    /// transmitted; nothing here is a receipt to anyone.
+    pub fn mark_conversation_read(&self, conversation: MessageId) -> Result<(), Error> {
+        let count = self.state.load_envelopes(conversation)?.len();
+        self.state.set_read_count(conversation, count)
     }
 
     /// Display labels for a participant set, deduped per *person*
@@ -482,6 +496,57 @@ mod tests {
         assert!(!last.has_blobs);
 
         let _ = std::fs::remove_dir_all(temp_root("preview"));
+    }
+
+    #[tokio::test]
+    async fn conversations__should_count_unread_until_marked_read() {
+        // Given: two stored messages, never rendered
+        let client = Client::open_or_create(&temp_key("unread", "viewer"))
+            .await
+            .expect("open");
+        let author = DeviceKey::from_seed([7; 32]);
+        let genesis = message(&author, vec![client.public_key()], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        let reply = message(
+            &author,
+            vec![client.public_key()],
+            Some(conversation),
+            vec![genesis.id()],
+            1,
+            1,
+        );
+        for envelope in [&genesis, &reply] {
+            client
+                .state
+                .store_envelope(conversation, envelope)
+                .expect("store");
+        }
+        assert_eq!(client.conversations().expect("list")[0].unread, 2);
+
+        // When: rendered (marked read)
+        client
+            .mark_conversation_read(conversation)
+            .expect("mark read");
+
+        // Then: nothing unread…
+        assert_eq!(client.conversations().expect("list")[0].unread, 0);
+
+        // …until the next arrival
+        let more = message(
+            &author,
+            vec![client.public_key()],
+            Some(conversation),
+            vec![reply.id()],
+            2,
+            2,
+        );
+        client
+            .state
+            .store_envelope(conversation, &more)
+            .expect("store");
+        assert_eq!(client.conversations().expect("list")[0].unread, 1);
+
+        let _ = std::fs::remove_dir_all(temp_root("unread"));
     }
 
     #[tokio::test]

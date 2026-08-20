@@ -1,7 +1,13 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 🔨 in progress — S1–S6 landed (2026-08-20).** Project **6-ui-polish**,
-> branch `better-selections`. Trigger: daily use — selecting people for a new
+> **Status: ✅ complete & archived (2026-08-20).** Project **6-ui-polish**,
+> branch `better-selections`, S1–S7 all landed. U1–U12 are dead; close floor:
+> 243 tests green (client lib ×3 consecutive, ~0.7 s), clippy clean in both
+> shells, wasm32 + `app/ui/build.sh` clean. Durable knowledge graduated to
+> ui-design-system.md (picker, draft chat, members panel, naming, unread) and
+> groups.md §3 (conversation identity vs the send-by-name index); §8's parked
+> items — shared conversation names first among them — are the seam the next
+> effort picks up. Original trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
 > (no scroll pinning, armed-forever danger buttons, a status line that never
@@ -335,12 +341,26 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   clobber lesson), save/clear via the new `name_conversation` command.
   Suite 242, clippy clean (workspace + desktop shell), wasm32 +
   `app/ui/build.sh` clean. Graduated: ui-design-system.md §3 sentence.
-- [ ] **S7 · Unread + close.** A local read marker per conversation (storage
+- [x] **S7 · Unread + close.** A local read marker per conversation (storage
   decided in-slice: app-layer store vs `zink-client` state — local-only
   either way, never transmitted, §4) → unread badge on Chats rows and the
   Chats tab. Re-measure the floor, graduate per §5, README row, archive.
   *Done when:* an arrival marks its row until opened, and the tracker is
   closed out.
+  *Landed 2026-08-20 (project close):* marker = a `read-count` sidecar in
+  `zink-client` state, beside `my-name` — a **count**, not a timestamp
+  (append-only store makes it monotone; a sender's chosen `timestamp_ms`
+  can't pre-read or pin-unread anything — the `first_seen_ms` lesson);
+  `unread` on `ConversationSummary` and the dto (+1 focused test);
+  **rendering is reading** — the `messages` command marks read, covering
+  both open and while-open arrivals, with the client API an explicit
+  `mark_conversation_read`; violet count badges on conversation rows and
+  the Chats tab (conversations-with-unread count). §5's ADR question
+  resolved at close: **no ADR** — S6/S7 storage follows the existing
+  local-presentation-state precedent (`dismissed.keys` sidecars), nothing
+  cross-cutting is new. Floor re-measured: 243 tests green (×3 stable),
+  clippy clean (workspace + desktop shell), wasm32 + `app/ui/build.sh`
+  clean. Graduated: ui-design-system.md §3 rows sentence.
 
 ## 7. Decisions log
 

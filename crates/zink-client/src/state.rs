@@ -158,6 +158,31 @@ impl ClientState {
         self.conversation_dir(conversation).join("my-name")
     }
 
+    /// How many of a conversation's stored messages had been rendered at
+    /// the last read (project 6 S7) — the unread marker's baseline. Local
+    /// presentation state, never transmitted, like `my-name` and
+    /// `dismissed.keys`. A **count**, not a timestamp: the store is
+    /// append-only, so the count is monotone — a sender's freely chosen
+    /// `timestamp_ms` can't mark their message pre-read or pin it unread
+    /// (the `first_seen_ms` lesson).
+    pub fn set_read_count(&self, conversation: MessageId, count: usize) -> Result<(), Error> {
+        let path = self.read_count_path(conversation);
+        create_parent(&path)?;
+        write_atomic(&path, count.to_string().as_bytes())
+            .map_err(|e| Error::Storage(format!("write read count: {e}")))
+    }
+
+    pub fn read_count(&self, conversation: MessageId) -> usize {
+        std::fs::read_to_string(self.read_count_path(conversation))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn read_count_path(&self, conversation: MessageId) -> PathBuf {
+        self.conversation_dir(conversation).join("read-count")
+    }
+
     /// All decodable envelopes stored under a conversation, unordered. A
     /// damaged file is skipped with a warning, never fatal: the DAG then
     /// honestly reports the hole as a missing parent / seq gap.

@@ -266,6 +266,18 @@ fn App() -> impl IntoView {
                 }
             >
                 "Chats"
+                {move || {
+                    // Conversations with something unrendered (S7).
+                    let unread = conversations
+                        .with(|inbox| {
+                            inbox
+                                .conversations
+                                .iter()
+                                .filter(|conversation| conversation.unread > 0)
+                                .count()
+                        });
+                    (unread > 0).then(|| view! { <span class="badge">{unread}</span> })
+                }}
             </button>
             <button
                 class:active=move || matches!(view.get(), View::People | View::Person { .. })
