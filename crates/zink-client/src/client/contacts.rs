@@ -1916,8 +1916,12 @@ mod tests {
         // contact entries and a conversation whose membership carries all
         // three keys via the phone's send-to-self.
         let wire = Loopback::new();
-        let (phone, _p_net, _p_clock) = loop_client("drill", "phone", &wire);
-        let (alice, _a_net, _a_clock) = loop_client("drill", "alice", &wire);
+        // "lostdevice", not "drill": the R7 migration drill (client.rs)
+        // owns that temp namespace, and a shared one means one test's
+        // cleanup deletes the other's live stores mid-run (the S5 flake
+        // class).
+        let (phone, _p_net, _p_clock) = loop_client("lostdevice", "phone", &wire);
+        let (alice, _a_net, _a_clock) = loop_client("lostdevice", "alice", &wire);
         // The phone's profile — `my_record` reads it (as `open_homed` wrote).
         phone
             .state
@@ -1996,7 +2000,7 @@ mod tests {
         // entry by name is the manual override
         assert!(alice.resolve_contact("mårten laptop").is_ok());
 
-        let _ = std::fs::remove_dir_all(temp_root("drill"));
+        let _ = std::fs::remove_dir_all(temp_root("lostdevice"));
     }
 
     #[tokio::test]

@@ -83,11 +83,14 @@ pub(crate) fn MeView(
                 list.push(value);
             }
         });
+        // Staging is an edit, whichever door it came through (typed or
+        // scanned) — without this, a background reload's prefill would
+        // silently drop a scanned-but-unsaved relay (the U8 clobber).
+        dirty.set(true);
     };
     let add_relay = move |_| {
         stage_relay(&new_relay.get_untracked());
         new_relay.set(String::new());
-        dirty.set(true);
     };
     let remove_relay = move |value: String| {
         relays.update(|list| list.retain(|relay| relay != &value));
