@@ -122,6 +122,42 @@ impl ClientState {
         self.conversation_dir(conversation).join("first-seen")
     }
 
+    /// My local name for a conversation (project 6 S6) — the petname's
+    /// conversation-shaped sibling: pure presentation policy, never
+    /// transmitted. `None` clears. Stored as **my lens** (`my-name`),
+    /// deliberately distinct from any future peer-*suggestion* store —
+    /// the anchor-vs-learned split the contact store uses.
+    pub fn set_conversation_name(
+        &self,
+        conversation: MessageId,
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let path = self.conversation_name_path(conversation);
+        match name {
+            None => {
+                let _ = std::fs::remove_file(&path);
+                Ok(())
+            }
+            Some(name) => {
+                create_parent(&path)?;
+                write_atomic(&path, name.as_bytes())
+                    .map_err(|e| Error::Storage(format!("write conversation name: {e}")))
+            }
+        }
+    }
+
+    pub fn conversation_name(&self, conversation: MessageId) -> Option<String> {
+        std::fs::read_to_string(self.conversation_name_path(conversation))
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    /// A sidecar beside `first-seen`, ignored by `load_envelopes` alike.
+    fn conversation_name_path(&self, conversation: MessageId) -> PathBuf {
+        self.conversation_dir(conversation).join("my-name")
+    }
+
     /// All decodable envelopes stored under a conversation, unordered. A
     /// damaged file is skipped with a warning, never fatal: the DAG then
     /// honestly reports the hole as a missing parent / seq gap.

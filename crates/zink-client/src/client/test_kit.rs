@@ -387,6 +387,7 @@ pub(crate) fn summary(id: u8, known: bool, first_seen_ms: u64) -> ConversationSu
         known,
         first_seen_ms,
         last: None,
+        local_name: None,
     }
 }
 

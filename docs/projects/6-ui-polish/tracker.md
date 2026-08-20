@@ -1,6 +1,6 @@
 # UI polish: people-picking, membership, and everyday ergonomics
 
-> **Status: 🔨 in progress — S1–S5 landed (2026-08-17).** Project **6-ui-polish**,
+> **Status: 🔨 in progress — S1–S6 landed (2026-08-20).** Project **6-ui-polish**,
 > branch `better-selections`. Trigger: daily use — selecting people for a new
 > chat is a wall of native checkboxes, adding someone to a running chat is a
 > permanently visible dropdown with a stuck value, and a dozen smaller edges
@@ -310,7 +310,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   vs who_is — renamed `newchat`); a sweep found no other cross-test
   namespace collision. Suite 241 ×5 green, clippy clean (workspace +
   desktop shell), wasm32 + `app/ui/build.sh` clean.
-- [ ] **S6 · Conversation names.** A local-only label per conversation — my
+- [x] **S6 · Conversation names.** A local-only label per conversation — my
   lens for a conversation, the conversation-shaped sibling of a petname.
   Set/edit from the S2 members panel; display precedence local name >
   joined-petnames default everywhere a label renders (rows, chat header,
@@ -323,6 +323,18 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
   (S1), three rows all labelled "alice, bob" are indistinguishable — naming
   is the organizing tool. *Done when:* two same-set conversations are
   tellable apart at a glance in every list.
+  *Landed 2026-08-20:* storage decided — `zink-client` state, a `my-name`
+  sidecar beside `first-seen` in the conversation dir (the "my-" is the
+  anchor class; peer suggestions would be a separate learned-class store,
+  no migration). `set_conversation_name` / `conversation_name` on the
+  client, `local_name` on `ConversationSummary` (+1 focused test);
+  precedence applied in the command layer only — `conversation_row` and
+  `conversation_members` share the rule, and notification titles become
+  "besties — alice" when a name exists (still local data only). Panel UI:
+  a name field prefilled on panel *open* (not on members reload — the S4
+  clobber lesson), save/clear via the new `name_conversation` command.
+  Suite 242, clippy clean (workspace + desktop shell), wasm32 +
+  `app/ui/build.sh` clean. Graduated: ui-design-system.md §3 sentence.
 - [ ] **S7 · Unread + close.** A local read marker per conversation (storage
   decided in-slice: app-layer store vs `zink-client` state — local-only
   either way, never transmitted, §4) → unread badge on Chats rows and the
@@ -338,7 +350,7 @@ suite green, floor held · `app/ui/build.sh` clean (wasm32 additionally if
 | "New chat" means a new conversation | **Decided (2026-08-15), reversing the scoping lean.** Conversations are genesis-identified; several with the same people is a *feature* (the Slack-channel shape), and the receive path already supports it — only local initiation collapsed (U12). The client gains an explicit fresh-genesis entry which the app's draft flow uses; `send`'s participant-set auto-threading survives as send-by-name (CLI) policy, revisited only on need (§8). Discovery replaces coercion: existing same-set conversations are *listed* (draft header, Person view), never silently reused. |
 | Person → conversations | A person's page shows the conversations they're in plus "start a new conversation" — a list, not a single "message" button, because plurality is the model (row above). (S2) |
 | Picker identity handle | Petnames at the app boundary, as today — the command layer resolves names (dto's stated contract); the picker is my-lens presentation. Keys stay out of the webview except at trust moments. |
-| Conversation names | Local-only label, never transmitted — client policy, the conversation-shaped sibling of a petname. Display precedence: local name > joined-petnames default. Storage decided in S6 under the same constraints as read markers. |
+| Conversation names | Local-only label, never transmitted — client policy, the conversation-shaped sibling of a petname. Display precedence: local name > joined-petnames default, applied in the command layer only (one rule for rows, header, notifications). **Storage (decided 2026-08-20): `zink-client` state** — a `my-name` sidecar in the conversation dir, beside `first-seen`; "my-" names the anchor class so the shared-names follow-on (§8) adds a learned-class store without migration. |
 | Enter-to-send | Fine-pointer devices only — `pointer: coarse` decides at composer creation; Shift+Enter stays a newline; touch keeps Enter = newline with the button as the send. Timestamps: day separators over per-message day prefixes — the list stays scannable, the cost is one dim line per day. (S3) |
 | Batch add | One `send_message` with the full `add` vec — one signed membership message. Per-person messages (today's shape) die with the `<select>`. (S2) |
 | Advanced-affordance home | The S2 members panel. Constraint: one tap away, never buried two levels — crossed-cues and introduce-devices are legitimate features, just not always-on. |

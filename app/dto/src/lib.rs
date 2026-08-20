@@ -287,9 +287,12 @@ pub struct WhoIsCandidate {
 /// change updates the title instead of leaving the open-time label stale.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ConversationMembers {
-    /// The chat-header label — other participants, petname-resolved,
-    /// "only me" when alone.
+    /// The chat-header label — my local name when set (S6), else other
+    /// participants petname-resolved, "only me" when alone.
     pub label: String,
+    /// My local name for this conversation, if set — prefills the panel's
+    /// rename field. Local lens, never transmitted.
+    pub local_name: Option<String>,
     /// Every current member: "you", then petnames / device names / short
     /// hex for keys nobody recognizes (the wild-key panel owns their flow).
     pub members: Vec<String>,

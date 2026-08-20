@@ -103,6 +103,36 @@ pub(crate) fn ChatView(
             }
         });
     };
+    // My name for this conversation (S6): prefilled when the panel opens —
+    // not on every members reload, which would clobber typing (the S4
+    // lesson).
+    let name_field = RwSignal::new(String::new());
+    let save_name = move |_| {
+        let name = name_field.get_untracked();
+        let id = conversation.get_value();
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                conversation: &'a str,
+                name: &'a str,
+            }
+            let args = Args {
+                conversation: &id,
+                name: &name,
+            };
+            match invoke::invoke::<serde::de::IgnoredAny>("name_conversation", &args).await {
+                Ok(_) => {
+                    ok(if name.trim().is_empty() {
+                        "name cleared — back to the people list"
+                    } else {
+                        "named — only you see it"
+                    });
+                    load_members(); // the header re-derives
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
 
     // Scroll pinning (S3): the list opens at the bottom and follows
     // arrivals while the reader is there; a reader who scrolled up is
@@ -406,7 +436,18 @@ pub(crate) fn ChatView(
             // the panel one tap away.
             <h3
                 class="tappable"
-                on:click=move |_| members_open.update(|open| *open = !*open)
+                on:click=move |_| {
+                    members_open.update(|open| *open = !*open);
+                    if members_open.get_untracked() {
+                        name_field
+                            .set(
+                                members
+                                    .get_untracked()
+                                    .and_then(|members| members.local_name)
+                                    .unwrap_or_default(),
+                            );
+                    }
+                }
             >
                 {move || title.get()}
                 " "
@@ -480,6 +521,22 @@ pub(crate) fn ChatView(
                                             .into_any()
                                     }
                                 }}
+                                // My name for this chat (S6) — local lens,
+                                // never transmitted; blank falls back to
+                                // the people list.
+                                <div class="dim">
+                                    "your name for this chat (only you see it)"
+                                </div>
+                                <input
+                                    placeholder="name this chat"
+                                    prop:value=move || name_field.get()
+                                    on:input=move |ev| name_field.set(event_target_value(&ev))
+                                />
+                                <div class="picks">
+                                    <button class="secondary" on:click=save_name>
+                                        "save name"
+                                    </button>
+                                </div>
                                 // Advanced, rare affordances — one tap away
                                 // instead of always-on (S2).
                                 {move || {

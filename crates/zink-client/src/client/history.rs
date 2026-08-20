@@ -44,6 +44,10 @@ pub struct ConversationSummary {
     /// a summary built without envelopes (test fixtures). Wording is the
     /// edge's policy.
     pub last: Option<LastMessage>,
+    /// My local name for this conversation, when I set one (project 6
+    /// S6) — my lens, never transmitted. Whether it outranks the
+    /// participant-derived label is the edge's policy.
+    pub local_name: Option<String>,
 }
 
 /// A conversation's newest message, summary-shaped for list previews.
@@ -316,10 +320,28 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                         body: envelope.open(&self.device).ok(),
                         has_blobs: !envelope.core.blob_refs.is_empty(),
                     }),
+                local_name: self.state.conversation_name(id),
             });
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_timestamp_ms));
         Ok(summaries)
+    }
+
+    /// Name a conversation — my lens, this device only, never transmitted
+    /// (project 6 S6; the petname's conversation-shaped sibling). `None`
+    /// clears back to whatever default the edge derives.
+    pub fn set_conversation_name(
+        &self,
+        conversation: MessageId,
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        self.state.set_conversation_name(conversation, name)
+    }
+
+    /// My local name for a conversation, if set — see
+    /// [`Self::set_conversation_name`].
+    pub fn conversation_name(&self, conversation: MessageId) -> Option<String> {
+        self.state.conversation_name(conversation)
     }
 
     /// Display labels for a participant set, deduped per *person*
@@ -460,6 +482,38 @@ mod tests {
         assert!(!last.has_blobs);
 
         let _ = std::fs::remove_dir_all(temp_root("preview"));
+    }
+
+    #[tokio::test]
+    async fn conversations__should_carry_my_local_name() {
+        // Given: a stored conversation
+        let client = Client::open_or_create(&temp_key("convname", "viewer"))
+            .await
+            .expect("open");
+        let author = DeviceKey::from_seed([6; 32]);
+        let genesis = message(&author, vec![client.public_key()], None, vec![], 0, 0);
+        let conversation = genesis.id();
+        client
+            .state
+            .store_envelope(conversation, &genesis)
+            .expect("store");
+
+        // When: naming it (my lens, local only)
+        client
+            .set_conversation_name(conversation, Some("besties"))
+            .expect("name");
+
+        // Then: the summary carries the name…
+        let summaries = client.conversations().expect("list");
+        assert_eq!(summaries[0].local_name.as_deref(), Some("besties"));
+
+        // …and clearing falls back to none
+        client
+            .set_conversation_name(conversation, None)
+            .expect("clear");
+        assert_eq!(client.conversations().expect("list")[0].local_name, None);
+
+        let _ = std::fs::remove_dir_all(temp_root("convname"));
     }
 
     #[tokio::test]

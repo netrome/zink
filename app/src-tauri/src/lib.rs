@@ -174,10 +174,22 @@ fn notify_arrivals(
         } else {
             text.chars().take(120).collect()
         };
+        // Title precedence (S6): a locally named conversation names the
+        // notification too — still local data only, nothing from a push.
+        let sender = label(&contacts, &message.envelope.core.sender);
+        let conversation = message
+            .envelope
+            .core
+            .conversation
+            .unwrap_or_else(|| message.envelope.id());
+        let title = match client.conversation_name(conversation) {
+            Some(name) => format!("{name} — {sender}"),
+            None => sender,
+        };
         let _ = app
             .notification()
             .builder()
-            .title(label(&contacts, &message.envelope.core.sender))
+            .title(title)
             .body(preview)
             .show();
     }
@@ -701,6 +713,13 @@ fn conversation_row(
     summary: &zink_client::ConversationSummary,
 ) -> Result<Conversation, String> {
     let others = other_labels(client, own, &summary.participants)?;
+    // Label precedence (S6): my local name, else the participant default —
+    // one conversation with a name of its own is what tells three same-set
+    // chats apart.
+    let label = summary
+        .local_name
+        .clone()
+        .unwrap_or_else(|| conversation_label(&others));
     // The row preview (S5): "who: what" — client-side policy over the
     // local plaintext store; nothing new transits a relay.
     let snippet = match &summary.last {
@@ -738,7 +757,7 @@ fn conversation_row(
     };
     Ok(Conversation {
         id: hex::encode(&summary.id.0),
-        label: conversation_label(&others),
+        label,
         message_count: summary.message_count,
         last_timestamp_ms: summary.last_timestamp_ms,
         snippet,
@@ -769,11 +788,34 @@ async fn conversation_members(
         .filter(|(_, record)| record.keys.iter().any(|key| membership.contains(key)))
         .map(|(petname, _)| petname)
         .collect();
+    // Label precedence (S6): my local name outranks the participant
+    // default, here exactly as in the rows — one rule, or headers and
+    // lists would disagree.
+    let local_name = client.conversation_name(id);
     Ok(ConversationMembers {
-        label: conversation_label(&others),
+        label: local_name
+            .clone()
+            .unwrap_or_else(|| conversation_label(&others)),
+        local_name,
         members,
         petnames,
     })
+}
+
+/// Set or clear my local name for a conversation (project 6 S6) — my
+/// lens, this device only, never transmitted. Blank clears.
+#[tauri::command]
+async fn name_conversation(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    conversation: String,
+    name: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    let id = parse_id(&conversation)?;
+    let name = name.trim();
+    client.set_conversation_name(id, (!name.is_empty()).then_some(name))?;
+    Ok(())
 }
 
 /// The conversations a person is in (project 6 S2): membership intersects
@@ -1375,6 +1417,7 @@ pub fn run() {
             conversations_with,
             conversation_members,
             person_conversations,
+            name_conversation,
             messages,
             send_message,
             fetch_blob,

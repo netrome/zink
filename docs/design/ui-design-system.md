@@ -153,10 +153,13 @@ structurally).
   draft reuses the one composer, so a first message can do anything a reply
   can. Inside a chat, the header is tappable → a **members panel**: current
   membership (unknown keys as honest short hex), adding people via the picker
-  (one batched membership message), and the advanced affordances
-  (introduce-devices, concurrency cues) — one tap away, never always-on. No
-  permanent compose form, no refresh button (live delivery + the 60 s
-  backstop poll cover it; a visible refresh button only sows doubt).
+  (one batched membership message), **naming the conversation** — a local
+  label, my lens like a petname, never transmitted; it outranks the
+  joined-petnames default in every list, the header, and notification titles,
+  which is what tells several same-set conversations apart — and the advanced
+  affordances (introduce-devices, concurrency cues) — one tap away, never
+  always-on. No permanent compose form, no refresh button (live delivery +
+  the 60 s backstop poll cover it; a visible refresh button only sows doubt).
 - **People** — *"who do I know?"* Just the contact list + a **+** (scan / paste
   / pair as focused sub-flows). Tapping a person opens a **detail screen** built
   as the §1 lens: my lens (petname, avatar, their device keys) · their self-claim ·
