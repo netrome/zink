@@ -29,6 +29,14 @@ vars of §3.3/§3.5). The `default` and `desktop` shells work on both
 entry downloads the SDK (~1.5 GB); `cargo tauri android` then pulls Gradle
 deps over the network as usual.
 
+On a **non-NixOS host** (Nix installed on Ubuntu/TUXEDO/etc.), Nix's
+glvnd/Mesa look for GPU drivers under `/run/opengl-driver` — a NixOS-only
+path — so the desktop app would abort at startup with `Could not create
+default EGL display: EGL_BAD_PARAMETER`. The `desktop` shell detects the
+missing path and points EGL/GBM at the nixpkgs Mesa instead; nothing to do by
+hand. (Note the shells are layered by *purpose*, not supersets: `.#android`
+does not include the desktop GTK libs.)
+
 If you're not on Nix, follow the manual sections below instead.
 
 ## 1. Core (all crates, all tests)

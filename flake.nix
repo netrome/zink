@@ -127,6 +127,18 @@
             # app/ui compiles to wasm too, so it needs the same clang bridge.
             env = wasmEnv;
             shellHook = ''
+              # Non-NixOS hosts: Nix's glvnd/Mesa/gbm look for GPU drivers under
+              # /run/opengl-driver, a NixOS-only path. Without these, WebKitGTK
+              # aborts at startup ("Could not create default EGL display:
+              # EGL_BAD_PARAMETER"). Point EGL + GBM at the nixpkgs Mesa instead,
+              # which matches the rest of the shell's libraries. On NixOS the
+              # path exists and the system drivers (incl. NVIDIA) take over.
+              if [ ! -e /run/opengl-driver ]; then
+                export __EGL_VENDOR_LIBRARY_FILENAMES="${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
+                export LIBGL_DRIVERS_PATH="${pkgs.mesa}/lib/dri"
+                export GBM_BACKENDS_PATH="${pkgs.mesa}/lib/gbm"
+              fi
+
               echo "zink desktop shell — webkit2gtk + tauri-cli ready"
               echo "  (cd app/src-tauri && cargo tauri dev)"
             '';
