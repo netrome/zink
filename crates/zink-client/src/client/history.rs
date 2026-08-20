@@ -358,36 +358,44 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         self.state.set_read_count(conversation, count)
     }
 
-    /// Display labels for a participant set, deduped per *person*
-    /// (multi-device.md §7): keys held by one contact entry collapse to a
-    /// single petname — a two-device contact renders once in conversation
-    /// labels. A recognized own device labels with its self-claimed name
-    /// (D3c); unknown keys stay distinct, as honest short hex. Order
-    /// follows the input; a cluster's label sits at its first key.
+    /// Display labels for a participant set, deduped per *person* (S2,
+    /// multi-device.md §7): keys resolve through the person layer, so a
+    /// contact's devices — one multi-key entry or several merged entries —
+    /// collapse to the one person label. A recognized own device labels
+    /// with its self-claimed name (D3c); unknown keys stay distinct, as
+    /// honest short hex. Order follows the input; a cluster's label sits
+    /// at its first key.
     pub fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
-        let contacts = self.state.contacts()?;
+        let persons = self.persons()?;
         let devices = self.state.recognized_devices();
         let mut labels = Vec::new();
-        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut seen_persons: BTreeSet<String> = BTreeSet::new();
+        let mut seen_labels: BTreeSet<String> = BTreeSet::new();
         for key in keys {
-            let label = contacts
+            let person = persons.iter().find(|person| {
+                person
+                    .members
+                    .iter()
+                    .any(|(_, record)| record.keys.contains(key))
+            });
+            if let Some(person) = person {
+                if seen_persons.insert(person.id.clone()) {
+                    labels.push(person.label.clone());
+                }
+                continue;
+            }
+            let device = devices
                 .iter()
-                .find(|(_, record)| record.keys.contains(key))
-                .map(|(petname, _)| petname.clone())
-                .or_else(|| {
-                    devices
-                        .iter()
-                        .find(|(device_key, _)| device_key == key)
-                        .map(|(_, record)| {
-                            record
-                                .self_claimed_name()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| hex::encode(&key.0[..4]))
-                        })
+                .find(|(device_key, _)| device_key == key)
+                .map(|(_, record)| {
+                    record
+                        .self_claimed_name()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| hex::encode(&key.0[..4]))
                 });
-            match label {
+            match device {
                 Some(label) => {
-                    if seen.insert(label.clone()) {
+                    if seen_labels.insert(label.clone()) {
                         labels.push(label);
                     }
                 }

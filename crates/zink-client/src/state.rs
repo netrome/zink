@@ -764,6 +764,9 @@ impl ClientState {
             let stem = self.contact_stem(old_key);
             let _ = std::fs::remove_file(stem.with_extension("record"));
             let _ = std::fs::remove_file(stem.with_extension("name"));
+            // A re-keyed entry keeps its clustering (S2): person members
+            // reference the stem, so the stem move must follow.
+            self.move_person_member(old_key, new_key);
         }
         Ok(())
     }
@@ -795,6 +798,91 @@ impl ClientState {
 
     pub fn clear_relay_override(&self, key: &PublicKey) {
         let _ = std::fs::remove_file(self.contact_stem(key).with_extension("relays"));
+    }
+
+    /// Persist a person entry (project 7 S2): the local lens grouping
+    /// contact entries under one label — `persons/<id>` holds the label
+    /// line, then one member stem key (hex) per line. Ids are an opaque
+    /// local counter (`next_person_id`), never derived from member keys:
+    /// clusters merge, split, and rename, and a content-derived id would
+    /// silently re-home. Never on the wire.
+    pub fn save_person(&self, id: &str, label: &str, members: &[PublicKey]) -> Result<(), Error> {
+        let path = self.root.join("persons").join(id);
+        create_parent(&path)?;
+        let mut content = String::from(label);
+        for member in members {
+            content.push('\n');
+            content.push_str(&hex(&member.0));
+        }
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write person: {e}")))
+    }
+
+    pub fn remove_person(&self, id: &str) {
+        let _ = std::fs::remove_file(self.root.join("persons").join(id));
+    }
+
+    /// Persisted person entries as `(id, label, member stem keys)`. Damaged
+    /// entries are skipped with a warning, like `contacts`; membership
+    /// against the live contact store is the client's read-time concern.
+    pub fn persons(&self) -> Vec<(String, String, Vec<PublicKey>)> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("persons")) else {
+            return Vec::new();
+        };
+        let mut persons = Vec::new();
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if id.starts_with('.') {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                tracing::warn!(?id, "skipping unreadable person entry");
+                continue;
+            };
+            let mut lines = content.lines();
+            let Some(label) = lines
+                .next()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+            else {
+                tracing::warn!(?id, "skipping person entry with no label");
+                continue;
+            };
+            let members: Vec<PublicKey> = lines
+                .filter(|line| !line.trim().is_empty())
+                .filter_map(|line| crate::hex::parse32(line.trim()).ok().map(PublicKey))
+                .collect();
+            persons.push((id, label.to_string(), members));
+        }
+        persons.sort_by(|a, b| a.0.cmp(&b.0));
+        persons
+    }
+
+    /// Mint the next opaque person id (`persons/.next`, a plain counter).
+    pub fn next_person_id(&self) -> Result<String, Error> {
+        let path = self.root.join("persons").join(".next");
+        let next: u64 = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1);
+        create_parent(&path)?;
+        write_atomic(&path, (next + 1).to_string().as_bytes())
+            .map_err(|e| Error::Storage(format!("write person counter: {e}")))?;
+        Ok(format!("p{next}"))
+    }
+
+    /// Re-point person memberships from one member stem to another — the
+    /// record-update companion (`replace_contact`): a re-keyed entry must
+    /// stay exactly as clustered as it was (S2's no-dangle rule).
+    fn move_person_member(&self, old: &PublicKey, new: &PublicKey) {
+        for (id, label, mut members) in self.persons() {
+            if let Some(slot) = members.iter_mut().find(|member| *member == old) {
+                *slot = *new;
+                if let Err(error) = self.save_person(&id, &label, &members) {
+                    tracing::warn!(%error, id, "could not re-point a person membership");
+                }
+            }
+        }
     }
 
     /// All stored contacts as `(petname, record)`, petname-sorted.

@@ -47,6 +47,10 @@ async fn main() -> ExitCode {
         Some("contact-add") => contact_add(&args[1..]).await,
         Some("contact-update") => contact_update(&args[1..]).await,
         Some("contacts") => contacts(&args[1..]).await,
+        Some("persons") => persons(&args[1..]).await,
+        Some("person-merge") => person_merge(&args[1..]).await,
+        Some("person-split") => person_split(&args[1..]).await,
+        Some("person-rename") => person_rename(&args[1..]).await,
         Some("recognize") => recognize(&args[1..]).await,
         Some("devices") => devices(&args[1..]).await,
         Some("rewrap") => rewrap(&args[1..]).await,
@@ -82,6 +86,10 @@ const USAGE: &str = "usage:
   zink-cli contact-add --key <file> [--name <petname>] <ZINK:...>
   zink-cli contact-update --key <file> <ZINK:...>
   zink-cli contacts --key <file>
+  zink-cli persons --key <file>
+  zink-cli person-merge --key <file> <into-label> <from-label>
+  zink-cli person-split --key <file> <member-petname>
+  zink-cli person-rename --key <file> <label> <new-label>
   zink-cli recognize --key <file> <ZINK:...>
   zink-cli devices --key <file>
   zink-cli rewrap --key <file>
@@ -208,6 +216,77 @@ async fn contact_update(args: &[String]) -> Result<(), String> {
     let client = open_client(&flags).await?;
     let petname = client.update_contact(&record)?;
     println!("updated contact {petname:?}");
+    client.close().await;
+    Ok(())
+}
+
+/// List person entries (S2): the local lens over clusters — each label with
+/// its member device entries. What send-by-name resolves.
+async fn persons(args: &[String]) -> Result<(), String> {
+    let (flags, _) = parse_flags(args)?;
+    let client = open_client(&flags).await?;
+    let persons = client.persons()?;
+    if persons.is_empty() {
+        println!("no persons");
+    }
+    for person in persons {
+        println!("{}", person.label);
+        for (petname, record) in &person.members {
+            let label = record
+                .self_device_label()
+                .map(|label| format!(" · {label}"))
+                .unwrap_or_default();
+            let key = record
+                .keys
+                .first()
+                .map(|key| hex::encode(&key.0)[..8].to_string())
+                .unwrap_or_default();
+            println!("  {petname}{label}  ({key})");
+        }
+    }
+    client.close().await;
+    Ok(())
+}
+
+/// Merge one person into another — the explicit clustering act (S2).
+async fn person_merge(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [into, from] = positionals.as_slice() else {
+        return Err(format!("expected <into-label> <from-label>\n{USAGE}"));
+    };
+    let client = open_client(&flags).await?;
+    let merged = client.merge_persons(into, from)?;
+    println!(
+        "{} now spans {} device(s)",
+        merged.label,
+        merged.members.len()
+    );
+    client.close().await;
+    Ok(())
+}
+
+/// Split a member entry back out to its own person (S2).
+async fn person_split(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [member] = positionals.as_slice() else {
+        return Err(format!("expected <member-petname>\n{USAGE}"));
+    };
+    let client = open_client(&flags).await?;
+    let split = client.split_person(member)?;
+    println!("{} is its own person again", split.label);
+    client.close().await;
+    Ok(())
+}
+
+/// Rename a person's addressing label (S2) — my lens, local only.
+async fn person_rename(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    let [current, new] = positionals.as_slice() else {
+        return Err(format!("expected <label> <new-label>\n{USAGE}"));
+    };
+    let client = open_client(&flags).await?;
+    client.rename_person(current, new)?;
+    println!("renamed {current:?} to {new:?}");
     client.close().await;
     Ok(())
 }
@@ -341,17 +420,17 @@ async fn contacts(args: &[String]) -> Result<(), String> {
 async fn send(args: &[String]) -> Result<(), String> {
     let (flags, positionals) = parse_flags(args)?;
     let client = open_client(&flags).await?;
-    let contacts: Vec<Contact> = values(&flags, "--to")
-        .iter()
-        .map(|spec| {
-            // '@' means the raw pubkey@relay escape hatch; else a petname.
-            if spec.contains('@') {
-                Contact::parse(spec)
-            } else {
-                client.resolve_contact(spec)
-            }
-        })
-        .collect::<Result<_, _>>()?;
+    let mut contacts: Vec<Contact> = Vec::new();
+    for spec in values(&flags, "--to") {
+        // '@' means the raw pubkey@relay escape hatch; else a person label
+        // or entry petname (S2: person resolves the whole cluster, one
+        // Contact per member device; a petname addresses that device alone).
+        if spec.contains('@') {
+            contacts.push(Contact::parse(&spec)?);
+        } else {
+            contacts.extend(client.resolve_person(&spec)?);
+        }
+    }
     if contacts.is_empty() {
         return Err(format!("at least one --to required\n{USAGE}"));
     }
@@ -621,10 +700,11 @@ async fn reply(args: &[String]) -> Result<(), String> {
         );
     }
     // --add grows the recipient set (groups.md §2): the signed recipients
-    // list is the membership announcement — no other mechanism exists.
+    // list is the membership announcement — no other mechanism exists. A
+    // person label adds the whole cluster; a petname one device (S2).
     let mut contacts = resolved.contacts;
-    for petname in values(&flags, "--add") {
-        contacts.push(client.resolve_contact(&petname)?);
+    for name in values(&flags, "--add") {
+        contacts.extend(client.resolve_person(&name)?);
     }
     if contacts.iter().all(|contact| contact.relays.is_empty()) {
         return Err("no routable participants — add or learn their records first".into());

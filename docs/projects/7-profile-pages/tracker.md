@@ -64,12 +64,27 @@ per-device detail. Around it, the model work that keeps it honest:
   path smears. SPEC's header now states its living-document status.
   Prefill composition ("Mårten · laptop") is rendering — moved to S3 with
   the onboarding split.)*
-- **S2 · Person entries.** Local store, overlap resolution, label
-  collision, send-by-name over clusters, `participant_labels` reads
-  person entries. Migration: one person per existing contact entry;
-  mutual-link evidence produces clustering offers, never silent merges.
-  *Done when:* merge / split / rename dangle nothing; adversarial overlap
-  still surfaces; a send to a two-device person reaches both keys.
+- **S2 · Person entries — done (2026-08-20).** Local store, overlap
+  resolution, label collision, send-by-name over clusters,
+  `participant_labels` reads person entries. Migration: one person per
+  existing contact entry; mutual-link evidence produces clustering
+  offers, never silent merges. *Done when:* merge / split / rename dangle
+  nothing; adversarial overlap still surfaces; a send to a two-device
+  person reaches both keys.
+  *(As built: `persons/<id>` files + a counter — ids opaque, never
+  key-derived; reads are pure: unclaimed contact entries render as
+  virtual singletons (label = petname — the lazy migration) and persist
+  only at their first act. `resolve_person` resolves label-then-petname,
+  one `Contact` per member entry; `resolve_relays` gained the
+  publishing-device guard and the send path binds a Contact's relays to
+  its first key only — S1's deferred enforcement, landed (SPEC §11 row
+  updated). Collision checks are one `ensure_label_free` across both
+  namespaces, own-member shadowing exempt; `replace_contact` re-points
+  person members on a stem move (the no-dangle rule). CLI: `persons`,
+  `person-merge`, `person-split`, `person-rename`; `send --to` / `reply
+  --add` resolve persons. Clustering offers needed no new seam —
+  `device_evidence` (D3c) stays the evidence, `merge_persons` is the
+  accept. The person-level avatar override is rendering and rides S3.)*
 - **S3 · The page.** Header (avatar, label, message / vouch — or add /
   ignore / who-is for a stranger), the lens switcher, device rows (label,
   self-claim, link tier with direction, disavowal warnings, that device's

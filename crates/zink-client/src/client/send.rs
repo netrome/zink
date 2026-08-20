@@ -360,15 +360,26 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             seq,
             envelope: sealed.envelope,
             blobs: sealed.blobs,
+            // Relays bind to the publishing device (SPEC §3.6): a
+            // Contact's relays were resolved for its first key, so only
+            // that key is hosted there. Extra listed keys stay sealed
+            // recipients — membership is honest — but are deposited for
+            // only where their own records say (the unroutable-members
+            // rule, not this entry's smear).
             hosted: contacts
                 .iter()
                 .chain(device_contacts.iter())
                 .flat_map(|contact| {
-                    contact
-                        .keys
-                        .iter()
-                        .map(|&key| (key, contact.relays.clone()))
-                        .collect::<Vec<_>>()
+                    contact.keys.iter().enumerate().map(|(i, &key)| {
+                        (
+                            key,
+                            if i == 0 {
+                                contact.relays.clone()
+                            } else {
+                                vec![]
+                            },
+                        )
+                    })
                 })
                 .collect(),
             relays,

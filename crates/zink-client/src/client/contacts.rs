@@ -239,12 +239,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             })?;
         let contacts = self.state.contacts()?;
         match overlapping(&contacts, record).as_slice() {
-            // A brand-new person; the petname must still resolve to one
-            // person (send-by-name stays unambiguous).
+            // A brand-new person; the name must stay unique across BOTH
+            // namespaces — person labels and entry petnames — so
+            // send-by-name stays unambiguous (S2: the collision rule lives
+            // at the person layer).
             [] => {
-                if contacts.iter().any(|(name, _)| *name == petname) {
-                    return Err(Error::PetnameCollision(petname));
-                }
+                self.ensure_label_free(&petname, None)?;
                 self.state.save_contact(&petname, record)?;
             }
             [(existing_name, existing)] => {
@@ -333,9 +333,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             .find(|(name, _)| name == current)
             .map(|(_, record)| record.clone())
             .ok_or_else(|| Error::NotAContact(format!("no contact named {current:?}")))?;
-        if contacts.iter().any(|(name, _)| name == new) {
-            return Err(Error::PetnameCollision(new.to_string()));
-        }
+        // Unique across both namespaces, exempting the entry's own person:
+        // shadowing our own person's label is unambiguous (the person layer
+        // resolves first), anyone else's is a collision.
+        let own_person = self
+            .persons()?
+            .into_iter()
+            .find(|person| person.members.iter().any(|(name, _)| name == current));
+        self.ensure_label_free(new, own_person.as_ref())?;
         self.state.save_contact(new, &record)
     }
 
@@ -603,7 +608,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     }
 
     /// Keys from the stored record; relays resolved at read time (§7).
-    fn contact_from(&self, record: &ContactRecord) -> Contact {
+    pub(super) fn contact_from(&self, record: &ContactRecord) -> Contact {
         let relays = match record.keys.first() {
             Some(&key) => self.effective_relays(key, Some(record)),
             None => record.relays.clone(),
@@ -641,6 +646,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         key: PublicKey,
         stored: Option<&ContactRecord>,
     ) -> Option<RelayResolution> {
+        // Relays bind to the publishing device (SPEC §3.6): a record's
+        // relays count only for its own — first — key. Keys a record merely
+        // lists are identity evidence, never addressing; they resolve
+        // through their own records or stay honestly unroutable. The
+        // override rides the same rule: it patches the entry's device.
+        let publishes = |record: &&ContactRecord| record.keys.first() == Some(&key);
+        let stored = stored.filter(publishes);
         if let Some(relays) = self.state.relay_override(stored) {
             return Some(RelayResolution {
                 relays,
@@ -652,6 +664,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             learned
                 .iter()
                 .filter(|entry| (entry.responder == key) == from_subject)
+                .filter(|entry| publishes(&&entry.record))
                 .filter(|entry| !entry.record.relays.is_empty())
                 .max_by_key(|entry| entry.received_ms)
                 .map(|entry| (entry.record.relays.clone(), entry.received_ms))
@@ -1307,6 +1320,33 @@ mod tests {
         assert_eq!(status.relays[0].owed_since_ms, Some(5));
 
         let _ = std::fs::remove_dir_all(temp_root("relay-status"));
+    }
+
+    #[tokio::test]
+    async fn effective_relays__should_bind_a_records_relays_to_its_first_key_only() {
+        // Given: one record leading with bob's key and merely listing a
+        // sibling's — relays bind to the publishing device (SPEC §3.6)
+        let a = Client::open_or_create(&temp_key("relay-bind", "a"))
+            .await
+            .expect("open");
+        let bob = DeviceKey::from_seed([55; 32]);
+        let sibling = DeviceKey::from_seed([56; 32]);
+        let record = ContactRecord::new(
+            vec![bob.public(), sibling.public()],
+            vec![],
+            mailbox_only("bb@203.0.113.1:1"),
+        );
+
+        // When / Then: the publisher resolves, the listed key does not —
+        // it is identity evidence, honestly unroutable until its own
+        // record is learned
+        assert_eq!(
+            a.effective_relays(bob.public(), Some(&record)),
+            mailbox_only("bb@203.0.113.1:1")
+        );
+        assert_eq!(a.effective_relays(sibling.public(), Some(&record)), vec![]);
+
+        let _ = std::fs::remove_dir_all(temp_root("relay-bind"));
     }
 
     #[tokio::test]

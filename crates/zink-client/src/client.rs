@@ -21,6 +21,7 @@ mod backfill;
 mod contacts;
 mod history;
 mod outbox;
+mod persons;
 mod profile;
 mod recv;
 mod send;
@@ -34,6 +35,7 @@ pub use history::{
     ConversationSummary, HistoryMessage, Inbox, LastMessage, MAX_MESSAGE_REQUESTS, triage,
 };
 pub use outbox::{FlushReport, OUTBOX_GIVE_UP_MS};
+pub use persons::PersonEntry;
 pub use profile::AvatarReceipt;
 pub use recv::{Received, RecvReport, RelayFailure};
 pub use send::{ReplyContacts, SendReceipt, StagedSend};
