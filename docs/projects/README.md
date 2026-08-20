@@ -19,6 +19,7 @@ Start a new effort as the next number: `docs/projects/N-name/`.
 | 6 | UI polish — people-picking, membership, everyday ergonomics | ✅ complete (2026-08-20) | [6-ui-polish/tracker.md](./6-ui-polish/tracker.md) |
 | 7 | Profile pages — one person page over a key cluster | 🚧 in progress (scoped 2026-08-20) | [7-profile-pages/tracker.md](./7-profile-pages/tracker.md) |
 | 8 | Shared conversation names — my lens travels, theirs renders | 💡 proposed (2026-08-20) | [8-shared-conversation-names/tracker.md](./8-shared-conversation-names/tracker.md) |
+| 9 | Storage port — state I/O joins time and transport | 💡 proposed (2026-08-20) | [9-storage-port/tracker.md](./9-storage-port/tracker.md) |
 
 *Projects 1–2 closed the same day; project 2 ran parallel to the tail of
 project 1. Projects 3–4 are the post-MVP engineering-excellence iterations:
