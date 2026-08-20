@@ -28,7 +28,8 @@ per-device detail. Around it, the model work that keeps it honest:
 | Addressing | Send-by-name resolves person label → all member keys; the name-collision check moves to person labels. This is the display-vs-addressing split parked in multi-device.md §7. |
 | Person/device names on the wire | New claim kind `Claim::DeviceLabel(String)`; `Name` becomes the person name. Each supersedes independently per claim kind. Drift across devices renders honestly (revision + agreement). SPEC §3.2 proposal, appended-variant norm. |
 | Relays render per device | Shown per device row, from that device's own record — never as a person-level list. S1 also settles whether a multi-key record's relays should apply to non-publishing keys at all (`send.rs` currently smears one relay set across all listed keys). |
-| Lens toggle | *My view / what they claim / through friends* — the per-attester lens (web-of-trust.md §6): shows what a friend chose to publish, never their private petnames; display-only, addressing stays mine. Friends' avatars = evaluating third-party `Avatar` claims in endorsements (no version bump). |
+| Lens toggle | *My view / what they claim / through friends* — the per-attester lens (web-of-trust.md §6): shows what a friend chose to publish, never their private petnames; display-only, addressing stays mine. Friends' avatars = evaluating third-party `Avatar` claims in endorsements (no version bump). Lenses render from held data; each friend's lens offers an explicit scoped ask — `who_is_among(subject, [friend])` — with copy saying plainly that the friend learns you asked. |
+| Queries from the page | A query reveals interest to whoever is asked (who-is-this.md §5) — that, not data integrity, is its cost (nothing is ever overwritten; stores append, resolution is read-time). So: a contact's page auto-runs the existing rate-limited **subject-refresh** on open (asking the subject about themselves reveals nothing new); third parties are asked only per explicit, per-friend act (the lens ask); a stranger's page queries no one on open — asking contacts broadcasts "X contacted me", asking the sender is a liveness receipt to a possible spammer. The ask-everyone who-is button keeps its one job: the stranger bootstrap. |
 | Own-device lens sync | Lens edits are sealed ops in a conversation whose participants are my own devices. Existing machinery does the rest: deposits give offline convergence; send-to-self + sync + re-wrap bootstrap a new device. No protocol change — the encoding lives in the sealed body; relays see ciphertext. |
 | Adoption policy | Sibling lens ops auto-adopt by default; manual edits always win; concurrent conflicts surface with provenance ("your phone said X, your laptop said Y"). Nothing arbitrates. |
 | Contact adds are offers | A sibling's contact-add renders as an offer ("your phone added X — add them here too?"); only the explicit accept writes the contact store, so "the contact store is never modified by network input" holds verbatim. A compromised sibling can already read everything; the offer gates the write surface — the sealing/relay trust anchor. Repudiating a sibling voids its pending offers. |
@@ -37,8 +38,6 @@ per-device detail. Around it, the model work that keeps it honest:
 
 ## Constraints fixed by canon
 
-- Opening the page never auto-queries — who-is stays a manual button
-  (who-is-this.md §5).
 - Recognize-as-device is never one tap: pair-back goes through the
   fingerprint confirm (multi-device.md §3).
 - Cluster-first (ui-design-system.md §1) — nothing re-bakes
@@ -64,9 +63,11 @@ per-device detail. Around it, the model work that keeps it honest:
 - **S3 · The page.** Header (avatar, label, message / vouch — or add /
   ignore / who-is for a stranger), the lens switcher, device rows (label,
   self-claim, link tier with direction, disavowal warnings, that device's
-  relays + freshness, fingerprint at trust moments, pair-back). *Done
-  when:* live — a stranger's request previews and add completes from the
-  page; a two-device contact shows distinct labels and relays.
+  relays + freshness, fingerprint at trust moments, pair-back); page-open
+  subject-refresh for contacts; the per-friend lens ask. *Done when:*
+  live — a stranger's request previews and add completes from the page
+  with no query fired on open; a two-device contact shows distinct labels
+  and relays; asking one friend dials only that friend.
 - **S4 · Tappable surfaces.** Sender lines, member rows, wild-key rows
   navigate to the page; the wild-key panel shrinks to a link; the R3
   stuck-cue tap target resolves from membership. *Done when:* every
@@ -101,6 +102,8 @@ per-device detail. Around it, the model work that keeps it honest:
 ## Doc touchpoints as slices land
 
 - SPEC §3.2 + §11: `DeviceLabel`, multi-key relay resolution (S1).
+- who-is-this.md §5: the page-open subject-refresh joins the carve-out
+  list; the per-friend scoped ask noted beside the manual button (S3).
 - multi-device.md §7: the display-vs-addressing separation cashes in (S2).
 - ui-design-system.md §1/§3: person entries in the view-model; the page
   IA (S3/S4).
