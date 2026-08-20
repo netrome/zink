@@ -30,7 +30,7 @@ my phone are the clusters on my laptop *by default, never by assumption*.
 | Person/device names on the wire | SPEC §3.2 proposal: new appended claim kind **`Claim::DeviceLabel(String)`** — self-claimed `Name` becomes the person name ("Mårten"), `DeviceLabel` the qualifier ("laptop"). Supersession already scopes per claim kind, so they bump independently. Person-name drift across devices (profiles deliberately don't sync) renders honestly by revision + agreement. Pre-deployment appended-variant norm; onboarding asks two calm questions (your name / this device); pairing prefills the person name from the sibling's claim, the device label stays fresh. |
 | Relays render per device | The page shows relays **per device row**, sourced from that device's own record — never a person-level relay list. SPEC scoping question rides S1: whether a multi-key record's relay set should apply to non-publishing keys at all (`send.rs` currently maps `(key, record.relays)` for every listed key — advisory robustness by design, but it is the one spot that smears one relay set across a key set). |
 | Lens toggle | *My view / what they claim / through friends* — the per-attester lens web-of-trust.md §6 parked, with its boundaries intact: a lens shows what a friend **tells** you (their published vouches), never their private petnames; lenses are display-only — addressing always resolves through my store. Friends' **avatars** = evaluating third-party `Avatar` claims in endorsements — an evaluation change, not a version bump (web-of-trust.md §1). |
-| Own-device lens sync | Lens edits are **sealed ops riding a conversation whose participants are my own devices** — project 7's carrier decision turned inward. Deposits/drain/DAG-heal give offline convergence (phone edits at noon, laptop converges at night); send-to-self + skeleton sync + `GetKeys` re-wrap give new-device bootstrap with zero new mechanism. No protocol change: the op encoding lives inside the sealed body; relays see ciphertext. |
+| Own-device lens sync | Lens edits are **sealed ops riding a conversation whose participants are my own devices** — project 8's carrier decision turned inward. Deposits/drain/DAG-heal give offline convergence (phone edits at noon, laptop converges at night); send-to-self + skeleton sync + `GetKeys` re-wrap give new-device bootstrap with zero new mechanism. No protocol change: the op encoding lives inside the sealed body; relays see ciphertext. |
 | Adoption policy | Lens ops (labels, clusters, avatar overrides) **auto-adopt from siblings by default**; manual local edits always win; concurrent conflicts **surface with provenance** ("your phone renamed this to X while your laptop said Y" — causal supersession per attesting device, latest-received as the default face). Cross-device label collisions surface as a rename offer; nothing arbitrates. Convergence is a default, never an assumption. |
 | Contact adds never auto-adopt | A sibling's contact-add travels as **evidence with provenance** and renders as an offer ("your phone added X — add them here too?"); the explicit accept is the one act that writes the contact store. **"The contact store is never modified by network input" survives verbatim** — the D3 offer pattern pointed at a new evidence source. Threat model: a compromised sibling already reads everything (the honest meaning of pairing, multi-device.md §8), so lens sync adds no read surface; the offer-gate protects the *write* surface — the sealing-key/relay trust anchor. Repudiating a sibling voids its pending offers. |
 | Inspectability | The lens conversation is ordinary DAG history — the audit trail exists from day one (every act renders with which device signed it, when). The viewing affordance is deferred: advanced-affordance pattern, hidden by default, one tap away (like the concurrency markers). |
@@ -84,7 +84,7 @@ my phone are the clusters on my laptop *by default, never by assumption*.
   the according-to-Bob marker). *Done when:* a friend's vouched avatar
   renders under *through friends*, never replacing my override.
 - **S6 · Own-device lens sync.** Op vocabulary (coordinated with project
-  7's body-encoding proposal — one "advisory claims riding a conversation"
+  8's body-encoding proposal — one "advisory claims riding a conversation"
   format, pointed at friends there and at siblings here), the self
   conversation, adoption policy + contact-add offers, conflict surfacing,
   chat-surface suppression for op-only conversations. Genuine unresolved
@@ -95,7 +95,7 @@ my phone are the clusters on my laptop *by default, never by assumption*.
 
 ## Open questions
 
-- The op body encoding shared with project 7 — sequence the two proposals
+- The op body encoding shared with project 8 — sequence the two proposals
   so the carrier format is designed once.
 - Chat-surface policy for the lens conversation: hidden from the Chats
   list; notification suppression for op-only deposits (no content in
@@ -110,7 +110,7 @@ my phone are the clusters on my laptop *by default, never by assumption*.
 - **No enforced or assumed cross-device consistency** — divergent lenses
   are two legitimate beliefs; convergence is best-effort and honest.
 - **No auto-adopted contact-store writes**, from any source.
-- **No gossip plane** — the conversation is the carrier (the project 7
+- **No gossip plane** — the conversation is the carrier (the project 8
   stance); lens data never rides served records or `WhoIs` answers.
 - No group-crypto, capability, or recovery scope creep (deferred list
   unchanged).
@@ -124,5 +124,5 @@ my phone are the clusters on my laptop *by default, never by assumption*.
   People/detail IA becomes the person page (S3/S4).
 - web-of-trust.md §6: the per-attester avatar lens lands (S5).
 - New design doc for lens sync, just-in-time (S6); cross-reference from
-  project 7's carrier proposal.
+  project 8's carrier proposal.
 - projects/README.md: row updated at scoping (done).

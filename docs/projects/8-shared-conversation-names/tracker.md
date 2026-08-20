@@ -48,6 +48,6 @@ follow the proposal.
 - Abuse posture: a member who renames constantly (rate/last-writer
   presentation policy — client-side, but decide it).
 - Does the CLI get any of this, or app-only at first?
-- The body encoding is shared with project 8's own-device lens sync
+- The body encoding is shared with project 7's own-device lens sync
   (advisory claims riding a conversation — there pointed at siblings, here
   at friends): design the carrier format once, sequence the two proposals.
