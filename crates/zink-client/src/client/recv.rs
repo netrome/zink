@@ -12,7 +12,7 @@ use zink_protocol::{MailboxOp, MailboxResult, MessageEnvelope, OpenError};
 use crate::error::Error;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::{AcceptUni, Request, Transport};
 
 use super::Client;
@@ -59,7 +59,7 @@ pub struct Received {
     pub body: Result<Vec<u8>, OpenError>,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The post-arrival seam for a direct delivery (D5): the same healing
     /// `recv`/`subscribe` run after a drain — auto-sync the DAG, scoped
     /// who-is for unknown members, re-wrap for paired devices. The edge

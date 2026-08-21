@@ -1,8 +1,8 @@
-//! The real entropy source — implements the draw port over the OS RNG.
+//! The real entropy source — implements the rng ports over the OS RNG.
 
 use rand_core::{OsRng, RngCore};
 
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemRng;
@@ -12,5 +12,13 @@ impl Draw for SystemRng {
         // Modulo bias is real but harmless at timing-jitter stakes; the
         // port promises "uniform enough for delays", not crypto.
         OsRng.next_u64() % bound
+    }
+}
+
+impl Mint for SystemRng {
+    fn token128(&self) -> u128 {
+        let mut bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut bytes);
+        u128::from_be_bytes(bytes)
     }
 }

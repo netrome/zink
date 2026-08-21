@@ -14,7 +14,7 @@ use zink_protocol::{
 use crate::error::Error;
 use crate::hex;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::{Peer, Transport};
 
 use super::Client;
@@ -217,7 +217,7 @@ pub struct Disavowal {
     pub excludes: bool,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Store a scanned/pasted record. The petname defaults to the contact's
     /// self-claimed name; the caller may override (petnames are ours, not
     /// theirs). Returns the petname it was stored under.

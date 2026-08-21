@@ -9,7 +9,7 @@ use zink_protocol::{BlobHash, BlobRef, MessageEnvelope, MessageId, OpenError, Pu
 
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::Transport;
 use crate::state::ClientState;
 use crate::{blobs, hex};
@@ -188,7 +188,7 @@ fn membership_delta(
     )
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Fetch + verify + decrypt one blob referenced by a received message:
     /// the local cache first, then the relay it arrived through (caching
     /// the ciphertext for the next time). A **direct** arrival (D5) has no

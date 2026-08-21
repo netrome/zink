@@ -12,7 +12,7 @@ use crate::adapters::system_rng::SystemRng;
 use crate::error::Error;
 use crate::keystore;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::Transport;
 use crate::reach::ReachLedger;
 use crate::state::ClientState;
@@ -74,7 +74,7 @@ pub struct Client<
     C: Clock = SystemClock,
     W: WallClock = SystemClock,
     N: Transport = IrohTransport,
-    R: Draw = SystemRng,
+    R: Draw + Mint = SystemRng,
 > {
     device: DeviceKey,
     /// The network, behind ports (`crate::ports::transport`,
@@ -203,7 +203,7 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     }
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Wire a client around an already-built transport — shared by
     /// `with_device` (real iroh) and the test constructor (doubles).
     fn assemble(
@@ -252,11 +252,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         // era) re-mint at open, labels and clustering intact; unclaimed
         // contact entries self-heal in `persons()` instead.
         for (label, members) in client.state.take_legacy_persons() {
-            if let Err(error) =
-                client
-                    .state
-                    .save_person(PersonId::mint().to_storage(), &label, &members)
-            {
+            let id = PersonId::mint(&client.rng);
+            if let Err(error) = client.state.save_person(id.to_storage(), &label, &members) {
                 tracing::warn!(%error, label, "could not re-mint a legacy person row");
             }
         }

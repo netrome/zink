@@ -13,6 +13,15 @@ pub trait Draw {
     fn draw(&self, bound: u64) -> u64;
 }
 
+/// Draw a fresh 128-bit uniqueness token — id minting (person ids), not
+/// secrets and not timing. Distinctness is the whole contract, which is
+/// why this IS scriptable where cryptographic randomness is not: a
+/// scripted counter satisfies it, and a collision breaks a test loudly,
+/// never security silently.
+pub trait Mint {
+    fn token128(&self) -> u128;
+}
+
 /// The draw double: yields its value clamped into the caller's bound, so
 /// `TestDraw(0)` is the low extreme and `TestDraw(u64::MAX)` the high one —
 /// a test pins band edges without knowing the bound.
@@ -23,5 +32,19 @@ pub(crate) struct TestDraw(pub u64);
 impl Draw for TestDraw {
     fn draw(&self, bound: u64) -> u64 {
         self.0.min(bound.saturating_sub(1))
+    }
+}
+
+/// The mint double: sequential tokens — deterministic and distinct, the
+/// two things the contract asks for.
+#[cfg(test)]
+pub(crate) struct TestMint(pub std::cell::Cell<u128>);
+
+#[cfg(test)]
+impl Mint for TestMint {
+    fn token128(&self) -> u128 {
+        let next = self.0.get() + 1;
+        self.0.set(next);
+        next
     }
 }

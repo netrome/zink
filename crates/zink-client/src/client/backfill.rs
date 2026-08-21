@@ -13,12 +13,12 @@ use zink_protocol::{
 use crate::error::Error;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::{Peer, Request, Transport};
 
 use super::{Client, Received};
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Sync a partially-known conversation with a peer (SPEC §5.2): walk
     /// `parents` **backward** to the genesis (what lets a device added
     /// mid-conversation build the DAG and reply — without the genesis,

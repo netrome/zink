@@ -12,7 +12,7 @@ use zink_protocol::{
 
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::Transport;
 use crate::state::ClientState;
 use crate::{blobs, net};
@@ -30,7 +30,7 @@ pub struct AvatarReceipt {
     pub pushed_relays: usize,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Set this device's display name and home relays — what `my_record`
     /// publishes and what `recv` drains by default. Each relay is the spec
     /// `zink-relay` prints: `<endpoint-id>@<ip:port>[#<relay-url>]` — the

@@ -12,12 +12,11 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use rand_core::{OsRng, RngCore};
 use zink_protocol::{ContactRecord, PublicKey};
 
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::Transport;
 
 use super::Client;
@@ -27,9 +26,9 @@ use super::contacts::Contact;
 /// **Ids identify; labels display and address**: a label is my mutable
 /// lens, so nothing holds a reference by it (labels resolve exactly once,
 /// at the human boundary — `person_by_label`). An id is an arbitrary
-/// local token: 128 random bits drawn at creation (`OsRng` at the call
-/// site, like key seeds — uniqueness matters, so never the clamping
-/// `Draw` port), never derived from keys or content (clusters merge,
+/// local token: a 128-bit uniqueness draw through the rng port's `Mint`
+/// capability (scriptable, unlike crypto randomness — distinctness is the
+/// whole contract), never derived from keys or content (clusters merge,
 /// split, and rename), and never on the wire. The 32-hex string form
 /// round-trips the app's DTO boundary unread; parsing rejects anything
 /// else.
@@ -38,10 +37,8 @@ pub struct PersonId(u128);
 
 impl PersonId {
     /// Mint a fresh id — creation sites only (add, split, repair).
-    pub(crate) fn mint() -> Self {
-        let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
-        Self(u128::from_be_bytes(bytes))
+    pub(crate) fn mint(rng: &impl Mint) -> Self {
+        Self(rng.token128())
     }
 
     /// The raw id the storage layer files under.
@@ -95,7 +92,7 @@ impl PersonEntry {
     }
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Every person this client believes in, label-sorted. Self-healing:
     /// persisted members whose contact entry is gone drop out (an emptied
     /// person hides), a stem two rows claim (a crash inside a merge)
@@ -151,7 +148,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// independent facts from here on (rename_person moves one, the
     /// contact-store rename the other).
     pub(super) fn claim_entry(&self, petname: &str, stem: PublicKey) -> Result<PersonId, Error> {
-        let id = PersonId::mint();
+        let id = PersonId::mint(&self.rng);
         self.state.save_person(id.to_storage(), petname, &[stem])?;
         Ok(id)
     }
@@ -244,7 +241,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                 .filter_map(|(_, record)| record.keys.first().copied())
                 .collect::<Vec<_>>(),
         )?;
-        let split_id = PersonId::mint();
+        let split_id = PersonId::mint(&self.rng);
         self.state.save_person(
             split_id.to_storage(),
             member_petname,
@@ -356,9 +353,27 @@ mod tests {
         C: crate::ports::clock::Clock,
         W: crate::ports::clock::WallClock,
         N: crate::ports::transport::Transport,
-        R: crate::ports::rng::Draw,
+        R: crate::ports::rng::Draw + crate::ports::rng::Mint,
     {
         client.person_by_label(label).expect("person by label").id
+    }
+
+    #[test]
+    fn person_id__should_mint_distinct_ids_that_roundtrip_the_boundary() {
+        // Given: a scripted mint — the seam the Mint port buys
+        let mint = crate::ports::rng::TestMint(std::cell::Cell::new(0));
+
+        // When
+        let a = PersonId::mint(&mint);
+        let b = PersonId::mint(&mint);
+
+        // Then: distinct; the 32-hex DTO form parses back to itself;
+        // anything else refuses at the boundary
+        assert_ne!(a, b);
+        assert_eq!(a.to_string().len(), 32);
+        assert_eq!(a.to_string().parse::<PersonId>().expect("roundtrip"), a);
+        assert!("not-an-id".parse::<PersonId>().is_err());
+        assert!("p1".parse::<PersonId>().is_err());
     }
 
     #[tokio::test]

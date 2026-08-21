@@ -17,7 +17,7 @@ use crate::error::Error;
 use crate::hex;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
-use crate::ports::rng::Draw;
+use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::{Request, Transport};
 
 use super::{Client, Received};
@@ -141,7 +141,7 @@ fn valid_endorsements(
         .collect()
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Ask the network "who is this key?" (D1b, who-is-this.md §5): dial
     /// every dialable contact — the subject itself among them, if stored —
     /// send `WhoIs`, validate answers like scanned QRs, and append them to

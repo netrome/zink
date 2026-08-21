@@ -72,8 +72,11 @@ per-device detail. Around it, the model work that keeps it honest:
   nothing; adversarial overlap still surfaces; a send to a two-device
   person reaches both keys.
   *(As built — id model reworked 2026-08-21 after review: `persons/<id>`
-  files named by `PersonId` (128 random bits, `OsRng` at the mint site
-  like key seeds — the `Draw` port is timing-only and its double clamps).
+  files named by `PersonId` — a 128-bit uniqueness draw through the rng
+  port's new `Mint` capability (`SystemRng` implements `Draw + Mint`;
+  uniqueness tokens are scriptable in tests — distinctness is their whole
+  contract — unlike crypto randomness, which stays `OsRng`-at-call-site
+  per the port's footgun rule).
   **Eager one-person-per-entry** replaced the first-landed lazy /
   virtual-singleton read: two id kinds proved a bug attractor (an act
   could invalidate a held handle), so `add_contact` creates the person
