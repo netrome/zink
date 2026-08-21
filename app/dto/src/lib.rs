@@ -321,22 +321,14 @@ pub struct Message {
 }
 
 /// One unknown member of a conversation — the "a wild key appeared"
-/// surface (D2c, groups.md §5). Candidates come from the learned store
-/// (the scoped auto-query fills it); `dismissed` collapses the popup to
-/// the compact manual row.
+/// surface (D2c, groups.md §5). Since S4 the row is a link: the person
+/// page owns the acts and evidence (candidates, who-is, ignore, add);
+/// the row only surfaces the key and navigates. `dismissed` dims it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UnknownMember {
-    /// The key, hex — handle for `who_is` / `dismiss`.
+    /// The key, hex — the person-page target.
     pub key: String,
-    pub candidates: Vec<WhoIsCandidate>,
     pub dismissed: bool,
-    /// Verified link evidence, strongest first (D3c, multi-device.md §7):
-    /// render-ready lines like "mårten says this is their device" /
-    /// "…mutually confirmed". Evidence for an offer, never automation.
-    pub device_evidence: Vec<String>,
-    /// Render-ready disavowal warnings (D4c) — evidence at the moment of
-    /// decision, never a block.
-    pub disavowals: Vec<String>,
 }
 
 /// What a `who_is` query brought back, render-ready (D1c).
@@ -382,12 +374,21 @@ pub struct ConversationMembers {
     /// My local name for this conversation, if set — prefills the panel's
     /// rename field. Local lens, never transmitted.
     pub local_name: Option<String>,
-    /// Every current member: "you", then petnames / device names / short
-    /// hex for keys nobody recognizes (the wild-key panel owns their flow).
-    pub members: Vec<String>,
+    /// Every current member: "you", then one row per person / device /
+    /// unknown key. Rows navigate to the person page (S4).
+    pub members: Vec<MemberRow>,
     /// The contact petnames among the members — what the add-picker
     /// excludes.
     pub petnames: Vec<String>,
+}
+
+/// One members-panel row: the label humans see and the key the row
+/// navigates by — `None` for the merged "you" row (an own *cluster*, not
+/// one identifier; Me is its page).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MemberRow {
+    pub label: String,
+    pub key: Option<String>,
 }
 
 /// One blob reference of a message.

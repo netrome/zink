@@ -359,35 +359,36 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         self.state.set_read_count(conversation, count)
     }
 
-    /// Display labels for a participant set, deduped per *person* (S2,
+    /// Display rows for a participant set, deduped per *person* (S2,
     /// multi-device.md §7): keys resolve through the person layer, so a
     /// contact's devices — one multi-key entry or several merged entries —
-    /// collapse to the one person label. A recognized own device labels
-    /// with its self-claimed name (D3c); unknown keys stay distinct, as
-    /// honest short hex. Order follows the input; a cluster's label sits
-    /// at its first key.
-    pub fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
+    /// collapse to one row. A recognized own device rows with its
+    /// self-claimed name (D3c); unknown keys stay distinct, as honest short
+    /// hex. Order follows the input; a cluster's row sits at its first key,
+    /// which is also the row's navigation handle (S4: any member key lands
+    /// on the person's page).
+    pub fn participant_rows(&self, keys: &[PublicKey]) -> Result<Vec<(PublicKey, String)>, Error> {
         let persons = self.persons()?;
         let devices = self.state.recognized_devices();
-        let mut labels = Vec::new();
+        let mut rows = Vec::new();
         let mut seen_persons: BTreeSet<PersonId> = BTreeSet::new();
         let mut seen_labels: BTreeSet<String> = BTreeSet::new();
-        for key in keys {
+        for &key in keys {
             let person = persons.iter().find(|person| {
                 person
                     .members
                     .iter()
-                    .any(|(_, record)| record.keys.contains(key))
+                    .any(|(_, record)| record.keys.contains(&key))
             });
             if let Some(person) = person {
                 if seen_persons.insert(person.id) {
-                    labels.push(person.label.clone());
+                    rows.push((key, person.label.clone()));
                 }
                 continue;
             }
             let device = devices
                 .iter()
-                .find(|(device_key, _)| device_key == key)
+                .find(|(device_key, _)| *device_key == key)
                 .map(|(_, record)| {
                     record
                         .self_claimed_name()
@@ -397,13 +398,22 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             match device {
                 Some(label) => {
                     if seen_labels.insert(label.clone()) {
-                        labels.push(label);
+                        rows.push((key, label));
                     }
                 }
-                None => labels.push(hex::encode(&key.0[..4])),
+                None => rows.push((key, hex::encode(&key.0[..4]))),
             }
         }
-        Ok(labels)
+        Ok(rows)
+    }
+
+    /// `participant_rows`, labels only — the list and header form.
+    pub fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
+        Ok(self
+            .participant_rows(keys)?
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect())
     }
 
     /// One conversation's stored messages in the DAG's linearized order.
@@ -1091,6 +1101,36 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("labels-dedup"));
+    }
+
+    #[tokio::test]
+    async fn participant_rows__should_carry_the_clusters_first_key_as_the_handle() {
+        // Given: bob's record holds two device keys
+        let a = Client::open_or_create(&temp_key("rows-handle", "a"))
+            .await
+            .expect("open");
+        let phone = DeviceKey::from_seed([39; 32]);
+        let laptop = DeviceKey::from_seed([40; 32]);
+        a.add_contact(
+            &ContactRecord::new(
+                vec![phone.public(), laptop.public()],
+                vec![],
+                mailbox_only("bb@203.0.113.1:1"),
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+
+        // When: the laptop key comes first in the participant order
+        let rows = a
+            .participant_rows(&[laptop.public(), phone.public()])
+            .expect("rows");
+
+        // Then: one row, keyed by the first key seen — the row's tap
+        // target (any member key lands on the person's page)
+        assert_eq!(rows, vec![(laptop.public(), "bob".to_string())]);
+
+        let _ = std::fs::remove_dir_all(temp_root("rows-handle"));
     }
 
     #[tokio::test]

@@ -175,6 +175,14 @@ structurally).
   offline"). **No hard-coded default relay:** the user provides at least one
   (their own, or one a friend shares); a default list is deferred.
 
+**Every rendered identifier navigates to the person page** (project 7 S4):
+chat sender lines, members-panel rows, and wild-key rows tap through to the
+§1 lens (a member key lands on its person's page; a stranger key on the
+stranger variant; the merged "you" row is an own cluster — Me is its page).
+The page owns the identity acts and evidence; in-chat surfaces only surface
+and link — the wild-key row is a link, not a popup with its own who-is /
+ignore / add machinery.
+
 First run is a calm sequence, reusing the Me widgets: **name (+ optional
 avatar) → add a relay (explained, paste/scan-friendly) → here's your code**.
 Because there's no default relay, onboarding *must* include the relay step — but

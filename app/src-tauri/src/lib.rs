@@ -10,9 +10,9 @@ use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
     AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceCard,
-    DeviceRow, FriendLens, Inbox, Message, OutgoingImage, PersonInfo, PersonPage, PersonRef,
-    QrPayload, RecordPreview, RelayRow, StrangerInfo, SubjectAsk, UnknownMember, WhoIsCandidate,
-    WhoIsReport,
+    DeviceRow, FriendLens, Inbox, MemberRow, Message, OutgoingImage, PersonInfo, PersonPage,
+    PersonRef, QrPayload, RecordPreview, RelayRow, StrangerInfo, SubjectAsk, UnknownMember,
+    WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -1114,9 +1114,26 @@ async fn conversation_members(
     let id = parse_id(&conversation)?;
     let membership: Vec<PublicKey> = client.membership(id)?.into_iter().collect();
     let own = client.own_keys();
-    let others = other_labels(&client, &own, &membership)?;
-    let mut members = vec!["you".to_string()];
-    members.extend(others.iter().cloned());
+    let other_keys: Vec<PublicKey> = membership
+        .iter()
+        .copied()
+        .filter(|key| !own.contains(key))
+        .collect();
+    // Rows navigate to the person page by key (S4); the merged "you" row
+    // is an own cluster, not one identifier — Me is its page.
+    let mut members = vec![MemberRow {
+        label: "you".to_string(),
+        key: None,
+    }];
+    members.extend(
+        client
+            .participant_rows(&other_keys)?
+            .into_iter()
+            .map(|(key, label)| MemberRow {
+                label,
+                key: Some(hex::encode(&key.0)),
+            }),
+    );
     // Person labels (S2/S3): the add-picker rows are persons, so the
     // exclusion list must speak the same names.
     let petnames = client
@@ -1129,6 +1146,11 @@ async fn conversation_members(
     // default, here exactly as in the rows — one rule, or headers and
     // lists would disagree.
     let local_name = client.conversation_name(id);
+    let others: Vec<String> = members
+        .iter()
+        .filter(|row| row.key.is_some())
+        .map(|row| row.label.clone())
+        .collect();
     Ok(ConversationMembers {
         label: local_name
             .clone()
@@ -1166,7 +1188,11 @@ async fn person_conversations(
     let client = client(&app, &managed).await?;
     let own = client.own_keys();
     // The whole person (S2): any member device's key counts.
-    let keys: Vec<PublicKey> = client.person_by_id(id.parse()?)?.keys().into_iter().collect();
+    let keys: Vec<PublicKey> = client
+        .person_by_id(id.parse()?)?
+        .keys()
+        .into_iter()
+        .collect();
     let mut rows = Vec::new();
     for summary in client.conversations()? {
         if summary.participants.iter().any(|key| keys.contains(key)) {
@@ -1510,9 +1536,8 @@ fn candidate_dto(learned: zink_client::LearnedName, payload: Option<String>) -> 
 }
 
 /// The unknown members of a conversation — the "a wild key appeared"
-/// surface (D2c, groups.md §5). Candidates render from the learned store
-/// (the scoped auto-query fills it at drain time); payloads come from the
-/// freshest learned record, so add-as-contact works offline.
+/// surface (D2c, groups.md §5). Since S4 each row is a link to the person
+/// page, which owns the acts and evidence; this only says who's unknown.
 #[tauri::command]
 async fn unknown_members(
     app: AppHandle,
@@ -1534,20 +1559,9 @@ async fn unknown_members(
         {
             continue;
         }
-        let candidates = client
-            .learned_candidates(key)?
-            .into_iter()
-            .map(|(learned, record)| candidate_dto(learned, Some(record.to_qr_string())))
-            .collect();
-        // The popup upgrade (D3c, multi-device.md §7): "P says this is
-        // their device", tiered — evidence for the one-tap offer.
-        let device_evidence = evidence_lines(&client, key)?;
         members.push(UnknownMember {
             key: hex::encode(&key.0),
-            candidates,
             dismissed: dismissed.contains(&key),
-            device_evidence,
-            disavowals: disavowal_lines(&client, key)?,
         });
     }
     Ok(members)
@@ -1632,10 +1646,7 @@ async fn ask_subject(
 ) -> Result<SubjectAsk, String> {
     let client = client(&app, &managed).await?;
     Ok(
-        match client
-            .ask_subject(PublicKey(hex::parse32(&subject)?))
-            .await
-        {
+        match client.ask_subject(PublicKey(hex::parse32(&subject)?)).await {
             zink_client::SubjectAsk::Answered => SubjectAsk::Answered,
             zink_client::SubjectAsk::Nothing => SubjectAsk::Nothing,
             zink_client::SubjectAsk::Unreachable => SubjectAsk::Unreachable,

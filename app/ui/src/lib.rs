@@ -234,7 +234,7 @@ fn App() -> impl IntoView {
                     state=state
                     drafts=chat_drafts
                     reload_messages=load_messages
-                    open_person=open_person
+                    open_key=open_key
                     back=move || {
                         load_conversations();
                         view.set(View::Chats);

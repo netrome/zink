@@ -164,10 +164,26 @@ per-device detail. Around it, the model work that keeps it honest:
   is dropped. *(As built: covered by unit tests for all four paths —
   answer/add, gate decline, unreachable, forged record; workspace green,
   clippy clean, UI wasm + desktop shell build.)*
-- **S4 · Tappable surfaces.** Sender lines, member rows, wild-key rows
-  navigate to the page; the wild-key panel shrinks to a link; the R3
-  stuck-cue tap target resolves from membership. *Done when:* every
+- **S4 · Tappable surfaces — done (2026-08-21).** Sender lines, member rows,
+  wild-key rows navigate to the page; the wild-key panel shrinks to a link;
+  the R3 stuck-cue tap target resolves from membership. *Done when:* every
   rendered identifier navigates.
+  *(As built: navigation is by key — `key_page` already resolves a member
+  key to its person's page, so one `open_key` callback serves every
+  surface; ChatView's `open_person` is gone. `participant_rows` joined the
+  client (`participant_labels` delegates): the person-deduped label plus
+  the cluster's first key as the row's handle — the members panel renders
+  `MemberRow { label, key }`, the merged "you" row keyless (an own
+  cluster, not one identifier; Me is its page). The wild-key row is now
+  surface-and-link only — the in-chat who-is machinery (report panel,
+  add-candidate, ignore) is deleted with `UnknownMember` trimmed to
+  `{ key, dismissed }`; the page is a strict superset. The stuck cue
+  resolves when every non-own member row shares one person label
+  (collision-unique ⇒ one person) — this also fixes the cue silently
+  breaking on locally-named chats, which the old label==petname match
+  did. Non-goal kept: no nav stack — back from a page goes to Chats/People
+  as before. ui-design-system.md §3 records the rule. Verified: workspace
+  green, clippy clean, UI wasm + desktop shell build.)*
 - **S5 · Lens avatars.** Third-party `Avatar` claims in endorsements +
   per-friend rendering ("as Bob tells you"). *Done when:* a friend's
   vouched avatar renders under *through friends*, never replacing my
@@ -204,6 +220,6 @@ per-device detail. Around it, the model work that keeps it honest:
 - multi-device.md §7: the display-vs-addressing separation cashes in
   (S2). ✅ 2026-08-21
 - ui-design-system.md §1/§3: person entries in the view-model; the page
-  IA (S3/S4).
+  IA (S3/S4). §3: every identifier navigates ✅ 2026-08-21 (S4).
 - web-of-trust.md §6: the avatar lens lands (S5).
 - New lens-sync design doc (S6), cross-referenced from project 8.

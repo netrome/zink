@@ -3,9 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{
-    AppState, ConversationMembers, Message, OutgoingImage, UnknownMember, WhoIsReport,
-};
+use zink_app_dto::{AppState, ConversationMembers, Message, OutgoingImage, UnknownMember};
 
 use crate::picker::PeoplePicker;
 use crate::{avatar_data_url, image, invoke};
@@ -37,7 +35,7 @@ pub(crate) fn ChatView(
     state: RwSignal<Option<AppState>>,
     drafts: RwSignal<HashMap<String, String>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
-    open_person: impl Fn(String) + Copy + Send + 'static,
+    open_key: impl Fn(String) + Copy + Send + 'static,
     back: impl Fn() + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
@@ -66,12 +64,6 @@ pub(crate) fn ChatView(
     // (crossed / merged, tenet 7) are advanced honesty data — hidden by
     // default, revealed on demand.
     let show_concurrency = RwSignal::new(false);
-    // The stuck cue's tap target (R3): a 1:1 chat is labelled by the
-    // person's label, so that row resolves to the person id whose page
-    // holds the repair actions. A group label matches no person and the
-    // cue stays plain text.
-    let chat_label = StoredValue::new(label.clone());
-
     // The live header label + members panel (S2): membership is heads-based
     // (groups.md §2) and moves with the DAG, so both re-derive on every
     // messages change — the open-time `label` is just the first paint.
@@ -225,71 +217,11 @@ pub(crate) fn ChatView(
         }
     });
 
-    // A who-is can have learned a fresh avatar claim (De3): re-fetch past
-    // the miss the lazy cache may have recorded for this key.
-    let refetch_avatar = move |key: String| {
-        spawn_local(async move {
-            if let Ok(Some(url)) = avatar_data_url(&key).await {
-                avatars.update(|avatars| {
-                    avatars.insert(key, url);
-                });
-            }
-        });
-    };
-
-    // "who is this?" (D1c): `Some((subject, None))` = asking, `Some((_,
-    // Some(report)))` = showing candidates. Manual trigger only — asking
-    // reveals the interest to every contact asked (who-is-this.md §5).
-    let whois = RwSignal::new(None::<(String, Option<WhoIsReport>)>);
-    let ask = move |subject: String| {
-        whois.set(Some((subject.clone(), None)));
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                subject: &'a str,
-            }
-            let args = Args { subject: &subject };
-            match invoke::invoke::<WhoIsReport>("who_is", &args).await {
-                Ok(report) => {
-                    refetch_avatar(subject.clone());
-                    whois.set(Some((subject, Some(report))));
-                }
-                Err(e) => {
-                    whois.set(None);
-                    err(e);
-                }
-            }
-        });
-    };
-    let add_learned = move |payload: String| {
-        let id = conversation.get_value();
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                payload: &'a str,
-                petname: Option<&'a str>,
-            }
-            let args = Args {
-                payload: &payload,
-                petname: None, // prefilled from the self-claimed name
-            };
-            match invoke::invoke::<String>("add_contact", &args).await {
-                Ok(petname) => {
-                    ok(&format!("added {petname}"));
-                    if let Some((subject, _)) = whois.get_untracked() {
-                        refetch_avatar(subject); // their avatar may now resolve
-                    }
-                    whois.set(None);
-                    reload_messages(id); // sender labels flip to the petname
-                }
-                Err(e) => err(e),
-            }
-        });
-    };
     // Unknown members — the "wild key appeared" surface (D2c, groups.md
     // §5): loaded from membership (covers added-but-silent members, which
     // per-message sender fields would miss), refreshed whenever the
-    // messages change (the scoped auto-query has run by then).
+    // messages change. Since S4 each row just links to the person page,
+    // which owns the acts (who-is, ignore, add) and the evidence.
     let unknowns = RwSignal::new(Vec::<UnknownMember>::new());
     let load_unknowns = move || {
         let id = conversation.get_value();
@@ -309,19 +241,6 @@ pub(crate) fn ChatView(
         load_unknowns();
         load_members();
     });
-    let ignore = move |key: String| {
-        spawn_local(async move {
-            #[derive(Serialize)]
-            struct Args<'a> {
-                subject: &'a str,
-            }
-            let args = Args { subject: &key };
-            match invoke::invoke::<serde::de::IgnoredAny>("dismiss", &args).await {
-                Ok(_) => load_unknowns(),
-                Err(e) => err(e),
-            }
-        });
-    };
 
     // Add people to this conversation (D2c): one message with the grown
     // recipient set is the whole mechanism — the signed recipients list
@@ -471,10 +390,27 @@ pub(crate) fn ChatView(
                                                 .members
                                                 .into_iter()
                                                 .map(|member| {
-                                                    view! {
-                                                        <div class="row">
-                                                            <b>{member}</b>
-                                                        </div>
+                                                    // Every identifier navigates (S4);
+                                                    // "you" is an own cluster, not one
+                                                    // identifier — Me is its page.
+                                                    match member.key {
+                                                        Some(key) => view! {
+                                                            <div class="row">
+                                                                <b
+                                                                    class="tappable"
+                                                                    on:click=move |_| open_key(key.clone())
+                                                                >
+                                                                    {member.label}
+                                                                </b>
+                                                            </div>
+                                                        }
+                                                            .into_any(),
+                                                        None => view! {
+                                                            <div class="row">
+                                                                <b>{member.label}</b>
+                                                            </div>
+                                                        }
+                                                            .into_any(),
                                                     }
                                                 })
                                                 .collect::<Vec<_>>()
@@ -569,6 +505,9 @@ pub(crate) fn ChatView(
                         }
                     })
             }}
+            // The wild-key surface, shrunk to a link (S4): the person page
+            // owns the acts (who-is, ignore, add) and the evidence; this
+            // row only surfaces the key and navigates.
             {move || {
                 let list = unknowns.get();
                 (!list.is_empty())
@@ -579,170 +518,30 @@ pub(crate) fn ChatView(
                                     .into_iter()
                                     .map(|member| {
                                         let short = member.key.chars().take(8).collect::<String>();
-                                        if member.dismissed {
-                                            let ask_key = member.key.clone();
-                                            view! {
-                                                <div class="row">
-                                                    <span class="dim">{format!("{short}… (ignored)")}</span>
-                                                    <button
-                                                        class="secondary"
-                                                        on:click=move |_| ask(ask_key.clone())
-                                                    >
-                                                        "who is this?"
-                                                    </button>
-                                                </div>
-                                            }
-                                                .into_any()
-                                        } else {
-                                            let ask_key = member.key.clone();
-                                            let ignore_key = member.key.clone();
-                                            let avatar_key = member.key.clone();
-                                            // The popup upgrade (D3c): who
-                                            // *claims* this key, tiered.
-                                            let evidence = member
-                                                .device_evidence
-                                                .iter()
-                                                .chain(member.disavowals.iter())
-                                                .map(|line| {
+                                        let key = member.key;
+                                        view! {
+                                            <div class="row">
+                                                {if member.dismissed {
                                                     view! {
-                                                        <div class="row">
-                                                            <span class="dim">{line.clone()}</span>
-                                                        </div>
+                                                        <span class="dim">{format!("{short}… (ignored)")}</span>
                                                     }
-                                                })
-                                                .collect::<Vec<_>>();
-                                            let candidates = member
-                                                .candidates
-                                                .into_iter()
-                                                .map(|candidate| {
-                                                    let avatar_key = avatar_key.clone();
+                                                        .into_any()
+                                                } else {
                                                     view! {
-                                                        <div class="row">
-                                                            <b>{candidate.name}</b>
-                                                            <span class="dim">{candidate.provenance}</span>
-                                                            {candidate
-                                                                .payload
-                                                                .map(|payload| {
-                                                                    view! {
-                                                                        <button on:click=move |_| {
-                                                                            add_learned(payload.clone());
-                                                                            refetch_avatar(avatar_key.clone());
-                                                                        }>"add as contact"</button>
-                                                                    }
-                                                                })}
-                                                        </div>
-                                                    }
-                                                })
-                                                .collect::<Vec<_>>();
-                                            view! {
-                                                <div class="wild">
-                                                    <div class="row">
                                                         <b>{format!("a wild key appeared: {short}…")}</b>
-                                                        <button
-                                                            class="secondary"
-                                                            on:click=move |_| ask(ask_key.clone())
-                                                        >
-                                                            "who is this?"
-                                                        </button>
-                                                        <button
-                                                            class="secondary"
-                                                            on:click=move |_| ignore(ignore_key.clone())
-                                                        >
-                                                            "ignore"
-                                                        </button>
-                                                    </div>
-                                                    {evidence}
-                                                    {candidates}
-                                                </div>
-                                            }
-                                                .into_any()
+                                                    }
+                                                        .into_any()
+                                                }}
+                                                <button
+                                                    class="secondary"
+                                                    on:click=move |_| open_key(key.clone())
+                                                >
+                                                    "who is this?"
+                                                </button>
+                                            </div>
                                         }
                                     })
                                     .collect::<Vec<_>>()}
-                            </div>
-                        }
-                    })
-            }}
-            {move || {
-                whois
-                    .get()
-                    .map(|(_, report)| {
-                        view! {
-                            <div class="panel">
-                                {match report {
-                                    None => {
-                                        view! { <span class="dim">"asking your contacts…"</span> }
-                                            .into_any()
-                                    }
-                                    Some(report) => {
-                                        let verdict = match (&report.contact, report.candidates.is_empty()) {
-                                            (Some(petname), _) => Some(
-                                                format!(
-                                                    "already your contact {petname:?} — {} fresh answer(s), asked {}, {} unreachable",
-                                                    report.answers, report.asked, report.unreachable,
-                                                ),
-                                            ),
-                                            (None, true) => Some(if report.asked == 0 {
-                                                "no dialable contacts to ask — add a mutual contact first"
-                                                    .to_string()
-                                            } else if report.unreachable == report.asked {
-                                                format!(
-                                                    "no answers — none of the {} contact(s) asked were reachable; try again later",
-                                                    report.asked,
-                                                )
-                                            } else {
-                                                format!(
-                                                    "no answers — asked {}, {} unreachable; the reachable ones don't know this key",
-                                                    report.asked, report.unreachable,
-                                                )
-                                            }),
-                                            (None, false) => None,
-                                        };
-                                        // Disavowal warnings (D4c): evidence
-                                        // at the moment of decision.
-                                        let warnings = report
-                                            .disavowals
-                                            .iter()
-                                            .map(|line| {
-                                                view! {
-                                                    <div class="row">
-                                                        <span class="dim">{line.clone()}</span>
-                                                    </div>
-                                                }
-                                            })
-                                            .collect::<Vec<_>>();
-                                        let candidates = report
-                                            .candidates
-                                            .into_iter()
-                                            .map(|candidate| {
-                                                view! {
-                                                    <div class="row">
-                                                        <b>{candidate.name}</b>
-                                                        <span class="dim">{candidate.provenance}</span>
-                                                        {candidate
-                                                            .payload
-                                                            .map(|payload| {
-                                                                view! {
-                                                                    <button on:click=move |_| add_learned(
-                                                                        payload.clone(),
-                                                                    )>"add as contact"</button>
-                                                                }
-                                                            })}
-                                                    </div>
-                                                }
-                                            })
-                                            .collect::<Vec<_>>();
-                                        view! {
-                                            {verdict.map(|text| view! { <span class="dim">{text}</span> })}
-                                            {warnings}
-                                            {candidates}
-                                        }
-                                            .into_any()
-                                    }
-                                }}
-                                <button class="secondary" on:click=move |_| whois.set(None)>
-                                    "close"
-                                </button>
                             </div>
                         }
                     })
@@ -812,15 +611,22 @@ pub(crate) fn ChatView(
                             } else {
                                 ""
                             };
-                            let stuck_person = (message.stuck && !message.undelivered).then(|| {
-                                let target = chat_label.get_value();
-                                state.with_untracked(|state| {
-                                    state.as_ref().and_then(|state| {
-                                        state
-                                            .contacts
-                                            .iter()
-                                            .find(|contact| contact.petname == target)
-                                            .map(|contact| contact.id.clone())
+                            // The stuck cue's tap target (R3), resolved
+                            // from membership (S4): every non-own member
+                            // row sharing one label means one person —
+                            // labels are collision-unique — and their page
+                            // holds the repair actions. A mixed group
+                            // stays plain text; so does a locally-named
+                            // chat, which the old label-match broke on.
+                            let stuck_key = (message.stuck && !message.undelivered).then(|| {
+                                members.with_untracked(|members| {
+                                    members.as_ref().and_then(|panel| {
+                                        let mut rows =
+                                            panel.members.iter().filter(|row| row.key.is_some());
+                                        let first = rows.next()?;
+                                        rows.all(|row| row.label == first.label)
+                                            .then(|| first.key.clone())
+                                            .flatten()
                                     })
                                 })
                             });
@@ -874,12 +680,29 @@ pub(crate) fn ChatView(
                                             }
                                         })}
                                     <span class="dim">
-                                        {message.sender} " · " {time_of(message.timestamp_ms)}
+                                        // The sender line navigates (S4);
+                                        // own messages say "you" — a
+                                        // cluster, not one identifier.
+                                        {if message.mine {
+                                            view! { <span>{message.sender}</span> }.into_any()
+                                        } else {
+                                            let key = message.sender_key.clone();
+                                            view! {
+                                                <span
+                                                    class="tappable"
+                                                    on:click=move |_| open_key(key.clone())
+                                                >
+                                                    {message.sender}
+                                                </span>
+                                            }
+                                                .into_any()
+                                        }}
+                                        " · " {time_of(message.timestamp_ms)}
                                         {pending} {confirmed} {concurrency}
-                                        {stuck_person.map(|target| match target {
-                                            Some(id) => view! {
-                                                <span on:click=move |_| open_person(
-                                                    id.clone(),
+                                        {stuck_key.map(|target| match target {
+                                            Some(key) => view! {
+                                                <span on:click=move |_| open_key(
+                                                    key.clone(),
                                                 )>
                                                     " · ⚠ can't reach their relay — tap to check their page"
                                                 </span>

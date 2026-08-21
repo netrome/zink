@@ -216,7 +216,10 @@ pub(crate) fn PersonView(
                     merge_pick.set(String::new());
                     reload();
                     load_page();
-                    ok(&format!("{from_label} is now a device of {}", current.label));
+                    ok(&format!(
+                        "{from_label} is now a device of {}",
+                        current.label
+                    ));
                 }
                 Err(e) => err(e),
             }
