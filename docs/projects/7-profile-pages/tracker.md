@@ -76,7 +76,10 @@ per-device detail. Around it, the model work that keeps it honest:
   port's new `Mint` capability (`SystemRng` implements `Draw + Mint`;
   uniqueness tokens are scriptable in tests — distinctness is their whole
   contract — unlike crypto randomness, which stays `OsRng`-at-call-site
-  per the port's footgun rule).
+  per the port's footgun rule). The boundary form is typed —
+  `person:<32 hex>`, so an id never reads as just another hex blob and
+  stray hex refuses to parse; storage filenames stay bare `{:032x}`
+  (fs-safe, no migration).
   **Eager one-person-per-entry** replaced the first-landed lazy /
   virtual-singleton read: two id kinds proved a bug attractor (an act
   could invalidate a held handle), so `add_contact` creates the person

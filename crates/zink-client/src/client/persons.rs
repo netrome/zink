@@ -29,11 +29,18 @@ use super::contacts::Contact;
 /// local token: a 128-bit uniqueness draw through the rng port's `Mint`
 /// capability (scriptable, unlike crypto randomness — distinctness is the
 /// whole contract), never derived from keys or content (clusters merge,
-/// split, and rename), and never on the wire. The 32-hex string form
-/// round-trips the app's DTO boundary unread; parsing rejects anything
-/// else.
+/// split, and rename), and never on the wire. The string form is
+/// `person:<32 hex>` — typed, so an id in CLI output or a log never reads
+/// as just another hex blob (keys, message ids and blob hashes all are),
+/// and parsing rejects everything else, stray bare hex included. It
+/// round-trips the app's DTO boundary unread. Storage filenames take the
+/// raw `u128` instead: bare `{:032x}` — prefix-free and fs-safe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PersonId(u128);
+
+/// The display/parse scheme tag. Deliberately not the wire-artifact style
+/// (`ZINK:`… is for things that travel); person ids never do.
+const PERSON_ID_PREFIX: &str = "person:";
 
 impl PersonId {
     /// Mint a fresh id — creation sites only (add, split, repair).
@@ -49,7 +56,7 @@ impl PersonId {
 
 impl fmt::Display for PersonId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:032x}", self.0)
+        write!(f, "{PERSON_ID_PREFIX}{:032x}", self.0)
     }
 }
 
@@ -57,9 +64,9 @@ impl std::str::FromStr for PersonId {
     type Err = Error;
 
     fn from_str(raw: &str) -> Result<Self, Error> {
-        (raw.len() == 32 && raw.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| u128::from_str_radix(raw, 16).ok())
-            .flatten()
+        raw.strip_prefix(PERSON_ID_PREFIX)
+            .filter(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            .and_then(|hex| u128::from_str_radix(hex, 16).ok())
             .map(Self)
             .ok_or_else(|| Error::InvalidInput(format!("not a person id: {raw:?}")))
     }
@@ -367,11 +374,20 @@ mod tests {
         let a = PersonId::mint(&mint);
         let b = PersonId::mint(&mint);
 
-        // Then: distinct; the 32-hex DTO form parses back to itself;
-        // anything else refuses at the boundary
+        // Then: distinct; the typed `person:<32 hex>` form parses back to
+        // itself; anything else — bare hex included — refuses at the
+        // boundary
         assert_ne!(a, b);
-        assert_eq!(a.to_string().len(), 32);
-        assert_eq!(a.to_string().parse::<PersonId>().expect("roundtrip"), a);
+        let shown = a.to_string();
+        assert!(shown.starts_with("person:"), "typed, not bare hex: {shown}");
+        assert_eq!(shown.len(), "person:".len() + 32);
+        assert_eq!(shown.parse::<PersonId>().expect("roundtrip"), a);
+        assert!(
+            shown
+                .trim_start_matches("person:")
+                .parse::<PersonId>()
+                .is_err()
+        );
         assert!("not-an-id".parse::<PersonId>().is_err());
         assert!("p1".parse::<PersonId>().is_err());
     }
