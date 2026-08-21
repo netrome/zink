@@ -258,6 +258,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             [] => {
                 self.ensure_label_free(&petname, None)?;
                 self.state.save_contact(&petname, record)?;
+                // The eager invariant (S2): the add IS the person-creating
+                // act — the row lands with the entry, label = petname.
+                if let Some(&stem) = record.keys.first() {
+                    self.claim_entry(&petname, stem)?;
+                }
             }
             [(existing_name, existing)] => {
                 if *existing_name != petname {

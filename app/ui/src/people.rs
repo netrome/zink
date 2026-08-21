@@ -311,7 +311,9 @@ pub(crate) fn PeopleView(
                                 contacts
                                     .into_iter()
                                     .map(|contact| {
-                                        let petname = contact.petname.clone();
+                                        // The row opens by person id — the
+                                        // stable handle; the label is display.
+                                        let id = contact.id.clone();
                                         let avatar_key = contact.key.clone();
                                         let has_warning = !contact.disavowals.is_empty();
                                         // Their self-claim, dim, only when
@@ -323,7 +325,7 @@ pub(crate) fn PeopleView(
                                         view! {
                                             <div
                                                 class="row"
-                                                on:click=move |_| open_person(petname.clone())
+                                                on:click=move |_| open_person(id.clone())
                                             >
                                                 {move || {
                                                     contact_avatars

@@ -24,7 +24,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use zink_client::{
-    Client, ClientConfig, Contact, Reachable, Received, ResolvedName, SendReceipt, hex, keystore,
+    Client, ClientConfig, Contact, PersonId, Reachable, Received, ResolvedName, SendReceipt, hex,
+    keystore,
 };
 use zink_protocol::{
     BlobDraft, BlobKind, BlobRef, ContactRecord, MessageId, PublicKey, RelayEntry,
@@ -87,9 +88,9 @@ const USAGE: &str = "usage:
   zink-cli contact-update --key <file> <ZINK:...>
   zink-cli contacts --key <file>
   zink-cli persons --key <file>
-  zink-cli person-merge --key <file> <into-label> <from-label>
+  zink-cli person-merge --key <file> <into-label|id> <from-label|id>
   zink-cli person-split --key <file> <member-petname>
-  zink-cli person-rename --key <file> <label> <new-label>
+  zink-cli person-rename --key <file> <label|id> <new-label>
   zink-cli recognize --key <file> <ZINK:...>
   zink-cli devices --key <file>
   zink-cli rewrap --key <file>
@@ -230,7 +231,7 @@ async fn persons(args: &[String]) -> Result<(), String> {
         println!("no persons");
     }
     for person in persons {
-        println!("{}", person.label);
+        println!("{}  [{}]", person.label, person.id);
         for (petname, record) in &person.members {
             let label = record
                 .self_device_label()
@@ -248,6 +249,22 @@ async fn persons(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve a person act's argument at the human boundary: a label first,
+/// else an id as `persons` prints them — the acts themselves key on ids
+/// (labels rename; ids identify).
+fn person_arg(client: &Client, arg: &str) -> Result<PersonId, String> {
+    match client.person_by_label(arg) {
+        Ok(person) => Ok(person.id),
+        Err(zink_client::Error::NotAContact(_)) => {
+            let id: PersonId = arg
+                .parse()
+                .map_err(|_| format!("no person labeled (or with id) {arg:?}"))?;
+            Ok(client.person_by_id(id)?.id)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Merge one person into another — the explicit clustering act (S2).
 async fn person_merge(args: &[String]) -> Result<(), String> {
     let (flags, positionals) = parse_flags(args)?;
@@ -255,7 +272,7 @@ async fn person_merge(args: &[String]) -> Result<(), String> {
         return Err(format!("expected <into-label> <from-label>\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    let merged = client.merge_persons(into, from)?;
+    let merged = client.merge_persons(person_arg(&client, into)?, person_arg(&client, from)?)?;
     println!(
         "{} now spans {} device(s)",
         merged.label,
@@ -285,7 +302,7 @@ async fn person_rename(args: &[String]) -> Result<(), String> {
         return Err(format!("expected <label> <new-label>\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    client.rename_person(current, new)?;
+    client.rename_person(person_arg(&client, current)?, new)?;
     println!("renamed {current:?} to {new:?}");
     client.close().await;
     Ok(())

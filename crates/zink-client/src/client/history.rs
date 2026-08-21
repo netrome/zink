@@ -14,6 +14,7 @@ use crate::ports::transport::Transport;
 use crate::state::ClientState;
 use crate::{blobs, hex};
 
+use super::persons::PersonId;
 use super::{Client, Received};
 
 /// One stored conversation, as the edge lists it. Participants are keys —
@@ -369,7 +370,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         let persons = self.persons()?;
         let devices = self.state.recognized_devices();
         let mut labels = Vec::new();
-        let mut seen_persons: BTreeSet<String> = BTreeSet::new();
+        let mut seen_persons: BTreeSet<PersonId> = BTreeSet::new();
         let mut seen_labels: BTreeSet<String> = BTreeSet::new();
         for key in keys {
             let person = persons.iter().find(|person| {
@@ -379,7 +380,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                     .any(|(_, record)| record.keys.contains(key))
             });
             if let Some(person) = person {
-                if seen_persons.insert(person.id.clone()) {
+                if seen_persons.insert(person.id) {
                     labels.push(person.label.clone());
                 }
                 continue;

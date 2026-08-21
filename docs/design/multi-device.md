@@ -216,7 +216,9 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 - **Labels**: a key resolves through the contact store by membership in a
   record (already true) — both device keys hit the same record → same
   petname. Edges dedup labels per person (a two-device contact renders
-  once, not twice, in conversation labels and reply lists).
+  once, not twice, in conversation labels and reply lists). *Since
+  project 7 S2 the lookup rides the person layer: any member entry's key
+  labels as the person, however many entries the cluster spans.*
 - **The popup upgrade** (groups.md §5 hand-off): before rendering "a wild
   key appeared", evaluate the held evidence (stored + learned records),
   tiered: a verified link **from an already-trusted key of contact P**
@@ -234,14 +236,21 @@ SyncResult::Wraps  { wraps: Vec<(MessageId, KeyWrap)> }
 - **Membership deltas**: "+ Alice's new device" renders via the same
   clustering (a joined key that clusters to a known person labels as that
   person).
-- **Many-to-many latitude (future, parked)**: labels↔keys is the observer's
-  many-to-many relation — merging several *people* under one label
-  ("someone from the soccer team") is a legitimate client policy this
-  model must not preclude. The one current hardening against it is the
-  petname-collision check (one petname → one record, so send-by-name stays
-  unambiguous); relaxing it means separating *display labels* from
-  *addressing names* — deliberate future work, nothing in D3 makes it
-  harder.
+- **Many-to-many latitude (cashed in — project 7 S2)**: labels↔keys is the
+  observer's many-to-many relation, and person entries deliver the
+  display-vs-addressing separation this bullet parked. A person is a local
+  row — an opaque drawn id over member contact entries; **ids identify,
+  labels display and address**, so acts and pages reference the id and a
+  label resolves exactly once, at the human boundary. The person label
+  addresses the whole cluster (send-by-name reaches every member entry,
+  each on its own relays); the entry petname underneath still addresses
+  one device. The collision check spans both namespaces, so send-by-name
+  stays unambiguous — and merging several *people* under one label
+  ("someone from the soccer team") is now one merge act, precluded by
+  nothing. Every contact entry belongs to a person from the moment it is
+  added (label initialized from the petname; independent facts after).
+  Person entries never travel — the lens stays local
+  ([7-profile-pages](../projects/7-profile-pages/tracker.md)).
 
 ## 8. Security notes
 

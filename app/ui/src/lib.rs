@@ -46,9 +46,11 @@ enum View {
         to: Vec<String>,
     },
     People,
-    /// The person page for a contact person, by label (project 7 S3).
+    /// The person page for a contact person, by opaque person id (project
+    /// 7 S3) — ids identify, labels display, so a rename never invalidates
+    /// the view.
     Person {
-        label: String,
+        id: String,
     },
     /// The same page for a bare key — the stranger variant (S3): message
     /// requests preview here without opening the chat.
@@ -172,7 +174,7 @@ fn App() -> impl IntoView {
         view.set(View::Chat { id, label });
     };
     let start_draft = move |to: Vec<String>| view.set(View::Draft { to });
-    let open_person = move |label: String| view.set(View::Person { label });
+    let open_person = move |id: String| view.set(View::Person { id });
     let open_key = move |key: String| view.set(View::Key { key });
     // Onboarding done → drop the takeover and land on Chats.
     let finish_onboarding = move || {
@@ -253,14 +255,13 @@ fn App() -> impl IntoView {
                 />
             }
             .into_any(),
-            View::Person { label } => view! {
+            View::Person { id } => view! {
                 <PersonView
-                    target=person::PageTarget::Label(label)
+                    target=person::PageTarget::Person(id)
                     reload=load_state
                     back=move || view.set(View::People)
                     open_chat=open_chat
                     start_draft=start_draft
-                    open_person=open_person
                     ok=ok
                     err=err
                 />
@@ -276,7 +277,6 @@ fn App() -> impl IntoView {
                     }
                     open_chat=open_chat
                     start_draft=start_draft
-                    open_person=open_person
                     ok=ok
                     err=err
                 />

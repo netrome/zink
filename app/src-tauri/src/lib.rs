@@ -10,8 +10,8 @@ use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
     AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceCard,
-    DeviceRow, FriendLens, Inbox, Message, OutgoingImage, PersonInfo, PersonPage, QrPayload,
-    RecordPreview, RelayRow, StrangerInfo, UnknownMember, WhoIsCandidate, WhoIsReport,
+    DeviceRow, FriendLens, Inbox, Message, OutgoingImage, PersonInfo, PersonPage, PersonRef,
+    QrPayload, RecordPreview, RelayRow, StrangerInfo, UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -226,6 +226,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
                     disavowals.extend(disavowal_lines(&client, key)?);
                 }
                 rows.push(ContactRow {
+                    id: person.id.to_string(),
                     petname: person.label.clone(),
                     self_name: person
                         .members
@@ -406,7 +407,10 @@ async fn introduce_devices(
 /// register the mailboxes there, return the QR. `device_label` is the
 /// optional qualifier beside the name ("phone", "laptop" — SPEC §3.2,
 /// S1's two calm questions); empty keeps the current one.
-#[tauri::command]
+/// (`rename_all`: tauri v2 expects camelCase invoke keys by default, and
+/// the webview sends this arg as `device_label` — without the attribute
+/// the Option silently arrives `None`.)
+#[tauri::command(rename_all = "snake_case")]
 async fn set_profile(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
@@ -562,22 +566,19 @@ async fn clear_local_avatar(
     Ok(())
 }
 
-/// The person page for a contact person, by label (project 7 S3). Renders
-/// **local stores only** — opening a page never queries anyone; the page's
-/// network acts (`page_refresh`, `ask_friend`, `who_is`) are separate,
-/// explicit commands.
+/// The person page for a contact person, by opaque person id (project 7
+/// S3; ids identify, labels display). Renders **local stores only** —
+/// opening a page never queries anyone; the page's network acts
+/// (`page_refresh`, `ask_friend`, `who_is`) are separate, explicit
+/// commands.
 #[tauri::command]
 async fn person_page(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
-    label: String,
+    id: String,
 ) -> Result<PersonPage, String> {
     let client = client(&app, &managed).await?;
-    let person = client
-        .persons()?
-        .into_iter()
-        .find(|person| person.label == label)
-        .ok_or_else(|| format!("no person labeled {label:?}"))?;
+    let person = client.person_by_id(id.parse()?)?;
     person_page_dto(&client, person)
 }
 
@@ -629,11 +630,17 @@ fn person_page_dto(
         .persons()?
         .into_iter()
         .filter(|other| other.id != person.id)
-        .map(|other| other.label)
+        .map(|other| PersonRef {
+            id: other.id.to_string(),
+            label: other.label,
+        })
         .collect();
     Ok(PersonPage {
         label: person.label.clone(),
-        person: Some(PersonInfo { merge_candidates }),
+        person: Some(PersonInfo {
+            id: person.id.to_string(),
+            merge_candidates,
+        }),
         stranger: None,
         avatar_key: first.map(|key| hex::encode(&key.0)).unwrap_or_default(),
         has_local_avatar: first
@@ -888,15 +895,16 @@ async fn ask_friend(
 async fn rename_person(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
-    current: String,
+    id: String,
     new: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    Ok(client.rename_person(&current, &new)?)
+    Ok(client.rename_person(id.parse()?, &new)?)
 }
 
 /// Merge one person into another — the explicit clustering act (S2):
-/// evidence offers, this act decides.
+/// evidence offers, this act decides. `into` / `from` are opaque person
+/// ids (ids identify; labels display).
 #[tauri::command]
 async fn merge_persons(
     app: AppHandle,
@@ -905,7 +913,7 @@ async fn merge_persons(
     from: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.merge_persons(&into, &from)?;
+    client.merge_persons(into.parse()?, from.parse()?)?;
     Ok(())
 }
 
@@ -1152,16 +1160,12 @@ async fn name_conversation(
 async fn person_conversations(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
-    petname: String,
+    id: String,
 ) -> Result<Vec<Conversation>, String> {
     let client = client(&app, &managed).await?;
     let own = client.own_keys();
     // The whole person (S2): any member device's key counts.
-    let keys: Vec<PublicKey> = client
-        .resolve_person(&petname)?
-        .into_iter()
-        .flat_map(|contact| contact.keys)
-        .collect();
+    let keys: Vec<PublicKey> = client.person_by_id(id.parse()?)?.keys().into_iter().collect();
     let mut rows = Vec::new();
     for summary in client.conversations()? {
         if summary.participants.iter().any(|key| keys.contains(key)) {

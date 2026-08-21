@@ -23,7 +23,7 @@ per-device detail. Around it, the model work that keeps it honest:
 | Decision | Resolution |
 |---|---|
 | One page, cluster-keyed | Generalize the Person view. A stranger is a one-key cluster with no petname, rendered from the learned store, with add / ignore / manual who-is. |
-| Person entry (local) | `{ local id, person label, avatar override, member contact entries }`. The id is an opaque local row id — never derived from keys, since clusters merge, split, and rename. Per-device petnames stay underneath. Never on the wire. |
+| Person entry (local) | `{ local id, person label, avatar override, member contact entries }`. The id is an opaque local token (`PersonId`, 128 random bits drawn at creation) — never derived from keys or content, since clusters merge, split, and rename. **Ids identify; labels display and address** (re-scoped 2026-08-21): every act and page fetch keys on the id, and a label resolves exactly once, at the human boundary (send-by-name, CLI args) — duplicate labels error there instead of first-match-wins. Every contact entry belongs to a person from the moment it's added (label initialized from the petname; independent facts after). Per-device petnames stay underneath. Never on the wire. |
 | Cross-device vocabulary = keys | Person entries never travel. A lens statement between my devices is an act about keys ("label the cluster containing K 'Alice'"), resolved locally by key overlap. Devices that cluster differently each apply acts correctly in their own world — no shared object exists, so nothing has to be consistent. |
 | Addressing | Send-by-name resolves person label → all member keys; the name-collision check moves to person labels. This is the display-vs-addressing split parked in multi-device.md §7. |
 | Person/device names on the wire | New claim kind `Claim::DeviceLabel(String)`; `Name` becomes the person name. Each supersedes independently per claim kind. Drift across devices renders honestly (revision + agreement). SPEC §3.2 proposal, appended-variant norm. |
@@ -71,20 +71,33 @@ per-device detail. Around it, the model work that keeps it honest:
   offers, never silent merges. *Done when:* merge / split / rename dangle
   nothing; adversarial overlap still surfaces; a send to a two-device
   person reaches both keys.
-  *(As built: `persons/<id>` files + a counter — ids opaque, never
-  key-derived; reads are pure: unclaimed contact entries render as
-  virtual singletons (label = petname — the lazy migration) and persist
-  only at their first act. `resolve_person` resolves label-then-petname,
-  one `Contact` per member entry; `resolve_relays` gained the
-  publishing-device guard and the send path binds a Contact's relays to
-  its first key only — S1's deferred enforcement, landed (SPEC §11 row
-  updated). Collision checks are one `ensure_label_free` across both
-  namespaces, own-member shadowing exempt; `replace_contact` re-points
-  person members on a stem move (the no-dangle rule). CLI: `persons`,
-  `person-merge`, `person-split`, `person-rename`; `send --to` / `reply
+  *(As built — id model reworked 2026-08-21 after review: `persons/<id>`
+  files named by `PersonId` (128 random bits, `OsRng` at the mint site
+  like key seeds — the `Draw` port is timing-only and its double clamps).
+  **Eager one-person-per-entry** replaced the first-landed lazy /
+  virtual-singleton read: two id kinds proved a bug attractor (an act
+  could invalidate a held handle), so `add_contact` creates the person
+  row (label = petname at add; independent facts after — an
+  entry-petname rename no longer moves the label), `persons()`
+  self-heals an unclaimed entry on sight (crash gap / pre-eager store),
+  and open re-mints counter-era rows. Acts key on ids; `person_by_label`
+  is the one human boundary and errors on duplicate labels.
+  `split_person` refuses a split that would twin the source's label (the
+  merge-then-split-the-namesake hole — regression-tested).
+  `resolve_person` resolves label-then-petname, one `Contact` per member
+  entry; `resolve_relays` gained the publishing-device guard and the
+  send path binds a Contact's relays to its first key only — S1's
+  deferred enforcement, landed (SPEC §11 row updated). Collision checks
+  are one `ensure_label_free` across both namespaces, own-member
+  shadowing exempt; `replace_contact` re-points person members on a stem
+  move (the no-dangle rule). CLI: `persons` (prints ids), `person-merge`,
+  `person-split`, `person-rename` — label or id; `send --to` / `reply
   --add` resolve persons. Clustering offers needed no new seam —
   `device_evidence` (D3c) stays the evidence, `merge_persons` is the
-  accept. The person-level avatar override is rendering and rides S3.)*
+  accept. The person-level avatar override is rendering and rides S3.
+  multi-device.md §7 updated — the display-vs-addressing bullet cashed
+  in; the paired-write / crash-gap contracts are noted as project 9
+  fault-double material.)*
 - **S3 · The page.** Header (avatar, label, message / vouch — or add /
   ignore / who-is for a stranger), the lens switcher, device rows (label,
   self-claim, link tier with direction, disavowal warnings, that device's
@@ -114,6 +127,16 @@ per-device detail. Around it, the model work that keeps it honest:
   petname — publishing the person label instead is a small client change,
   with S5. Verified: workspace tests green, clippy clean, UI wasm +
   src-tauri (desktop shell) compile, both bundles build.)*
+  *(2026-08-21, with the id rework: the page and every act key on the
+  person id — `View::Person { id }`, `ContactRow.id`, `PersonInfo.id`,
+  merge picker options are `PersonRef { id, label }`; the R3 stuck-cue
+  resolves its 1:1 label to the person row's id. Two pre-live-run fixes:
+  the Friends-lens "they'll know you asked" disclosure is now reactive
+  (it only rendered after a reload — unreadable before the first ask),
+  and `set_profile` gained `rename_all = "snake_case"` (tauri v2
+  camelCases invoke args by default, so the webview's `device_label`
+  silently arrived `None`). Re-verified: workspace green, clippy clean,
+  both wasm bundles + desktop shell build.)*
 - **S4 · Tappable surfaces.** Sender lines, member rows, wild-key rows
   navigate to the page; the wild-key panel shrinks to a link; the R3
   stuck-cue tap target resolves from membership. *Done when:* every
@@ -147,10 +170,11 @@ per-device detail. Around it, the model work that keeps it honest:
 
 ## Doc touchpoints as slices land
 
-- SPEC §3.2 + §11: `DeviceLabel`, multi-key relay resolution (S1).
+- SPEC §3.2 + §11: `DeviceLabel`, multi-key relay resolution (S1). ✅
 - who-is-this.md §5: the page-open subject-refresh joins the carve-out
   list; the per-friend scoped ask noted beside the manual button (S3).
-- multi-device.md §7: the display-vs-addressing separation cashes in (S2).
+- multi-device.md §7: the display-vs-addressing separation cashes in
+  (S2). ✅ 2026-08-21
 - ui-design-system.md §1/§3: person entries in the view-model; the page
   IA (S3/S4).
 - web-of-trust.md §6: the avatar lens lands (S5).

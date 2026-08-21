@@ -67,8 +67,9 @@ pub(crate) fn ChatView(
     // default, revealed on demand.
     let show_concurrency = RwSignal::new(false);
     // The stuck cue's tap target (R3): a 1:1 chat is labelled by the
-    // contact's petname, so that's the page with the repair actions. A
-    // group label matches no contact and the cue stays plain text.
+    // person's label, so that row resolves to the person id whose page
+    // holds the repair actions. A group label matches no person and the
+    // cue stays plain text.
     let chat_label = StoredValue::new(label.clone());
 
     // The live header label + members panel (S2): membership is heads-based
@@ -813,16 +814,15 @@ pub(crate) fn ChatView(
                             };
                             let stuck_person = (message.stuck && !message.undelivered).then(|| {
                                 let target = chat_label.get_value();
-                                state
-                                    .with_untracked(|state| {
-                                        state.as_ref().is_some_and(|state| {
-                                            state
-                                                .contacts
-                                                .iter()
-                                                .any(|contact| contact.petname == target)
-                                        })
+                                state.with_untracked(|state| {
+                                    state.as_ref().and_then(|state| {
+                                        state
+                                            .contacts
+                                            .iter()
+                                            .find(|contact| contact.petname == target)
+                                            .map(|contact| contact.id.clone())
                                     })
-                                    .then_some(target)
+                                })
                             });
                             // Delivery confirmation (De7): their device said
                             // it stored this. **Positive-only** (tenet 7) —
@@ -877,9 +877,9 @@ pub(crate) fn ChatView(
                                         {message.sender} " · " {time_of(message.timestamp_ms)}
                                         {pending} {confirmed} {concurrency}
                                         {stuck_person.map(|target| match target {
-                                            Some(petname) => view! {
+                                            Some(id) => view! {
                                                 <span on:click=move |_| open_person(
-                                                    petname.clone(),
+                                                    id.clone(),
                                                 )>
                                                     " · ⚠ can't reach their relay — tap to check their page"
                                                 </span>

@@ -802,12 +802,13 @@ impl ClientState {
 
     /// Persist a person entry (project 7 S2): the local lens grouping
     /// contact entries under one label — `persons/<id>` holds the label
-    /// line, then one member stem key (hex) per line. Ids are an opaque
-    /// local counter (`next_person_id`), never derived from member keys:
-    /// clusters merge, split, and rename, and a content-derived id would
-    /// silently re-home. Never on the wire.
-    pub fn save_person(&self, id: &str, label: &str, members: &[PublicKey]) -> Result<(), Error> {
-        let path = self.root.join("persons").join(id);
+    /// line, then one member stem key (hex) per line. The id is the
+    /// client's drawn `PersonId` as its raw `u128` — taking the number,
+    /// not a string, keeps filenames well-formed by construction. Ids are
+    /// opaque local tokens, never derived from member keys or content
+    /// (clusters merge, split, and rename). Never on the wire.
+    pub fn save_person(&self, id: u128, label: &str, members: &[PublicKey]) -> Result<(), Error> {
+        let path = self.root.join("persons").join(format!("{id:032x}"));
         create_parent(&path)?;
         let mut content = String::from(label);
         for member in members {
@@ -818,57 +819,56 @@ impl ClientState {
             .map_err(|e| Error::Storage(format!("write person: {e}")))
     }
 
-    pub fn remove_person(&self, id: &str) {
-        let _ = std::fs::remove_file(self.root.join("persons").join(id));
+    pub fn remove_person(&self, id: u128) {
+        let _ = std::fs::remove_file(self.root.join("persons").join(format!("{id:032x}")));
     }
 
     /// Persisted person entries as `(id, label, member stem keys)`. Damaged
     /// entries are skipped with a warning, like `contacts`; membership
     /// against the live contact store is the client's read-time concern.
-    pub fn persons(&self) -> Vec<(String, String, Vec<PublicKey>)> {
+    pub fn persons(&self) -> Vec<(u128, String, Vec<PublicKey>)> {
         let Ok(entries) = std::fs::read_dir(self.root.join("persons")) else {
             return Vec::new();
         };
         let mut persons = Vec::new();
         for entry in entries.flatten() {
-            let id = entry.file_name().to_string_lossy().into_owned();
-            if id.starts_with('.') {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = parse_person_id(&name) else {
+                if !name.starts_with('.') {
+                    tracing::warn!(?name, "skipping person entry with a malformed id");
+                }
                 continue;
+            };
+            if let Some((label, members)) = read_person(&entry.path()) {
+                persons.push((id, label, members));
             }
-            let Ok(content) = std::fs::read_to_string(entry.path()) else {
-                tracing::warn!(?id, "skipping unreadable person entry");
-                continue;
-            };
-            let mut lines = content.lines();
-            let Some(label) = lines
-                .next()
-                .map(str::trim)
-                .filter(|label| !label.is_empty())
-            else {
-                tracing::warn!(?id, "skipping person entry with no label");
-                continue;
-            };
-            let members: Vec<PublicKey> = lines
-                .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| crate::hex::parse32(line.trim()).ok().map(PublicKey))
-                .collect();
-            persons.push((id, label.to_string(), members));
         }
-        persons.sort_by(|a, b| a.0.cmp(&b.0));
+        persons.sort_by_key(|&(id, ..)| id);
         persons
     }
 
-    /// Mint the next opaque person id (`persons/.next`, a plain counter).
-    pub fn next_person_id(&self) -> Result<String, Error> {
-        let path = self.root.join("persons").join(".next");
-        let next: u64 = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(1);
-        create_parent(&path)?;
-        write_atomic(&path, (next + 1).to_string().as_bytes())
-            .map_err(|e| Error::Storage(format!("write person counter: {e}")))?;
-        Ok(format!("p{next}"))
+    /// Drain person files from before drawn ids (the brief counter era of
+    /// project 7 — `p1`-style names, plus the `.next` counter file) so the
+    /// client can re-mint them under real ids, labels and clustering
+    /// intact. Empty on current stores.
+    pub fn take_legacy_persons(&self) -> Vec<(String, Vec<PublicKey>)> {
+        let dir = self.root.join("persons");
+        let _ = std::fs::remove_file(dir.join(".next"));
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut legacy = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || parse_person_id(&name).is_some() {
+                continue;
+            }
+            if let Some(person) = read_person(&entry.path()) {
+                legacy.push(person);
+            }
+            let _ = std::fs::remove_file(entry.path());
+        }
+        legacy
     }
 
     /// Re-point person memberships from one member stem to another — the
@@ -878,7 +878,7 @@ impl ClientState {
         for (id, label, mut members) in self.persons() {
             if let Some(slot) = members.iter_mut().find(|member| *member == old) {
                 *slot = *new;
-                if let Err(error) = self.save_person(&id, &label, &members) {
+                if let Err(error) = self.save_person(id, &label, &members) {
                     tracing::warn!(%error, id, "could not re-point a person membership");
                 }
             }
@@ -1194,6 +1194,35 @@ fn read_keys(path: &std::path::Path) -> BTreeSet<PublicKey> {
 fn create_parent(path: &std::path::Path) -> Result<(), Error> {
     let parent = path.parent().expect("state paths always have a parent");
     std::fs::create_dir_all(parent).map_err(|e| Error::Storage(format!("create {parent:?}: {e}")))
+}
+
+/// A person filename is exactly the raw id as 32 hex chars (`{:032x}`).
+fn parse_person_id(name: &str) -> Option<u128> {
+    (name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| u128::from_str_radix(name, 16).ok())
+        .flatten()
+}
+
+/// One person file's content: the label line, then member stem keys.
+fn read_person(path: &std::path::Path) -> Option<(String, Vec<PublicKey>)> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        tracing::warn!(?path, "skipping unreadable person entry");
+        return None;
+    };
+    let mut lines = content.lines();
+    let Some(label) = lines
+        .next()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    else {
+        tracing::warn!(?path, "skipping person entry with no label");
+        return None;
+    };
+    let members: Vec<PublicKey> = lines
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| crate::hex::parse32(line.trim()).ok().map(PublicKey))
+        .collect();
+    Some((label.to_string(), members))
 }
 
 /// Monotonic per-process counter so each `write_atomic` gets its own temp

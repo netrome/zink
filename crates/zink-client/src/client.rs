@@ -35,7 +35,7 @@ pub use history::{
     ConversationSummary, HistoryMessage, Inbox, LastMessage, MAX_MESSAGE_REQUESTS, triage,
 };
 pub use outbox::{FlushReport, OUTBOX_GIVE_UP_MS};
-pub use persons::PersonEntry;
+pub use persons::{PersonEntry, PersonId};
 pub use profile::AvatarReceipt;
 pub use recv::{Received, RecvReport, RelayFailure};
 pub use send::{ReplyContacts, SendReceipt, StagedSend};
@@ -234,7 +234,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         let serve_task = n0_future::task::AbortOnDropHandle::new(n0_future::task::spawn(
             crate::sync::serve(transport.clone(), handler),
         ));
-        Self {
+        let client = Self {
             device,
             transport,
             state,
@@ -247,7 +247,20 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             clock,
             wall_clock,
             rng,
+        };
+        // Person rows from before drawn ids (project 7's brief counter
+        // era) re-mint at open, labels and clustering intact; unclaimed
+        // contact entries self-heal in `persons()` instead.
+        for (label, members) in client.state.take_legacy_persons() {
+            if let Err(error) =
+                client
+                    .state
+                    .save_person(PersonId::mint().to_storage(), &label, &members)
+            {
+                tracing::warn!(%error, label, "could not re-mint a legacy person row");
+            }
         }
+        client
     }
 
     /// Register the edge's sink for **directly delivered** messages (D5):

@@ -3,16 +3,19 @@
 //! "write a message to Alice" resolves. Purely client-side belief: entries
 //! never travel, never enter the protocol, and reference the per-device
 //! contact entries underneath (multi-device.md §7's display-vs-addressing
-//! separation, cashed in). Reads are pure: a contact entry no person
-//! claims materializes as a virtual singleton (label = petname) — the lazy
-//! migration; only the explicit acts (merge / split / rename) persist.
+//! separation, cashed in). **Every contact entry belongs to a person** —
+//! the eager invariant: adding a contact creates its person row (label
+//! initialized from the petname; independent facts thereafter), record
+//! updates re-point the member stem, and `persons()` self-heals an
+//! unclaimed entry on sight (the crash-gap net — normally a no-op).
 
 use std::collections::BTreeSet;
+use std::fmt;
 
+use rand_core::{OsRng, RngCore};
 use zink_protocol::{ContactRecord, PublicKey};
 
 use crate::error::Error;
-use crate::hex;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::Draw;
 use crate::ports::transport::Transport;
@@ -20,16 +23,57 @@ use crate::ports::transport::Transport;
 use super::Client;
 use super::contacts::Contact;
 
-/// Virtual (not-yet-persisted) person ids are stem-derived and marked so
-/// the acts know to mint a real id at first persist. Opaque to callers.
-const VIRTUAL: char = '@';
+/// The opaque local person id — what every act and page fetch keys on.
+/// **Ids identify; labels display and address**: a label is my mutable
+/// lens, so nothing holds a reference by it (labels resolve exactly once,
+/// at the human boundary — `person_by_label`). An id is an arbitrary
+/// local token: 128 random bits drawn at creation (`OsRng` at the call
+/// site, like key seeds — uniqueness matters, so never the clamping
+/// `Draw` port), never derived from keys or content (clusters merge,
+/// split, and rename), and never on the wire. The 32-hex string form
+/// round-trips the app's DTO boundary unread; parsing rejects anything
+/// else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PersonId(u128);
 
-/// One person as this client currently believes it: an opaque local id, the
-/// addressing label, and the member contact entries (the per-device layer —
-/// each with its own petname, record, and relays).
+impl PersonId {
+    /// Mint a fresh id — creation sites only (add, split, repair).
+    pub(crate) fn mint() -> Self {
+        let mut bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut bytes);
+        Self(u128::from_be_bytes(bytes))
+    }
+
+    /// The raw id the storage layer files under.
+    pub(crate) fn to_storage(self) -> u128 {
+        self.0
+    }
+}
+
+impl fmt::Display for PersonId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:032x}", self.0)
+    }
+}
+
+impl std::str::FromStr for PersonId {
+    type Err = Error;
+
+    fn from_str(raw: &str) -> Result<Self, Error> {
+        (raw.len() == 32 && raw.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| u128::from_str_radix(raw, 16).ok())
+            .flatten()
+            .map(Self)
+            .ok_or_else(|| Error::InvalidInput(format!("not a person id: {raw:?}")))
+    }
+}
+
+/// One person as this client currently believes it: the id, the addressing
+/// label, and the member contact entries (the per-device layer — each with
+/// its own petname, record, and relays).
 #[derive(Clone, Debug)]
 pub struct PersonEntry {
-    pub id: String,
+    pub id: PersonId,
     pub label: String,
     pub members: Vec<(String, ContactRecord)>,
 }
@@ -52,10 +96,12 @@ impl PersonEntry {
 }
 
 impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
-    /// Every person this client believes in, label-sorted. Self-healing,
-    /// never self-mutating: persisted entries drop members whose contact
-    /// entry is gone (an emptied person hides); contact entries no person
-    /// claims render as virtual singletons labeled by their petname.
+    /// Every person this client believes in, label-sorted. Self-healing:
+    /// persisted members whose contact entry is gone drop out (an emptied
+    /// person hides), a stem two rows claim (a crash inside a merge)
+    /// renders under the first row only, and a contact entry no person
+    /// claims — a crash gap, or a store from before the eager invariant —
+    /// gets its row minted on sight, so every entry renders exactly once.
     pub fn persons(&self) -> Result<Vec<PersonEntry>, Error> {
         let contacts = self.state.contacts()?;
         let entry_for = |stem: &PublicKey| {
@@ -66,11 +112,19 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         let mut persons = Vec::new();
         let mut claimed: BTreeSet<PublicKey> = BTreeSet::new();
         for (id, label, member_stems) in self.state.persons() {
-            let members: Vec<(String, ContactRecord)> =
-                member_stems.iter().filter_map(entry_for).cloned().collect();
+            let members: Vec<(String, ContactRecord)> = member_stems
+                .iter()
+                .filter(|stem| !claimed.contains(stem))
+                .filter_map(entry_for)
+                .cloned()
+                .collect();
             claimed.extend(members.iter().filter_map(|(_, r)| r.keys.first().copied()));
             if !members.is_empty() {
-                persons.push(PersonEntry { id, label, members });
+                persons.push(PersonEntry {
+                    id: PersonId(id),
+                    label,
+                    members,
+                });
             }
         }
         for (petname, record) in &contacts {
@@ -80,8 +134,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             if claimed.contains(&stem) {
                 continue;
             }
+            let id = self.claim_entry(petname, stem)?;
             persons.push(PersonEntry {
-                id: format!("{VIRTUAL}{}", hex::encode(&stem.0)),
+                id,
                 label: petname.clone(),
                 members: vec![(petname.clone(), record.clone())],
             });
@@ -90,46 +145,55 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         Ok(persons)
     }
 
+    /// Mint and persist the person row claiming one contact entry — the
+    /// add-time companion of `save_contact`, and what `persons()` runs on
+    /// an unclaimed entry. The label starts as the petname; they are
+    /// independent facts from here on (rename_person moves one, the
+    /// contact-store rename the other).
+    pub(super) fn claim_entry(&self, petname: &str, stem: PublicKey) -> Result<PersonId, Error> {
+        let id = PersonId::mint();
+        self.state.save_person(id.to_storage(), petname, &[stem])?;
+        Ok(id)
+    }
+
     /// Resolve a name to send-ready recipients: the person layer first (one
     /// `Contact` per member entry, so every key rides **its own entry's**
     /// relays — relays bind to the publishing device, SPEC §3.6), falling
     /// back to the per-device layer (an entry petname addresses that device
     /// alone — the manual override for "message Alice's phone").
     pub fn resolve_person(&self, name: &str) -> Result<Vec<Contact>, Error> {
-        if let Some(person) = self
-            .persons()?
-            .into_iter()
-            .find(|person| person.label == name)
-        {
-            return Ok(person
+        match self.person_by_label(name) {
+            Ok(person) => Ok(person
                 .members
                 .iter()
                 .map(|(_, record)| self.contact_from(record))
-                .collect());
+                .collect()),
+            Err(Error::NotAContact(_)) => self.resolve_contact(name).map(|contact| vec![contact]),
+            Err(error) => Err(error),
         }
-        self.resolve_contact(name).map(|contact| vec![contact])
     }
 
     /// Merge one person into another — the explicit clustering act (the
     /// evidence popup's accept, or a manual merge). `into` keeps its label
     /// and id; `from` dissolves. Advisory evidence never merges anything:
     /// this act is the only path.
-    pub fn merge_persons(&self, into: &str, from: &str) -> Result<PersonEntry, Error> {
+    pub fn merge_persons(&self, into: PersonId, from: PersonId) -> Result<PersonEntry, Error> {
         if into == from {
             return Err(Error::InvalidInput(
                 "cannot merge a person into itself".into(),
             ));
         }
-        let keep = self.person_by_label(into)?;
-        let absorb = self.person_by_label(from)?;
+        let keep = self.person_by_id(into)?;
+        let absorb = self.person_by_id(from)?;
         let mut members = keep.member_stems();
         members.extend(absorb.member_stems());
-        let id = self.persist_id(&keep)?;
-        self.state.save_person(&id, &keep.label, &members)?;
-        if !absorb.id.starts_with(VIRTUAL) {
-            self.state.remove_person(&absorb.id);
-        }
-        self.person_by_label(into)
+        // Grow first, remove after: a crash in between double-claims the
+        // stems, which `persons()` renders once (first row wins) until the
+        // next act rewrites — never a lost entry.
+        self.state
+            .save_person(into.to_storage(), &keep.label, &members)?;
+        self.state.remove_person(from.to_storage());
+        self.person_by_id(into)
     }
 
     /// Split a member entry back out to its own person, labeled by its
@@ -151,12 +215,17 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
                 "already its own person — nothing to split".into(),
             ));
         }
-        // The split-off person is labeled by the member's petname; both
-        // namespaces stay collision-free so resolution stays unambiguous.
-        if self
-            .persons()?
-            .iter()
-            .any(|person| person.label == member_petname && person.id != source.id)
+        // The split-off person is labeled by the member's petname, and
+        // labels stay unique across persons so send-by-name stays
+        // unambiguous. The source's own label counts: a merged person is
+        // often labeled by one member's petname (the merge keeps the kept
+        // person's label), and splitting that namesake member out must
+        // refuse rather than mint a twin — rename the person first.
+        if source.label == member_petname
+            || self
+                .persons()?
+                .iter()
+                .any(|person| person.id != source.id && person.label == member_petname)
         {
             return Err(Error::PetnameCollision(member_petname.to_string()));
         }
@@ -164,25 +233,27 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             .members
             .iter()
             .partition(|(petname, _)| petname != member_petname);
-        let source_id = self.persist_id(&source)?;
+        // Shrink first, split after: a crash in between leaves the member
+        // unclaimed, and the `persons()` self-heal re-mints it as its own
+        // singleton — the very outcome this act wanted.
         self.state.save_person(
-            &source_id,
+            source.id.to_storage(),
             &source.label,
             &kept
                 .iter()
                 .filter_map(|(_, record)| record.keys.first().copied())
                 .collect::<Vec<_>>(),
         )?;
-        let split_id = self.state.next_person_id()?;
+        let split_id = PersonId::mint();
         self.state.save_person(
-            &split_id,
+            split_id.to_storage(),
             member_petname,
             &split
                 .iter()
                 .filter_map(|(_, record)| record.keys.first().copied())
                 .collect::<Vec<_>>(),
         )?;
-        self.person_by_label(member_petname)
+        self.person_by_id(split_id)
     }
 
     /// Rename a person — the addressing label, my lens (like a petname,
@@ -190,18 +261,49 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
     /// label or contact petname, except its own members' petnames: the
     /// person layer resolves first, so shadowing our own member stays
     /// unambiguous.
-    pub fn rename_person(&self, current: &str, new: &str) -> Result<(), Error> {
+    pub fn rename_person(&self, id: PersonId, new: &str) -> Result<(), Error> {
         let new = new.trim();
         if new.is_empty() {
             return Err(Error::InvalidInput("person label cannot be empty".into()));
         }
-        if new == current {
+        let person = self.person_by_id(id)?;
+        if new == person.label {
             return Ok(());
         }
-        let person = self.person_by_label(current)?;
         self.ensure_label_free(new, Some(&person))?;
-        let id = self.persist_id(&person)?;
-        self.state.save_person(&id, new, &person.member_stems())
+        self.state
+            .save_person(id.to_storage(), new, &person.member_stems())
+    }
+
+    /// Look a person up by id — the reference every act takes. Total over
+    /// everything `persons()` renders: ids are stable for a person's whole
+    /// lifetime (only a split's new person, or a merge's dissolved one,
+    /// changes the id set).
+    pub fn person_by_id(&self, id: PersonId) -> Result<PersonEntry, Error> {
+        self.persons()?
+            .into_iter()
+            .find(|person| person.id == id)
+            .ok_or_else(|| Error::NotAContact(format!("no person with id {id}")))
+    }
+
+    /// Resolve a label to a person — the human boundary (a CLI argument,
+    /// send-by-name), and the only place labels resolve. Labels are unique
+    /// by construction (`ensure_label_free`); a duplicate means a damaged
+    /// store and errors honestly instead of first-match-wins.
+    pub fn person_by_label(&self, label: &str) -> Result<PersonEntry, Error> {
+        let mut matching = self
+            .persons()?
+            .into_iter()
+            .filter(|person| person.label == label);
+        let person = matching
+            .next()
+            .ok_or_else(|| Error::NotAContact(format!("no person labeled {label:?}")))?;
+        if matching.next().is_some() {
+            return Err(Error::InvalidInput(format!(
+                "several persons are labeled {label:?} — rename one, or act by id"
+            )));
+        }
+        Ok(person)
     }
 
     /// The joint-namespace collision check (S2: the collision rule moves to
@@ -212,9 +314,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         name: &str,
         exempt: Option<&PersonEntry>,
     ) -> Result<(), Error> {
-        let exempt_id = exempt.map(|person| person.id.as_str());
+        let exempt_id = exempt.map(|person| person.id);
         for person in self.persons()? {
-            if Some(person.id.as_str()) == exempt_id {
+            if Some(person.id) == exempt_id {
                 continue;
             }
             if person.label == name || person.members.iter().any(|(petname, _)| petname == name) {
@@ -222,23 +324,6 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             }
         }
         Ok(())
-    }
-
-    fn person_by_label(&self, label: &str) -> Result<PersonEntry, Error> {
-        self.persons()?
-            .into_iter()
-            .find(|person| person.label == label)
-            .ok_or_else(|| Error::NotAContact(format!("no person labeled {label:?}")))
-    }
-
-    /// The id to persist under: a virtual singleton materializes with a
-    /// freshly minted id at its first act; a persisted person keeps its own.
-    fn persist_id(&self, person: &PersonEntry) -> Result<String, Error> {
-        if person.id.starts_with(VIRTUAL) {
-            self.state.next_person_id()
-        } else {
-            Ok(person.id.clone())
-        }
     }
 }
 
@@ -249,6 +334,7 @@ mod tests {
 
     use super::super::Client;
     use super::super::test_kit::{signed_record, temp_key, temp_root};
+    use super::PersonId;
     use crate::error::Error;
     use crate::hex;
 
@@ -263,9 +349,21 @@ mod tests {
         ))]
     }
 
+    /// The label→id hop the acts no longer do themselves — tests speak
+    /// labels (readable), acts take ids.
+    fn id_of<C, W, N, R>(client: &Client<C, W, N, R>, label: &str) -> PersonId
+    where
+        C: crate::ports::clock::Clock,
+        W: crate::ports::clock::WallClock,
+        N: crate::ports::transport::Transport,
+        R: crate::ports::rng::Draw,
+    {
+        client.person_by_label(label).expect("person by label").id
+    }
+
     #[tokio::test]
-    async fn persons__should_materialize_one_person_per_contact_entry() {
-        // Given: two ordinary contacts, no clustering act ever taken
+    async fn add_contact__should_create_one_person_per_entry() {
+        // Given / When: two ordinary contact adds — the eager invariant
         let a = Client::open_or_create(&temp_key("pmat", "me"))
             .await
             .expect("open");
@@ -277,18 +375,46 @@ mod tests {
         a.add_contact(&signed_record(&device_key(2), "bob", 0, relay(2)), None)
             .expect("add");
 
-        // When
-        let persons = a.persons().expect("persons");
-
-        // Then: the lazy migration — one singleton per entry, labeled by
-        // its petname
-        let labels: Vec<(&str, usize)> = persons
+        // Then: one persisted person row per entry, labeled by its petname
+        assert_eq!(a.state.persons().len(), 2, "rows persisted at add time");
+        let labels: Vec<(String, usize)> = a
+            .persons()
+            .expect("persons")
             .iter()
-            .map(|person| (person.label.as_str(), person.members.len()))
+            .map(|person| (person.label.clone(), person.members.len()))
             .collect();
-        assert_eq!(labels, vec![("alice-phone", 1), ("bob", 1)]);
+        assert_eq!(
+            labels,
+            vec![("alice-phone".to_string(), 1), ("bob".to_string(), 1)]
+        );
 
         let _ = std::fs::remove_dir_all(temp_root("pmat"));
+    }
+
+    #[tokio::test]
+    async fn persons__should_claim_an_entry_that_bypassed_the_add_act() {
+        // Given: an entry written below the add act (a crash gap, or a
+        // store from before the eager invariant) — no person row
+        let a = Client::open_or_create(&temp_key("pheal", "me"))
+            .await
+            .expect("open");
+        a.state
+            .save_contact(
+                "carol",
+                &signed_record(&device_key(3), "carol", 0, relay(3)),
+            )
+            .expect("save");
+        assert_eq!(a.state.persons().len(), 0);
+
+        // When: any read runs
+        let persons = a.persons().expect("persons");
+
+        // Then: the invariant self-healed — claimed, rendered, persisted
+        assert_eq!(persons.len(), 1);
+        assert_eq!(persons[0].label, "carol");
+        assert_eq!(a.state.persons().len(), 1);
+
+        let _ = std::fs::remove_dir_all(temp_root("pheal"));
     }
 
     #[tokio::test]
@@ -305,7 +431,9 @@ mod tests {
             .expect("add laptop");
 
         // When: the explicit clustering act
-        let merged = a.merge_persons("Alice", "alice-laptop").expect("merge");
+        let merged = a
+            .merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+            .expect("merge");
 
         // Then: one person, two member entries; addressing the person
         // reaches both keys, each riding its own entry's relays (relays
@@ -336,7 +464,8 @@ mod tests {
             .expect("add");
         a.add_contact(&signed_record(&laptop, "alice-laptop", 0, relay(2)), None)
             .expect("add");
-        a.merge_persons("Alice", "alice-laptop").expect("merge");
+        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+            .expect("merge");
 
         // When: a send addressed by the person label (staged — local only)
         let contacts = a.resolve_person("Alice").expect("resolve");
@@ -370,7 +499,8 @@ mod tests {
             None,
         )
         .expect("add");
-        a.merge_persons("Alice", "alice-laptop").expect("merge");
+        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+            .expect("merge");
 
         // When
         let split = a.split_person("alice-laptop").expect("split");
@@ -383,6 +513,35 @@ mod tests {
         assert!(persons.iter().all(|person| !person.members.is_empty()));
 
         let _ = std::fs::remove_dir_all(temp_root("psplit"));
+    }
+
+    #[tokio::test]
+    async fn split_person__should_refuse_a_split_that_would_twin_the_source_label() {
+        // Given: a merged person labeled by one member's petname — the
+        // shape merge_persons produces
+        let a = Client::open_or_create(&temp_key("ptwin", "me"))
+            .await
+            .expect("open");
+        a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
+            .expect("add");
+        a.add_contact(
+            &signed_record(&device_key(2), "alice-laptop", 0, relay(2)),
+            None,
+        )
+        .expect("add");
+        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+            .expect("merge");
+
+        // When: splitting the namesake member out
+        let result = a.split_person("Alice");
+
+        // Then: refused — labels stay unique, addressing stays unambiguous
+        assert!(matches!(result, Err(Error::PetnameCollision(_))));
+        let persons = a.persons().expect("persons");
+        assert_eq!(persons.len(), 1);
+        assert_eq!(persons[0].members.len(), 2);
+
+        let _ = std::fs::remove_dir_all(temp_root("ptwin"));
     }
 
     #[tokio::test]
@@ -399,20 +558,17 @@ mod tests {
         a.add_contact(&signed_record(&device_key(2), "bob", 0, relay(2)), None)
             .expect("add");
 
-        // When: rename a (virtual) person — it materializes
-        a.rename_person("alice-phone", "Alice").expect("rename");
+        // When: rename by id — the id survives the label move
+        let alice = id_of(&a, "alice-phone");
+        a.rename_person(alice, "Alice").expect("rename");
 
-        // Then: resolution follows the new label; the old label now only
-        // reaches the member entry (petname layer); collisions refuse
-        assert!(
-            a.persons()
-                .expect("persons")
-                .iter()
-                .any(|p| p.label == "Alice")
-        );
+        // Then: resolution follows the new label at the same id; the old
+        // label now only reaches the member entry (petname layer);
+        // collisions refuse
+        assert_eq!(id_of(&a, "Alice"), alice);
         assert_eq!(a.resolve_person("Alice").expect("resolve").len(), 1);
         assert!(matches!(
-            a.rename_person("Alice", "bob"),
+            a.rename_person(alice, "bob"),
             Err(Error::PetnameCollision(_))
         ));
         // …and a new contact can't take a person label either
@@ -437,7 +593,8 @@ mod tests {
             .expect("add");
         a.add_contact(&signed_record(&laptop, "alice-laptop", 0, relay(2)), None)
             .expect("add");
-        a.merge_persons("Alice", "alice-laptop").expect("merge");
+        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+            .expect("merge");
         let mut rekeyed = signed_record(&fresh, "alice laptop", 1, relay(2));
         rekeyed.keys.push(laptop.public());
 

@@ -1,16 +1,18 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{Conversation, DeviceCard, PersonPage, RecordPreview, WhoIsReport};
+use zink_app_dto::{Conversation, DeviceCard, PersonPage, PersonRef, RecordPreview, WhoIsReport};
 
 use crate::chats::ConversationRow;
 use crate::{avatar_data_url, image, invoke};
 
 /// What the router hands the page (project 7 S3): a contact person by
-/// label, or a bare key — one page, two variants.
+/// opaque id, or a bare key — one page, two variants. Ids identify;
+/// labels only display (the header renders from the fetched page, and a
+/// rename never invalidates the target).
 #[derive(Clone, PartialEq)]
 pub(crate) enum PageTarget {
-    Label(String),
+    Person(String),
     Key(String),
 }
 
@@ -24,12 +26,12 @@ enum Lens {
 
 async fn fetch_page(target: &PageTarget) -> Result<PersonPage, String> {
     match target {
-        PageTarget::Label(label) => {
+        PageTarget::Person(id) => {
             #[derive(Serialize)]
             struct Args<'a> {
-                label: &'a str,
+                id: &'a str,
             }
-            invoke::invoke::<PersonPage>("person_page", &Args { label }).await
+            invoke::invoke::<PersonPage>("person_page", &Args { id }).await
         }
         PageTarget::Key(key) => {
             #[derive(Serialize)]
@@ -55,7 +57,6 @@ pub(crate) fn PersonView(
     back: impl Fn() + Copy + Send + 'static,
     open_chat: impl Fn(String, String) + Copy + Send + 'static,
     start_draft: impl Fn(Vec<String>) + Copy + Send + 'static,
-    open_person: impl Fn(String) + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
@@ -73,16 +74,15 @@ pub(crate) fn PersonView(
     // payload it came from; nothing is signed until the explicit accept.
     let pair_preview = RwSignal::new(None::<(RecordPreview, String)>);
 
-    let load_chats = move || {
-        let PageTarget::Label(label) = target.get_value() else {
-            return;
-        };
+    // Conversations with this person — keyed by the page's person id, so
+    // a key target that resolves to a person page lists them too.
+    let load_chats = move |id: String| {
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
-                petname: &'a str,
+                id: &'a str,
             }
-            let args = Args { petname: &label };
+            let args = Args { id: &id };
             if let Ok(list) =
                 invoke::invoke::<Vec<Conversation>>("person_conversations", &args).await
             {
@@ -94,6 +94,9 @@ pub(crate) fn PersonView(
     let apply = move |loaded: PersonPage| {
         rename_to.set(loaded.label.clone());
         let avatar_key = loaded.avatar_key.clone();
+        if let Some(info) = &loaded.person {
+            load_chats(info.id.clone());
+        }
         page.set(Some(loaded));
         spawn_local(async move {
             if !avatar_key.is_empty()
@@ -140,33 +143,35 @@ pub(crate) fn PersonView(
         });
     };
     load_page();
-    load_chats();
 
-    // Rename the person — the addressing label, my lens (S2). Local only.
+    // Rename the person — the addressing label, my lens (S2). Acts key on
+    // the page's person id; the id survives the label move, so the target
+    // stays valid and the reload just re-renders.
     let do_rename = move || {
-        let PageTarget::Label(current) = target.get_value() else {
+        let Some(current) = page.get_untracked() else {
+            return;
+        };
+        let Some(info) = current.person else {
             return;
         };
         let new = rename_to.get_untracked();
-        if new.trim().is_empty() || new == current {
+        if new.trim().is_empty() || new == current.label {
             return;
         }
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
-                current: &'a str,
+                id: &'a str,
                 new: &'a str,
             }
             let args = Args {
-                current: &current,
+                id: &info.id,
                 new: &new,
             };
             match invoke::invoke::<serde::de::IgnoredAny>("rename_person", &args).await {
                 Ok(_) => {
-                    target.set_value(PageTarget::Label(new.clone()));
                     reload();
                     load_page();
-                    load_chats();
                     ok(&format!("renamed to {new}"));
                 }
                 Err(e) => err(e),
@@ -175,15 +180,25 @@ pub(crate) fn PersonView(
     };
 
     // The explicit clustering act (S2): merge another person into this one.
-    // Evidence only ever offers; this is the accept.
+    // Evidence only ever offers; this is the accept. The picker's value is
+    // the person id; its label is only what the human saw.
     let do_merge = move || {
-        let PageTarget::Label(into) = target.get_value() else {
+        let Some(current) = page.get_untracked() else {
+            return;
+        };
+        let Some(info) = current.person else {
             return;
         };
         let from = merge_pick.get_untracked();
         if from.is_empty() {
             return;
         }
+        let from_label = info
+            .merge_candidates
+            .iter()
+            .find(|candidate| candidate.id == from)
+            .map(|candidate| candidate.label.clone())
+            .unwrap_or_default();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
@@ -191,7 +206,7 @@ pub(crate) fn PersonView(
                 from: &'a str,
             }
             let args = Args {
-                into: &into,
+                into: &info.id,
                 from: &from,
             };
             match invoke::invoke::<serde::de::IgnoredAny>("merge_persons", &args).await {
@@ -199,8 +214,7 @@ pub(crate) fn PersonView(
                     merge_pick.set(String::new());
                     reload();
                     load_page();
-                    load_chats();
-                    ok(&format!("{from} is now a device of {into}"));
+                    ok(&format!("{from_label} is now a device of {}", current.label));
                 }
                 Err(e) => err(e),
             }
@@ -219,7 +233,6 @@ pub(crate) fn PersonView(
                 Ok(label) => {
                     reload();
                     load_page();
-                    load_chats();
                     ok(&format!("{label} is their own person again"));
                 }
                 Err(e) => err(e),
@@ -431,7 +444,8 @@ pub(crate) fn PersonView(
         });
     };
 
-    // Promote a candidate record to a contact (the explicit add).
+    // Promote a candidate record to a contact (the explicit add). The
+    // target stays the key — re-fetching lands on the person variant now.
     let add_candidate = move |payload: String| {
         spawn_local(async move {
             #[derive(Serialize)]
@@ -447,7 +461,7 @@ pub(crate) fn PersonView(
                 Ok(petname) => {
                     reload();
                     ok(&format!("added {petname}"));
-                    open_person(petname);
+                    load_page();
                 }
                 Err(e) => err(e),
             }
@@ -768,14 +782,18 @@ pub(crate) fn PersonView(
                                     }
                                 }
                             }}
-                            {matches!(lens.get_untracked(), Lens::Friends)
-                                .then(|| {
-                                    view! {
-                                        <div class="dim">
-                                            "asking a friend dials only them — they'll know you asked"
-                                        </div>
-                                    }
-                                })}
+                            // Reactive on the lens: the disclosure must be
+                            // readable BEFORE the first ask, not after.
+                            {move || {
+                                matches!(lens.get(), Lens::Friends)
+                                    .then(|| {
+                                        view! {
+                                            <div class="dim">
+                                                "asking a friend dials only them — they'll know you asked"
+                                            </div>
+                                        }
+                                    })
+                            }}
                             // ── conversations (contact case) ──
                             {is_person
                                 .then(|| {
@@ -848,8 +866,8 @@ pub(crate) fn PersonView(
                                                 {merge_candidates
                                                     .into_iter()
                                                     .map(|candidate| {
-                                                        let value = candidate.clone();
-                                                        view! { <option value=value>{candidate}</option> }
+                                                        let PersonRef { id, label } = candidate;
+                                                        view! { <option value=id>{label}</option> }
                                                     })
                                                     .collect::<Vec<_>>()}
                                             </select>

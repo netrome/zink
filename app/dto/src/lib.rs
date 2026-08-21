@@ -73,6 +73,10 @@ pub struct AddPreview {
 /// the person label — what send-by-name resolves.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ContactRow {
+    /// The opaque person id — what the page fetch and every act key on.
+    /// Ids identify; labels display and address (a label is a mutable
+    /// lens, so nothing holds a reference by it). Round-trips unread.
+    pub id: String,
     /// The person label (my lens; the addressing name).
     pub petname: String,
     /// A verified self-claimed name from the cluster, if any — a row's dim
@@ -123,8 +127,18 @@ pub struct PersonPage {
 /// The contact-person half of the page.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PersonInfo {
-    /// Other person labels — the "same person as…" merge picker's options.
-    pub merge_candidates: Vec<String>,
+    /// The opaque person id — the handle for rename / merge /
+    /// `person_conversations` (ids identify; labels display).
+    pub id: String,
+    /// Other persons — the "same person as…" merge picker's options.
+    pub merge_candidates: Vec<PersonRef>,
+}
+
+/// A person handle for pickers: the id acts key on, the label humans see.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PersonRef {
+    pub id: String,
+    pub label: String,
 }
 
 /// The stranger half of the page (absorbs the original identity-preview

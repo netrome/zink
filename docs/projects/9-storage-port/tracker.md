@@ -30,7 +30,10 @@ portability half that project 3 deliberately didn't buy.
 - **Testability**: the crash-ordering claims code comments currently
   assert untested ("a crash between these writes leaves a duplicate,
   never a lost contact") become tests against a fault-injecting double;
-  temp-dir plumbing leaves the test kit.
+  temp-dir plumbing leaves the test kit. Project 7's eager person rows
+  added more of these: the contact-add's paired writes (entry + person
+  row), merge/split write ordering, and the `persons()` crash-gap
+  self-heal are all crash-ordering contracts waiting for that double.
 - **The PWA client**: `std::fs` compiles on wasm32 and fails at runtime —
   the browser client cannot exist without this port. Its backends are
   async, which is the design question below.
