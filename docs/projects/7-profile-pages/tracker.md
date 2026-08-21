@@ -93,6 +93,27 @@ per-device detail. Around it, the model work that keeps it honest:
   live — a stranger's request previews and add completes from the page
   with no query fired on open; a two-device contact shows distinct labels
   and relays; asking one friend dials only that friend.
+  *(2026-08-21: code complete — awaiting the live run. One `PersonView`
+  for both variants (`View::Person{label}` / `View::Key{key}`; a member
+  key lands on its person's page, own keys point at Me); `person_page` /
+  `key_page` render local stores only. Client grew `refresh_contact`
+  (page-open subject-refresh, sharing R6's ledger — stranger pages are a
+  structural no-op), `friend_views` (per-responder lens data, voiding
+  applied), `relay_resolution` (bare-key route + provenance), and
+  `claims_to_be_my_device` (the pair-back offer: verified self-link to an
+  own key, negatives void it; unit-tested with forgeries). The app's data
+  layer went person-shaped: `AppState.contacts` rows come from
+  `persons()` (the picker and People list render clusters), sends resolve
+  via `resolve_person`, the members panel excludes person labels. The
+  per-friend ask is `who_is_among` scoped to one friend per member key,
+  copy stating they'll know. Pair-back routes through `inspect_record`'s
+  fingerprint confirm — never one tap. Request rows carry
+  `stranger_key` + a "who is this?" preview button. Me + onboarding
+  gained the device field (S1's prefill split); vouch copy now names the
+  exact string it shares. Follow-up noted: vouching publishes the entry
+  petname — publishing the person label instead is a small client change,
+  with S5. Verified: workspace tests green, clippy clean, UI wasm +
+  src-tauri (desktop shell) compile, both bundles build.)*
 - **S4 · Tappable surfaces.** Sender lines, member rows, wild-key rows
   navigate to the page; the wild-key panel shrinks to a link; the R3
   stuck-cue tap target resolves from membership. *Done when:* every

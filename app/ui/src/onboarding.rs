@@ -23,6 +23,9 @@ pub(crate) fn OnboardingView(
 ) -> impl IntoView {
     let step = RwSignal::new(OnboardStep::Identity);
     let name = RwSignal::new(String::new());
+    // The S1 split, asked as two calm questions: the name is the person,
+    // the device label the device ("phone", "laptop") — optional.
+    let device_label = RwSignal::new(String::new());
     let relays = RwSignal::new(Vec::<String>::new());
     let new_relay = RwSignal::new(String::new());
     let avatar_preview = RwSignal::new(None::<String>);
@@ -146,15 +149,18 @@ pub(crate) fn OnboardingView(
         if relays.is_empty() {
             return err("add at least one relay so friends can reach you".into());
         }
+        let device_label = device_label.get_untracked();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
                 name: &'a str,
                 relays: &'a [String],
+                device_label: &'a str,
             }
             let args = Args {
                 name: &name,
                 relays: &relays,
+                device_label: &device_label,
             };
             match invoke::invoke::<QrPayload>("set_profile", &args).await {
                 Ok(payload) => {
@@ -178,6 +184,12 @@ pub(crate) fn OnboardingView(
                             placeholder="your name"
                             prop:value=move || name.get()
                             on:input=move |ev| name.set(event_target_value(&ev))
+                        />
+                        <div class="dim">"and this device? (optional)"</div>
+                        <input
+                            placeholder="phone, laptop…"
+                            prop:value=move || device_label.get()
+                            on:input=move |ev| device_label.set(event_target_value(&ev))
                         />
                         <div class="pending">
                             {move || {

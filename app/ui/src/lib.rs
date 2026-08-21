@@ -38,10 +38,23 @@ pub fn start() {
 #[derive(Clone, PartialEq)]
 enum View {
     Chats,
-    Chat { id: String, label: String },
-    Draft { to: Vec<String> },
+    Chat {
+        id: String,
+        label: String,
+    },
+    Draft {
+        to: Vec<String>,
+    },
     People,
-    Person { petname: String },
+    /// The person page for a contact person, by label (project 7 S3).
+    Person {
+        label: String,
+    },
+    /// The same page for a bare key — the stranger variant (S3): message
+    /// requests preview here without opening the chat.
+    Key {
+        key: String,
+    },
     Me,
 }
 
@@ -159,7 +172,8 @@ fn App() -> impl IntoView {
         view.set(View::Chat { id, label });
     };
     let start_draft = move |to: Vec<String>| view.set(View::Draft { to });
-    let open_person = move |petname: String| view.set(View::Person { petname });
+    let open_person = move |label: String| view.set(View::Person { label });
+    let open_key = move |key: String| view.set(View::Key { key });
     // Onboarding done → drop the takeover and land on Chats.
     let finish_onboarding = move || {
         onboarding.set(false);
@@ -196,6 +210,7 @@ fn App() -> impl IntoView {
                     picker=new_chat_picker
                     open_chat=open_chat
                     start_draft=start_draft
+                    open_key=open_key
                 />
             }
             .into_any(),
@@ -238,13 +253,30 @@ fn App() -> impl IntoView {
                 />
             }
             .into_any(),
-            View::Person { petname } => view! {
+            View::Person { label } => view! {
                 <PersonView
-                    petname=petname
+                    target=person::PageTarget::Label(label)
                     reload=load_state
                     back=move || view.set(View::People)
                     open_chat=open_chat
                     start_draft=start_draft
+                    open_person=open_person
+                    ok=ok
+                    err=err
+                />
+            }
+            .into_any(),
+            View::Key { key } => view! {
+                <PersonView
+                    target=person::PageTarget::Key(key)
+                    reload=load_state
+                    back=move || {
+                        load_conversations();
+                        view.set(View::Chats);
+                    }
+                    open_chat=open_chat
+                    start_draft=start_draft
+                    open_person=open_person
                     ok=ok
                     err=err
                 />
@@ -280,7 +312,9 @@ fn App() -> impl IntoView {
                 }}
             </button>
             <button
-                class:active=move || matches!(view.get(), View::People | View::Person { .. })
+                class:active=move || {
+                    matches!(view.get(), View::People | View::Person { .. } | View::Key { .. })
+                }
                 on:click=move |_| {
                     load_state();
                     view.set(View::People);

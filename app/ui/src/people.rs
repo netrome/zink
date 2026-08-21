@@ -336,6 +336,14 @@ pub(crate) fn PeopleView(
                                                         .map(|url| view! { <img class="avatar" src=url /> })
                                                 }}
                                                 <b>{contact.petname}</b>
+                                                {(contact.members > 1)
+                                                    .then(|| {
+                                                        view! {
+                                                            <span class="dim">
+                                                                {format!("{} devices", contact.members)}
+                                                            </span>
+                                                        }
+                                                    })}
                                                 {has_warning
                                                     .then(|| view! { <span class="dim">"⚠"</span> })}
                                                 {self_name

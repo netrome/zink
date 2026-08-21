@@ -16,6 +16,9 @@ pub const RELAY_QR_PREFIX: &str = "ZINK-RELAY:";
 pub struct AppState {
     pub my_key: String,
     pub name: Option<String>,
+    /// This device's self-claimed device label ("phone", "laptop") — the
+    /// qualifier beside the person name (SPEC §3.2 `DeviceLabel`, S1).
+    pub device_label: Option<String>,
     /// All home relays as full dial specs (`dial[#relay-url]`, U5 multi-relay)
     /// — "where your messages wait when you're offline". Round-trips back
     /// through `set_profile`; a bare dial string would drop the relay URL.
@@ -65,59 +68,120 @@ pub struct AddPreview {
     pub name: Option<String>,
 }
 
-/// One contact-list row. The key rides along so the contact view can run
-/// identity actions (`who_is` refresh, D1c) without re-deriving it.
+/// One people-list / picker row — a **person** (project 7 S2/S3): the
+/// cluster lens, one row per person, never per device key. `petname` is
+/// the person label — what send-by-name resolves.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ContactRow {
+    /// The person label (my lens; the addressing name).
     pub petname: String,
-    /// Their verified self-claimed name, if any — a row's dim second line
-    /// when it differs from the petname (S5).
+    /// A verified self-claimed name from the cluster, if any — a row's dim
+    /// second line when it differs from the label (S5).
     pub self_name: Option<String>,
-    /// The record's first key, hex — the row's avatar / `who_is` handle.
+    /// The first member's first key, hex — the row's avatar handle.
     pub key: String,
-    /// The full cluster of keys grouped under this person, hex — cluster-first
-    /// (U4, design/ui-design-system.md §1); consumers read the set, never assume `key` is
-    /// the only one.
+    /// Every key across the person's member entries, hex — cluster-first
+    /// (ui-design-system.md §1); consumers read the set, never assume
+    /// `key` is the only one.
     pub keys: Vec<String>,
-    /// Whether this device currently vouches for them (D4c toggle).
+    /// How many device entries this person spans (the "2 devices" hint).
+    pub members: usize,
+    /// Whether this device vouches for any member (D4c).
     pub vouched: bool,
-    /// Render-ready disavowal warnings, e.g. "disavowed by mårten —
-    /// excluded from your replies" (D4c). Empty for the common case.
+    /// Render-ready disavowal warnings across the cluster (D4c). Empty for
+    /// the common case.
     pub disavowals: Vec<String>,
 }
 
-/// The person-detail screen (U4, design/ui-design-system.md §1): the three separated
-/// belief layers, all read-time (no network pull). Fetched by petname when a
-/// People row is tapped.
+/// The person page (project 7 S3): one page for contacts and strangers
+/// alike, keyed by the observer's cluster lens. Exactly one of `person` /
+/// `stranger` is set. All read-time, local stores only — rendering never
+/// queries anyone; the page's queries (the contact subject-refresh, the
+/// per-friend ask, the stranger bootstrap) are separate explicit commands.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PersonDetail {
-    /// My petname for them (my lens).
-    pub petname: String,
-    /// The keys I've grouped under this person, hex — cluster-first, never
-    /// one-key-per-person.
-    pub keys: Vec<String>,
-    /// The key avatar lookup uses (the cluster's first).
+pub struct PersonPage {
+    /// The header: person label (contact), else the best learned
+    /// self-claim, else short hex.
+    pub label: String,
+    /// Set for a contact person — the my-lens acts apply (rename, merge).
+    pub person: Option<PersonInfo>,
+    /// Set for a non-contact key — the stranger variant.
+    pub stranger: Option<StrangerInfo>,
+    /// The key avatar lookup uses (first member's first key).
     pub avatar_key: String,
-    /// Whether I currently vouch for them.
-    pub vouched: bool,
-    /// Their own verified self-claimed name, if any (their self-claim layer).
-    pub self_name: Option<String>,
-    /// Whether I've set a local photo for them (U6) — drives the "use their
-    /// photo instead" affordance.
+    /// Whether I've set a local photo (U6) — drives the photo affordances.
     pub has_local_avatar: bool,
-    /// How mutual friends label them — vouched names only, never a friend's
-    /// private petname (the friends' lens; who-is-this.md §6).
-    pub friends: Vec<FriendLabel>,
-    /// Render-ready disavowal warnings (D4c) — context for a trust decision.
+    /// The per-device layer: one card per member entry (a stranger is a
+    /// one-card degenerate cluster).
+    pub devices: Vec<DeviceCard>,
+    /// The through-friends lens: what each friend *tells* you — vouched
+    /// names and held records; never their private petnames
+    /// (web-of-trust.md §6). Display-only; addressing stays mine.
+    pub friends: Vec<FriendLens>,
+}
+
+/// The contact-person half of the page.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PersonInfo {
+    /// Other person labels — the "same person as…" merge picker's options.
+    pub merge_candidates: Vec<String>,
+}
+
+/// The stranger half of the page (absorbs the original identity-preview
+/// proposal): everything believed about an unknown key, plus the acts.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StrangerInfo {
+    /// The key, hex — the handle for who-is / dismiss / add.
+    pub key: String,
+    /// Ranked name candidates from the learned store (no query fired).
+    pub candidates: Vec<WhoIsCandidate>,
+    pub dismissed: bool,
+    /// ZINK payload when this key's record verifiably claims to be one of
+    /// MY devices (the one-way pairing case) — feeds the pair-confirm
+    /// fingerprint flow; recognizing is never one tap.
+    pub pair_back: Option<String>,
+}
+
+/// One member device of the page's cluster — my belief about one key.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceCard {
+    /// My per-device petname (the entry underneath the person label), or
+    /// short hex for a stranger.
+    pub petname: String,
+    /// Their self-claimed device label ("phone", "laptop" — SPEC §3.2).
+    pub device_label: Option<String>,
+    /// Their self-claimed person name.
+    pub self_name: Option<String>,
+    /// Full key hex — the fingerprint, shown at trust moments.
+    pub key: String,
+    /// Link evidence with direction, render-ready ("mårten-phone says this
+    /// is their device", "…mutually confirmed"); empty = clustered by you
+    /// alone, no cryptographic link.
+    pub link: Vec<String>,
+    /// Render-ready disavowal warnings for this key (D4c).
     pub disavowals: Vec<String>,
-    /// Render-ready provenance for `relays` (R5): "you set these by hand",
-    /// "served by them · 2 h ago", "from your scan", "heard from a
-    /// contact · …".
+    /// Render-ready provenance for `relays` (R5) — per device, from that
+    /// device's own records (relays bind to the publishing device).
     pub relay_source: String,
-    /// The relays a message to them would use right now (R5).
     pub relays: Vec<RelayRow>,
-    /// Whether a manual override is in effect — drives the clear button.
+    /// Whether a manual relay override is in effect for this entry.
     pub relay_override: bool,
+    /// Whether I vouch for this entry (sharing its petname — D4a).
+    pub vouched: bool,
+    /// Whether the split act applies (the person has other members).
+    pub can_split: bool,
+}
+
+/// One friend's lens on this person: what they chose to tell you.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FriendLens {
+    /// The friend, by my petname for them — also the `ask_friend` handle.
+    pub petname: String,
+    /// The name they vouch for this person (their published claim), if any.
+    pub vouched_name: Option<String>,
+    /// Render-ready held-record lines ("holds their record — 'Mårten ·
+    /// laptop', from 2 d ago").
+    pub held: Vec<String>,
 }
 
 /// One effective relay for a person (R5).
@@ -129,14 +193,6 @@ pub struct RelayRow {
     /// oldest 3 d ago") — `None` = nothing queued. Per *relay*, so on a
     /// relay shared across contacts it can include other people's messages.
     pub owed: Option<String>,
-}
-
-/// One vouched name from the friends' lens: a name, and the petnames of the
-/// friends who vouch it for this person.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct FriendLabel {
-    pub name: String,
-    pub vouched_by: Vec<String>,
 }
 
 /// A displayable ContactRecord: SVG for the screen, text for copy/paste.
@@ -167,6 +223,10 @@ pub struct Conversation {
     /// in the requests queue rather than the main list. Not a verdict: a
     /// contact's first message promotes it with nothing lost.
     pub request: bool,
+    /// For a request row: an unknown sender's key (hex) — the "who is
+    /// this?" preview handle, opening the person page (S3). `None` on
+    /// ordinary conversations.
+    pub stranger_key: Option<String>,
 }
 
 /// The chats screen's two lists (groups.md §6, unknown-sender quarantine).

@@ -184,6 +184,18 @@ pub struct LearnedName {
     pub endorsed_by: Vec<String>,
 }
 
+/// One responder's view of a subject (project 7 S3): what this friend
+/// tells me — the record they hold and the name they vouch.
+pub struct FriendView {
+    /// My petname for the responder (short hex when no longer a contact).
+    pub petname: String,
+    /// The subject's record as this friend holds it.
+    pub record: ContactRecord,
+    /// The name this friend vouches for the subject, if any (D4a).
+    pub vouched_name: Option<String>,
+    pub received_ms: u64,
+}
+
 /// One contact's verified link evidence for an unknown key (D3c,
 /// multi-device.md §7): the popup's "P says this is their device" line —
 /// an offer's provenance, never an instruction.
@@ -688,6 +700,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
         })
     }
 
+    /// The read-time relay resolution for a bare key (project 7 S3 — the
+    /// stranger page's route panel): `effective_relays` with provenance,
+    /// no contact entry required. `None`: nothing anywhere names a relay.
+    pub fn relay_resolution(&self, key: PublicKey) -> Option<RelayResolution> {
+        self.resolve_relays(key, self.trusted_record_for(&key).as_ref())
+    }
+
     /// Set (or clear, with an empty list) the manual relay override for a
     /// contact (R5): stored beside the record, never inside it. Wins
     /// resolution while present; an explicit record update
@@ -948,6 +967,103 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             .collect();
         evidence.sort_by(|a, b| b.tier.cmp(&a.tier).then_with(|| a.petname.cmp(&b.petname)));
         Ok(evidence)
+    }
+
+    /// Each responder's view of a subject (project 7 S3 — the
+    /// through-friends lens): the subject's record as that friend holds it,
+    /// the name the friend vouches (their own claim, the voiding rule
+    /// applied), and when the answer landed. Subject-served entries are
+    /// excluded — the subject's own answers are the "what they claim"
+    /// layer, not a friend's lens.
+    pub fn friend_views(&self, subject: PublicKey) -> Result<Vec<FriendView>, Error> {
+        let contacts = self.state.contacts()?;
+        let petname_of = |responder: PublicKey| {
+            contacts
+                .iter()
+                .find(|(_, record)| record.keys.contains(&responder))
+                .map(|(petname, _)| petname.clone())
+                .unwrap_or_else(|| hex::encode(&responder.0[..4]))
+        };
+        Ok(self
+            .state
+            .learned(&subject)
+            .into_iter()
+            .filter(|entry| entry.responder != subject)
+            .map(|entry| {
+                let vouched_name = entry
+                    .endorsements
+                    .iter()
+                    .filter(|signed| signed.verify().is_ok())
+                    .filter_map(|signed| match &signed.attestation.claim {
+                        Claim::Name(name) => Some((name.clone(), signed.attestation.revision)),
+                        _ => None,
+                    })
+                    .max_by_key(|(_, revision)| *revision)
+                    .filter(|(_, name_revision)| {
+                        // Withdrawn vouches stay withdrawn (D4b): a
+                        // higher-revision Negative from the same friend
+                        // voids their name claim.
+                        !entry
+                            .endorsements
+                            .iter()
+                            .filter_map(zink_protocol::verified_negative)
+                            .any(|(attester, disavowed, revision)| {
+                                attester == entry.responder
+                                    && disavowed == subject
+                                    && revision > *name_revision
+                            })
+                    })
+                    .map(|(name, _)| name);
+                FriendView {
+                    petname: petname_of(entry.responder),
+                    record: entry.record.clone(),
+                    vouched_name,
+                    received_ms: entry.received_ms,
+                }
+            })
+            .collect())
+    }
+
+    /// A stranger's learned record claiming to be one of MY devices
+    /// (project 7 S3 — the pair-back case): the freshest learned record
+    /// for `subject` carrying a verified, self-attested `SamePersonAs`
+    /// whose linked key is an own key, and which the subject has not
+    /// itself voided with a higher-revision `Negative`. This is the
+    /// one-way-pairing artifact — the phone recognized this device, this
+    /// device never scanned back. Never trusted by itself: the offer
+    /// routes through the pair-confirm fingerprint like every recognize
+    /// act (multi-device.md §3).
+    pub fn claims_to_be_my_device(&self, subject: PublicKey) -> Option<ContactRecord> {
+        let own = self.own_keys();
+        if own.contains(&subject) {
+            return None;
+        }
+        let claims_us = |record: &ContactRecord| {
+            record.attestations.iter().any(|signed| {
+                let attestation = &signed.attestation;
+                let Claim::SamePersonAs(linked) = attestation.claim else {
+                    return false;
+                };
+                let voided = record.attestations.iter().any(|other| {
+                    other.attestation.attester == subject
+                        && other.attestation.subject == linked
+                        && matches!(other.attestation.claim, Claim::Negative)
+                        && other.attestation.revision > attestation.revision
+                        && other.verify().is_ok()
+                });
+                own.contains(&linked)
+                    && attestation.attester == subject
+                    && attestation.subject == subject
+                    && !voided
+                    && signed.verify().is_ok()
+            })
+        };
+        self.state
+            .learned(&subject)
+            .into_iter()
+            .filter(|entry| claims_us(&entry.record))
+            .max_by_key(|entry| entry.received_ms)
+            .map(|entry| entry.record)
     }
 
     /// Ignore an unknown key (D2c, groups.md §5): the popup stops
@@ -1773,6 +1889,90 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("evidence"));
+    }
+
+    #[tokio::test]
+    async fn claims_to_be_my_device__should_surface_the_pair_back_record_only() {
+        // Given: my laptop; a phone whose learned record self-links MY key
+        // (the one-way pairing artifact), a forger, and an unrelated link
+        let a = Client::open_or_create(&temp_key("pairback", "a"))
+            .await
+            .expect("open");
+        let me = a.public_key();
+        let phone = DeviceKey::from_seed([61; 32]);
+        let stranger = DeviceKey::from_seed([62; 32]);
+        let link = |attester: &DeviceKey, linked: PublicKey, revision: u64, signer: &DeviceKey| {
+            SignedAttestation::new(
+                Attestation {
+                    version: Attestation::CURRENT,
+                    attester: attester.public(),
+                    subject: attester.public(),
+                    claim: Claim::SamePersonAs(linked),
+                    revision,
+                },
+                signer,
+            )
+        };
+        let record = |device: &DeviceKey, attestations: Vec<SignedAttestation>| {
+            ContactRecord::new(
+                vec![device.public()],
+                attestations,
+                mailbox_only("rr@203.0.113.1:1"),
+            )
+        };
+
+        // When: the phone's record (claims me), a forged claim, and a
+        // link to someone else land in the learned store
+        a.state
+            .save_learned(
+                &phone.public(),
+                &phone.public(),
+                &record(&phone, vec![link(&phone, me, 0, &phone)]),
+                &[],
+                1,
+            )
+            .expect("learn phone");
+        a.state
+            .save_learned(
+                &stranger.public(),
+                &stranger.public(),
+                &record(&stranger, vec![link(&stranger, me, 0, &phone)]), // forged
+                &[],
+                2,
+            )
+            .expect("learn forged");
+
+        // Then: only the verified claim surfaces, as its record
+        assert_eq!(
+            a.claims_to_be_my_device(phone.public())
+                .map(|record| record.keys),
+            Some(vec![phone.public()])
+        );
+        assert_eq!(a.claims_to_be_my_device(stranger.public()), None);
+
+        // And: the phone repudiating me voids its own link — no offer
+        let negative = SignedAttestation::new(
+            Attestation {
+                version: Attestation::CURRENT,
+                attester: phone.public(),
+                subject: me,
+                claim: Claim::Negative,
+                revision: 1,
+            },
+            &phone,
+        );
+        a.state
+            .save_learned(
+                &phone.public(),
+                &phone.public(),
+                &record(&phone, vec![link(&phone, me, 0, &phone), negative]),
+                &[],
+                3,
+            )
+            .expect("learn voided");
+        assert_eq!(a.claims_to_be_my_device(phone.public()), None);
+
+        let _ = std::fs::remove_dir_all(temp_root("pairback"));
     }
 
     #[tokio::test]

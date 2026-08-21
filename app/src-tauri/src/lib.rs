@@ -3,15 +3,15 @@
 //! (`zink-app-dto`) rendered from the *stored DAG*; the webview owns only
 //! presentation. Images render in C3c; live delivery is C4.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
-    AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceRow,
-    FriendLabel, Inbox, Message, OutgoingImage, PersonDetail, QrPayload, RecordPreview, RelayRow,
-    UnknownMember, WhoIsCandidate, WhoIsReport,
+    AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceCard,
+    DeviceRow, FriendLens, Inbox, Message, OutgoingImage, PersonInfo, PersonPage, QrPayload,
+    RecordPreview, RelayRow, StrangerInfo, UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -205,25 +205,38 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
     Ok(AppState {
         my_key: hex::encode(&client.public_key().0),
         name: client.profile_name(),
+        device_label: client.device_label(),
         // The full specs (`dial[#relay-url]`): these round-trip through the
         // profile form back into set_profile — a bare dial string would
         // silently drop the relay URL on a re-save (D0b). All of them now
         // (U5 multi-relay), not just the first.
         relays: client.home_relay_specs(),
+        // One row per PERSON (S2/S3, cluster-first): the people list and
+        // the picker render the lens, never the per-device entries.
         contacts: {
             let mut rows = Vec::new();
-            for (petname, record) in client.contacts()? {
-                let key = record.keys.first().copied();
+            for person in client.persons()? {
+                let keys: Vec<PublicKey> = person.keys().into_iter().collect();
+                let first = person
+                    .members
+                    .first()
+                    .and_then(|(_, record)| record.keys.first().copied());
+                let mut disavowals = Vec::new();
+                for &key in &keys {
+                    disavowals.extend(disavowal_lines(&client, key)?);
+                }
                 rows.push(ContactRow {
-                    petname,
-                    self_name: record.self_claimed_name().map(str::to_string),
-                    key: key.map(|key| hex::encode(&key.0)).unwrap_or_default(),
-                    keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
-                    vouched: key.map(|key| client.vouches(&key)).unwrap_or(false),
-                    disavowals: match key {
-                        Some(key) => disavowal_lines(&client, key)?,
-                        None => vec![],
-                    },
+                    petname: person.label.clone(),
+                    self_name: person
+                        .members
+                        .iter()
+                        .find_map(|(_, record)| record.self_claimed_name())
+                        .map(str::to_string),
+                    key: first.map(|key| hex::encode(&key.0)).unwrap_or_default(),
+                    keys: keys.iter().map(|key| hex::encode(&key.0)).collect(),
+                    members: person.members.len(),
+                    vouched: keys.iter().any(|key| client.vouches(key)),
+                    disavowals,
                 });
             }
             rows
@@ -390,16 +403,22 @@ async fn introduce_devices(
 }
 
 /// Save name + home relays (U5 multi-relay: the full set replaces the old),
-/// register the mailboxes there, return the QR.
+/// register the mailboxes there, return the QR. `device_label` is the
+/// optional qualifier beside the name ("phone", "laptop" — SPEC §3.2,
+/// S1's two calm questions); empty keeps the current one.
 #[tauri::command]
 async fn set_profile(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
     name: String,
     relays: Vec<String>,
+    device_label: Option<String>,
 ) -> Result<QrPayload, String> {
     let client = client(&app, &managed).await?;
     client.set_profile(&name, &relays).await?;
+    if let Some(label) = device_label.filter(|label| !label.trim().is_empty()) {
+        client.set_device_label(&label)?;
+    }
     // Best-effort (R4, 5-relay-lifecycle §8): the profile is saved and the
     // QR must render even when the relay is unreachable — that QR is the
     // recovery artifact. An unreachable own relay surfaces through the
@@ -543,82 +562,363 @@ async fn clear_local_avatar(
     Ok(())
 }
 
-/// The person-detail screen's three belief layers for one contact (U4,
-/// design/ui-design-system.md §1), all read-time (no network): my lens (petname + the
-/// keys I've grouped), their self-claim (`self_name`), and the friends' lens
-/// (vouched names — a friend's label reaches me only via their explicit
-/// vouch, who-is-this.md §6). Keyed by petname; the cluster's first key is
-/// the handle for avatar/vouch/repudiate.
+/// The person page for a contact person, by label (project 7 S3). Renders
+/// **local stores only** — opening a page never queries anyone; the page's
+/// network acts (`page_refresh`, `ask_friend`, `who_is`) are separate,
+/// explicit commands.
 #[tauri::command]
-async fn person_detail(
+async fn person_page(
     app: AppHandle,
     managed: State<'_, ManagedClient>,
-    petname: String,
-) -> Result<PersonDetail, String> {
+    label: String,
+) -> Result<PersonPage, String> {
     let client = client(&app, &managed).await?;
-    let (petname, record) = client
-        .contacts()?
+    let person = client
+        .persons()?
         .into_iter()
-        .find(|(name, _)| *name == petname)
-        .ok_or_else(|| "no such contact".to_string())?;
-    let primary = record.keys.first().copied();
-    // Friends' lens: only names a friend *vouched* (endorsed_by) — never a
-    // held-only self-claim (that's provenance, not the friend's own label).
-    let friends = match primary {
-        Some(key) => client
-            .learned_candidates(key)?
-            .into_iter()
-            .filter(|(name, _)| !name.endorsed_by.is_empty())
-            .map(|(name, _)| FriendLabel {
-                name: name.name,
-                vouched_by: name.endorsed_by,
-            })
-            .collect(),
-        None => vec![],
+        .find(|person| person.label == label)
+        .ok_or_else(|| format!("no person labeled {label:?}"))?;
+    person_page_dto(&client, person)
+}
+
+/// The page for a bare key (S3): a key belonging to a person lands on that
+/// person's page; anything else renders the stranger variant — everything
+/// this device already believes, plus the acts. Own keys live in Me.
+#[tauri::command]
+async fn key_page(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+) -> Result<PersonPage, String> {
+    let client = client(&app, &managed).await?;
+    let subject = PublicKey(hex::parse32(&key)?);
+    if client.own_keys().contains(&subject) {
+        return Err("this key is you — it lives in the Me view".into());
+    }
+    if let Some(person) = client.persons()?.into_iter().find(|person| {
+        person
+            .members
+            .iter()
+            .any(|(_, record)| record.keys.contains(&subject))
+    }) {
+        return person_page_dto(&client, person);
+    }
+    stranger_page_dto(&client, subject)
+}
+
+fn person_page_dto(
+    client: &Client,
+    person: zink_client::PersonEntry,
+) -> Result<PersonPage, String> {
+    let can_split = person.members.len() > 1;
+    let mut devices = Vec::new();
+    for (petname, record) in &person.members {
+        devices.push(device_card(client, petname, record, can_split)?);
+    }
+    let first = person
+        .members
+        .first()
+        .and_then(|(_, record)| record.keys.first().copied());
+    // The through-friends lens, merged across member keys: one row per
+    // friend, whatever they've told us about any of the person's devices.
+    let mut friends = BTreeMap::new();
+    for key in person.keys() {
+        merge_friend_views(client, key, &mut friends)?;
+    }
+    let merge_candidates = client
+        .persons()?
+        .into_iter()
+        .filter(|other| other.id != person.id)
+        .map(|other| other.label)
+        .collect();
+    Ok(PersonPage {
+        label: person.label.clone(),
+        person: Some(PersonInfo { merge_candidates }),
+        stranger: None,
+        avatar_key: first.map(|key| hex::encode(&key.0)).unwrap_or_default(),
+        has_local_avatar: first
+            .map(|key| client.has_local_avatar(&key))
+            .unwrap_or(false),
+        devices,
+        friends: friends.into_values().collect(),
+    })
+}
+
+/// The stranger variant: a one-card degenerate cluster from the learned
+/// store — candidates, evidence, claims, route, and the pair-back offer.
+fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, String> {
+    let learned = client.learned_candidates(subject)?;
+    let best_record = learned.first().map(|(_, record)| record.clone());
+    let label = learned
+        .first()
+        .map(|(name, _)| name.name.clone())
+        .unwrap_or_else(|| hex::encode(&subject.0)[..8].to_string());
+    let candidates = learned
+        .into_iter()
+        .map(|(name, record)| candidate_dto(name, Some(record.to_qr_string())))
+        .collect();
+    // Route + provenance, per the same read-time resolution sends use;
+    // strangers get no debt lines (nothing is owed to an unadded key).
+    let (relay_source, relays, relay_override) = match client.relay_resolution(subject) {
+        Some(resolution) => (
+            relay_source_line(&resolution.source),
+            resolution
+                .relays
+                .iter()
+                .map(|entry| RelayRow {
+                    spec: entry.to_spec(),
+                    owed: None,
+                })
+                .collect(),
+            resolution.source == RelaySource::Override,
+        ),
+        None => (
+            "no route known — ask a friend, or scan their code".to_string(),
+            vec![],
+            false,
+        ),
     };
-    // The relay panel (R5): effective relays + provenance + per-relay debt.
-    let status = client.relay_status(&petname)?;
-    let relay_source = match status.source {
+    let mut friends = BTreeMap::new();
+    merge_friend_views(client, subject, &mut friends)?;
+    Ok(PersonPage {
+        label,
+        person: None,
+        stranger: Some(StrangerInfo {
+            key: hex::encode(&subject.0),
+            candidates,
+            dismissed: client.dismissed().contains(&subject),
+            pair_back: client
+                .claims_to_be_my_device(subject)
+                .map(|record| record.to_qr_string()),
+        }),
+        avatar_key: hex::encode(&subject.0),
+        has_local_avatar: client.has_local_avatar(&subject),
+        devices: vec![DeviceCard {
+            petname: hex::encode(&subject.0)[..8].to_string(),
+            device_label: best_record
+                .as_ref()
+                .and_then(|record| record.self_device_label())
+                .map(str::to_string),
+            self_name: best_record
+                .as_ref()
+                .and_then(|record| record.self_claimed_name())
+                .map(str::to_string),
+            key: hex::encode(&subject.0),
+            link: evidence_lines(client, subject)?,
+            disavowals: disavowal_lines(client, subject)?,
+            relay_source,
+            relays,
+            relay_override,
+            vouched: false,
+            can_split: false,
+        }],
+        friends: friends.into_values().collect(),
+    })
+}
+
+/// One member device, my belief per key: labels, claims, evidence,
+/// warnings, and **that device's** relays (they bind to the publishing
+/// device — SPEC §3.6).
+fn device_card(
+    client: &Client,
+    petname: &str,
+    record: &ContactRecord,
+    can_split: bool,
+) -> Result<DeviceCard, String> {
+    let key = record
+        .keys
+        .first()
+        .copied()
+        .ok_or("stored record has no keys")?;
+    let status = client.relay_status(petname)?;
+    Ok(DeviceCard {
+        petname: petname.to_string(),
+        device_label: record.self_device_label().map(str::to_string),
+        self_name: record.self_claimed_name().map(str::to_string),
+        key: hex::encode(&key.0),
+        link: evidence_lines(client, key)?,
+        disavowals: disavowal_lines(client, key)?,
+        relay_source: relay_source_line(&status.source),
+        relay_override: status.source == RelaySource::Override,
+        relays: relay_rows(status.relays),
+        vouched: client.vouches(&key),
+        can_split,
+    })
+}
+
+/// Verified link evidence, render-ready (D3c): WHO claims, tiered — the
+/// one-way tier is a claim, the mutual one is consent-proof.
+fn evidence_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String> {
+    Ok(client
+        .device_evidence(key)?
+        .into_iter()
+        .map(|evidence| match evidence.tier {
+            zink_protocol::LinkTier::MutuallyConfirmed => format!(
+                "{} and this key vouch each other (mutually confirmed)",
+                evidence.petname
+            ),
+            _ => format!(
+                "{} says this is their device (unconfirmed by the key)",
+                evidence.petname
+            ),
+        })
+        .collect())
+}
+
+/// Fold one subject's friend views into the page's per-friend lens rows.
+fn merge_friend_views(
+    client: &Client,
+    subject: PublicKey,
+    into: &mut BTreeMap<String, FriendLens>,
+) -> Result<(), String> {
+    for view in client.friend_views(subject)? {
+        let lens = into
+            .entry(view.petname.clone())
+            .or_insert_with(|| FriendLens {
+                petname: view.petname.clone(),
+                vouched_name: None,
+                held: Vec::new(),
+            });
+        if lens.vouched_name.is_none() {
+            lens.vouched_name = view.vouched_name.clone();
+        }
+        let claimed = match (
+            view.record.self_claimed_name(),
+            view.record.self_device_label(),
+        ) {
+            (Some(name), Some(label)) => format!("\u{201c}{name} · {label}\u{201d}"),
+            (Some(name), None) => format!("\u{201c}{name}\u{201d}"),
+            (None, Some(label)) => format!("a \u{201c}{label}\u{201d}"),
+            (None, None) => "no valid self-claim".to_string(),
+        };
+        lens.held.push(format!(
+            "holds their record — {claimed}, {}",
+            ago(view.received_ms)
+        ));
+    }
+    Ok(())
+}
+
+/// Render-ready provenance for a relay resolution (R5).
+fn relay_source_line(source: &RelaySource) -> String {
+    match source {
         RelaySource::Override => "you set these by hand — their record is not in use".to_string(),
         RelaySource::SubjectServed { received_ms } => {
-            format!("served by them · {}", ago(received_ms))
+            format!("served by them · {}", ago(*received_ms))
         }
         RelaySource::Scanned => "from the record you scanned".to_string(),
         RelaySource::Hearsay { received_ms } => {
-            format!("heard from a contact · {}", ago(received_ms))
+            format!("heard from a contact · {}", ago(*received_ms))
         }
-    };
-    Ok(PersonDetail {
-        avatar_key: primary.map(|key| hex::encode(&key.0)).unwrap_or_default(),
-        keys: record.keys.iter().map(|key| hex::encode(&key.0)).collect(),
-        vouched: primary.map(|key| client.vouches(&key)).unwrap_or(false),
-        has_local_avatar: primary
-            .map(|key| client.has_local_avatar(&key))
-            .unwrap_or(false),
-        self_name: record.self_claimed_name().map(str::to_string),
-        disavowals: match primary {
-            Some(key) => disavowal_lines(&client, key)?,
-            None => vec![],
-        },
-        friends,
-        relay_override: status.source == RelaySource::Override,
-        relays: status
-            .relays
-            .into_iter()
-            .map(|relay| RelayRow {
-                spec: relay.spec,
-                owed: (relay.owed > 0).then(|| {
-                    let since = relay
-                        .owed_since_ms
-                        .map(|ms| format!(" · oldest {}", ago(ms)))
-                        .unwrap_or_default();
-                    format!("⚠ {} message(s) queued for this relay{since}", relay.owed)
-                }),
-            })
-            .collect(),
-        relay_source,
-        petname,
+    }
+}
+
+/// Relay rows with per-relay debt lines (R5).
+fn relay_rows(relays: Vec<zink_client::RelayHealth>) -> Vec<RelayRow> {
+    relays
+        .into_iter()
+        .map(|relay| RelayRow {
+            spec: relay.spec,
+            owed: (relay.owed > 0).then(|| {
+                let since = relay
+                    .owed_since_ms
+                    .map(|ms| format!(" · oldest {}", ago(ms)))
+                    .unwrap_or_default();
+                format!("⚠ {} message(s) queued for this relay{since}", relay.owed)
+            }),
+        })
+        .collect()
+}
+
+/// The page-open subject-refresh (S3): rate-limited, and it only ever asks
+/// the subject about themself — no third party learns the page was opened;
+/// a stranger's keys are a no-op. Returns whether fresh data landed (the
+/// UI re-fetches the page when true).
+#[tauri::command]
+async fn page_refresh(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    keys: Vec<String>,
+) -> Result<bool, String> {
+    let client = client(&app, &managed).await?;
+    let mut healed = false;
+    for key in keys {
+        healed |= client.refresh_contact(PublicKey(hex::parse32(&key)?)).await;
+    }
+    Ok(healed)
+}
+
+/// The per-friend lens ask (S3): `who_is_among` scoped to exactly one
+/// friend, about each of the person's keys. The friend learns you asked —
+/// the UI copy says so plainly; nobody else is dialed.
+#[tauri::command]
+async fn ask_friend(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    keys: Vec<String>,
+    friend: String,
+) -> Result<WhoIsReport, String> {
+    let client = client(&app, &managed).await?;
+    let responder = client
+        .contacts()?
+        .into_iter()
+        .find(|(petname, _)| *petname == friend)
+        .and_then(|(_, record)| record.keys.first().copied())
+        .ok_or_else(|| format!("no contact named {friend:?}"))?;
+    let (mut answers, mut asked, mut unreachable) = (0, 0, 0);
+    for key in keys {
+        let subject = PublicKey(hex::parse32(&key)?);
+        let outcome = client.who_is_among(subject, &[responder]).await?;
+        answers += outcome.answers.len();
+        asked = asked.max(outcome.asked);
+        unreachable = unreachable.max(outcome.unreachable);
+    }
+    Ok(WhoIsReport {
+        answers,
+        asked,
+        unreachable,
+        contact: None,
+        candidates: vec![],
+        disavowals: vec![],
     })
+}
+
+/// Rename a person — the addressing label, my lens (S2). Local only.
+#[tauri::command]
+async fn rename_person(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    current: String,
+    new: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    Ok(client.rename_person(&current, &new)?)
+}
+
+/// Merge one person into another — the explicit clustering act (S2):
+/// evidence offers, this act decides.
+#[tauri::command]
+async fn merge_persons(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    into: String,
+    from: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.merge_persons(&into, &from)?;
+    Ok(())
+}
+
+/// Split a member device back out to its own person (S2) — the undo of a
+/// merge. Returns the split-off person's label.
+#[tauri::command]
+async fn split_person(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    member: String,
+) -> Result<String, String> {
+    let client = client(&app, &managed).await?;
+    Ok(client.split_person(&member)?.label)
 }
 
 /// Relative wall time for provenance lines ("2 h ago") — presentation at
@@ -755,6 +1055,30 @@ fn conversation_row(
             }
         }
     };
+    // A request row's preview handle (S3): the unknown sender's key —
+    // the newest message's sender when unknown, else the first unknown
+    // participant. Opens the person page without opening the chat.
+    let stranger_key = (!summary.known)
+        .then(|| {
+            let contacts = client.contacts().unwrap_or_default();
+            let unknown = |key: &PublicKey| {
+                !own.contains(key) && !contacts.iter().any(|(_, record)| record.keys.contains(key))
+            };
+            summary
+                .last
+                .as_ref()
+                .map(|last| last.sender)
+                .filter(unknown)
+                .or_else(|| {
+                    summary
+                        .participants
+                        .iter()
+                        .copied()
+                        .find(|key| unknown(key))
+                })
+                .map(|key| hex::encode(&key.0))
+        })
+        .flatten();
     Ok(Conversation {
         id: hex::encode(&summary.id.0),
         label,
@@ -763,6 +1087,7 @@ fn conversation_row(
         snippet,
         unread: summary.unread,
         request: !summary.known,
+        stranger_key,
     })
 }
 
@@ -783,11 +1108,13 @@ async fn conversation_members(
     let others = other_labels(&client, &own, &membership)?;
     let mut members = vec!["you".to_string()];
     members.extend(others.iter().cloned());
+    // Person labels (S2/S3): the add-picker rows are persons, so the
+    // exclusion list must speak the same names.
     let petnames = client
-        .contacts()?
+        .persons()?
         .into_iter()
-        .filter(|(_, record)| record.keys.iter().any(|key| membership.contains(key)))
-        .map(|(petname, _)| petname)
+        .filter(|person| person.keys().iter().any(|key| membership.contains(key)))
+        .map(|person| person.label)
         .collect();
     // Label precedence (S6): my local name outranks the participant
     // default, here exactly as in the rows — one rule, or headers and
@@ -829,7 +1156,12 @@ async fn person_conversations(
 ) -> Result<Vec<Conversation>, String> {
     let client = client(&app, &managed).await?;
     let own = client.own_keys();
-    let keys = client.resolve_contact(&petname)?.keys;
+    // The whole person (S2): any member device's key counts.
+    let keys: Vec<PublicKey> = client
+        .resolve_person(&petname)?
+        .into_iter()
+        .flat_map(|contact| contact.keys)
+        .collect();
     let mut rows = Vec::new();
     for summary in client.conversations()? {
         if summary.participants.iter().any(|key| keys.contains(key)) {
@@ -1042,8 +1374,10 @@ async fn send_message(
             // --add grows the recipient set (groups.md §2): the signed
             // recipients list is the membership announcement.
             let mut contacts = resolved.contacts;
-            for petname in &adding {
-                contacts.push(client.resolve_contact(petname)?);
+            // A person label adds the whole cluster, one Contact per member
+            // device (S2/S3); an entry petname adds that device alone.
+            for name in &adding {
+                contacts.extend(client.resolve_person(name)?);
             }
             // Unroutable members stay recipients (groups.md §2 — membership
             // is not deliverability); only an all-unroutable set is an error.
@@ -1052,11 +1386,13 @@ async fn send_message(
             }
             client.stage_send_in(conversation, &contacts, text.into_bytes(), blobs)?
         }
-        (None, Some(petnames)) if !petnames.is_empty() => {
-            let contacts: Vec<zink_client::Contact> = petnames
-                .iter()
-                .map(|petname| client.resolve_contact(petname))
-                .collect::<Result<_, _>>()?;
+        (None, Some(names)) if !names.is_empty() => {
+            // Person labels: "message Alice", never "message Alice's phone"
+            // — every member device rides its own entry's relays (S2/S3).
+            let mut contacts: Vec<zink_client::Contact> = Vec::new();
+            for name in &names {
+                contacts.extend(client.resolve_person(name)?);
+            }
             // The app's "new chat" is always a fresh genesis (project 6 §7):
             // conversations are genesis-identified, several per participant
             // set is a feature — the draft view already offered the existing
@@ -1200,20 +1536,7 @@ async fn unknown_members(
             .collect();
         // The popup upgrade (D3c, multi-device.md §7): "P says this is
         // their device", tiered — evidence for the one-tap offer.
-        let device_evidence = client
-            .device_evidence(key)?
-            .into_iter()
-            .map(|evidence| match evidence.tier {
-                zink_protocol::LinkTier::MutuallyConfirmed => format!(
-                    "{} and this key vouch each other (mutually confirmed)",
-                    evidence.petname
-                ),
-                _ => format!(
-                    "{} says this is their device (unconfirmed by the key)",
-                    evidence.petname
-                ),
-            })
-            .collect();
+        let device_evidence = evidence_lines(&client, key)?;
         members.push(UnknownMember {
             key: hex::encode(&key.0),
             candidates,
@@ -1419,7 +1742,13 @@ pub fn run() {
             set_relay_override,
             set_local_avatar,
             clear_local_avatar,
-            person_detail,
+            person_page,
+            key_page,
+            page_refresh,
+            ask_friend,
+            rename_person,
+            merge_persons,
+            split_person,
             conversations,
             conversations_with,
             conversation_members,

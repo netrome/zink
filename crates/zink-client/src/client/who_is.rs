@@ -409,41 +409,78 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw> Client<C, W, N, R> {
             else {
                 continue;
             };
-            let relays = self.effective_relays(subject, Some(record));
-            let sick = relays.iter().any(|entry| owed.contains(&entry.mailbox));
-            let now = self.wall_clock.now_ms();
-            if !self.refreshed.due(&subject, now, sick) {
-                continue;
-            }
-            let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
-            let mut routes = Vec::new();
-            if let Ok(bare) = crate::adapters::iroh::validated_peer(subject, Vec::new()) {
-                routes.push(bare);
-            }
-            if let Ok(routed) = self.peer_addr_for(subject, Some(record)) {
-                routes.push(routed);
-            }
-            let mut healed = false;
-            for addr in routes {
-                match net::connect_peer(&self.transport, &addr, SYNC_ALPN, timeout, &self.clock)
-                    .await
-                {
-                    Ok(connection) => {
-                        healed = self.refresh_on(&connection, subject).await;
-                        // Reached them — their answer (or decline) is final.
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::debug!(%error, "refresh: route failed; trying the next")
-                    }
+            self.refresh_subject(subject, record, &owed).await;
+        }
+    }
+
+    /// The page-open refresh (project 7 S3 — the tracker's queries-from-
+    /// the-page rule): the same rate-limited, subject-only ask the arrival
+    /// hook runs, for one contact. Asking the subject about themself over
+    /// an authenticated channel reveals nothing to any third party; the
+    /// ledger is shared with the arrival hook, so page opens never exceed
+    /// R6's budget. Contacts only — for a stranger this is a no-op, so a
+    /// stranger's page fires no query on open. `true` = a fresh record
+    /// landed (the page re-reads its data).
+    pub async fn refresh_contact(&self, subject: PublicKey) -> bool {
+        let Ok(contacts) = self.state.contacts() else {
+            return false;
+        };
+        let Some((_, record)) = contacts
+            .iter()
+            .find(|(_, record)| record.keys.contains(&subject))
+        else {
+            return false;
+        };
+        let owed: BTreeSet<String> = self
+            .state
+            .outbox()
+            .into_iter()
+            .map(|entry| entry.relay)
+            .collect();
+        self.refresh_subject(subject, record, &owed).await
+    }
+
+    /// One subject's refresh, rate-limited and route-fallible — the shared
+    /// core of the arrival hook and the page-open trigger. `true` = healed.
+    async fn refresh_subject(
+        &self,
+        subject: PublicKey,
+        record: &ContactRecord,
+        owed: &BTreeSet<String>,
+    ) -> bool {
+        let relays = self.effective_relays(subject, Some(record));
+        let sick = relays.iter().any(|entry| owed.contains(&entry.mailbox));
+        let now = self.wall_clock.now_ms();
+        if !self.refreshed.due(&subject, now, sick) {
+            return false;
+        }
+        let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
+        let mut routes = Vec::new();
+        if let Ok(bare) = crate::adapters::iroh::validated_peer(subject, Vec::new()) {
+            routes.push(bare);
+        }
+        if let Ok(routed) = self.peer_addr_for(subject, Some(record)) {
+            routes.push(routed);
+        }
+        let mut healed = false;
+        for addr in routes {
+            match net::connect_peer(&self.transport, &addr, SYNC_ALPN, timeout, &self.clock).await {
+                Ok(connection) => {
+                    healed = self.refresh_on(&connection, subject).await;
+                    // Reached them — their answer (or decline) is final.
+                    break;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "refresh: route failed; trying the next")
                 }
             }
-            if healed && sick {
-                // Fresh relays with messages owed: retarget right now (R2)
-                // instead of waiting for the next drain's flush.
-                let _ = self.flush_outbox().await;
-            }
         }
+        if healed && sick {
+            // Fresh relays with messages owed: retarget right now (R2)
+            // instead of waiting for the next drain's flush.
+            let _ = self.flush_outbox().await;
+        }
+        healed
     }
 
     /// The one-connection core both R6 triggers share (the arrival hook

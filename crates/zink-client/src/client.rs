@@ -28,8 +28,8 @@ mod send;
 mod who_is;
 
 pub use contacts::{
-    Contact, DeviceEvidence, Disavowal, LearnedName, RecordMatch, RecordUpdate, RelayHealth,
-    RelaySource, RelayStatus, ResolvedName,
+    Contact, DeviceEvidence, Disavowal, FriendView, LearnedName, RecordMatch, RecordUpdate,
+    RelayHealth, RelayResolution, RelaySource, RelayStatus, ResolvedName,
 };
 pub use history::{
     ConversationSummary, HistoryMessage, Inbox, LastMessage, MAX_MESSAGE_REQUESTS, triage,

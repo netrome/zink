@@ -69,6 +69,7 @@ pub(crate) fn ChatsView(
     picker: NewChatPicker,
     open_chat: impl Fn(String, String) + Copy + Send + 'static,
     start_draft: impl Fn(Vec<String>) + Copy + Send + 'static,
+    open_key: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
     // Whether the "new chat" picker is open (vs the plain list), plus the
     // picks — App-owned, surviving a tab bounce.
@@ -145,7 +146,28 @@ pub(crate) fn ChatsView(
                                     .then(|| {
                                         let rows = requests
                                             .into_iter()
-                                            .map(row)
+                                            .map(|conversation| {
+                                                // Preview the sender before
+                                                // opening the chat (S3): the
+                                                // person page, no query fired.
+                                                let stranger = conversation
+                                                    .stranger_key
+                                                    .clone();
+                                                view! {
+                                                    {row(conversation)}
+                                                    {stranger
+                                                        .map(|key| {
+                                                            view! {
+                                                                <button
+                                                                    class="secondary"
+                                                                    on:click=move |_| open_key(key.clone())
+                                                                >
+                                                                    "who is this?"
+                                                                </button>
+                                                            }
+                                                        })}
+                                                }
+                                            })
                                             .collect::<Vec<_>>();
                                         view! {
                                             <div class="dim section">

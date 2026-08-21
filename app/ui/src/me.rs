@@ -10,6 +10,9 @@ use crate::{NoArgs, avatar_data_url, image, invoke};
 #[derive(Clone, Copy)]
 pub(crate) struct MeForm {
     pub name: RwSignal<String>,
+    /// The device qualifier beside the name ("phone", "laptop") — the S1
+    /// split: `name` is the person, this is the device.
+    pub device_label: RwSignal<String>,
     pub relays: RwSignal<Vec<String>>,
     pub new_relay: RwSignal<String>,
     /// Set by any edit, cleared on save — blocks the prefill from
@@ -21,6 +24,7 @@ impl Default for MeForm {
     fn default() -> Self {
         Self {
             name: RwSignal::new(String::new()),
+            device_label: RwSignal::new(String::new()),
             relays: RwSignal::new(Vec::new()),
             new_relay: RwSignal::new(String::new()),
             dirty: RwSignal::new(false),
@@ -44,6 +48,7 @@ pub(crate) fn MeView(
     // save; `new_relay` is the add field.
     let MeForm {
         name,
+        device_label,
         relays,
         new_relay,
         dirty,
@@ -60,6 +65,9 @@ pub(crate) fn MeView(
             }
             if let Some(profile_name) = state.name {
                 name.set(profile_name);
+            }
+            if let Some(label) = state.device_label {
+                device_label.set(label);
             }
             relays.set(state.relays);
         }
@@ -99,15 +107,18 @@ pub(crate) fn MeView(
 
     let save = move |_| {
         let (name, relays) = (name.get_untracked(), relays.get_untracked());
+        let device_label = device_label.get_untracked();
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
                 name: &'a str,
                 relays: &'a [String],
+                device_label: &'a str,
             }
             let args = Args {
                 name: &name,
                 relays: &relays,
+                device_label: &device_label,
             };
             match invoke::invoke::<QrPayload>("set_profile", &args).await {
                 Ok(_) => {
@@ -316,6 +327,14 @@ pub(crate) fn MeView(
                 prop:value=move || name.get()
                 on:input=move |ev| {
                     name.set(event_target_value(&ev));
+                    dirty.set(true);
+                }
+            />
+            <input
+                placeholder="this device — phone, laptop… (optional)"
+                prop:value=move || device_label.get()
+                on:input=move |ev| {
+                    device_label.set(event_target_value(&ev));
                     dirty.set(true);
                 }
             />
