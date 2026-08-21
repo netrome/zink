@@ -1,7 +1,9 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{Conversation, DeviceCard, PersonPage, PersonRef, RecordPreview, WhoIsReport};
+use zink_app_dto::{
+    Conversation, DeviceCard, PersonPage, PersonRef, RecordPreview, SubjectAsk, WhoIsReport,
+};
 
 use crate::chats::ConversationRow;
 use crate::{avatar_data_url, image, invoke};
@@ -405,6 +407,33 @@ pub(crate) fn PersonView(
         });
     };
 
+    // The bootstrap's direct rung (S3b): ask the subject about themself —
+    // the only query that works with no mutual contact (the onboarding
+    // case). The dial is a liveness receipt, so the button copy owns it;
+    // each outcome is worded distinctly, never collapsed to a shrug.
+    let ask_them = move |key: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &key };
+            match invoke::invoke::<SubjectAsk>("ask_subject", &args).await {
+                Ok(SubjectAsk::Answered) => {
+                    ok("they answered — review below, then add");
+                    load_page();
+                }
+                Ok(SubjectAsk::Nothing) => {
+                    ok("reached them — nothing served; they may not have added you")
+                }
+                Ok(SubjectAsk::Unreachable) => {
+                    ok("couldn't reach them — try again when they're online")
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     // The stranger bootstrap (D1b): ask every dialable contact — the one
     // deliberately broad query, and it stays a button.
     let who_is_everyone = move |key: String| {
@@ -550,6 +579,7 @@ pub(crate) fn PersonView(
                                     let candidates = info.candidates.clone();
                                     let dismissed = info.dismissed;
                                     let pair_back = info.pair_back.clone();
+                                    let them_key = key.clone();
                                     let ask_key = key.clone();
                                     let dismiss_key = key.clone();
                                     view! {
@@ -578,6 +608,12 @@ pub(crate) fn PersonView(
                                                 }
                                             })
                                             .collect::<Vec<_>>()}
+                                        <button
+                                            class="secondary"
+                                            on:click=move |_| ask_them(them_key.clone())
+                                        >
+                                            "ask them who they are — they'll know you asked"
+                                        </button>
                                         <button
                                             class="secondary"
                                             on:click=move |_| who_is_everyone(ask_key.clone())

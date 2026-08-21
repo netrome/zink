@@ -104,6 +104,17 @@ pub struct WhoIsOutcome {
     pub unreachable: usize,
 }
 
+/// What a deliberate subject-ask produced — three states the edge words
+/// distinctly: an answer landed; they were reached but served nothing
+/// (declining and not-holding look the same on the wire, SPEC §5.2); or no
+/// route reached them at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectAsk {
+    Answered,
+    Nothing,
+    Unreachable,
+}
+
 /// One validated `who-is` answer (already persisted to the learned store).
 /// `responder` — the contact who served it — vouches for *holding* this
 /// record, nothing more; the record's claims verify on their own.
@@ -440,6 +451,42 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         self.refresh_subject(subject, record, &owed).await
     }
 
+    /// The deliberate subject ask (project 7 — the stranger bootstrap's
+    /// direct rung): `WhoIs(subject)` asked *of the subject*, for a key we
+    /// may hold nothing about. A bare dial-by-key first — it succeeds
+    /// exactly when the transport still holds the path they arrived on —
+    /// then whatever route read-time resolution finds (a prior ask's
+    /// learned relays). An explicit act, so no rate limit: a tap must
+    /// never be silently swallowed. Its cost is the dial itself — a
+    /// liveness receipt to a possible spammer — which is why no drain or
+    /// page-open path ever calls this, and the edge's copy states it.
+    pub async fn ask_subject(&self, subject: PublicKey) -> SubjectAsk {
+        let timeout = self.config.connect_timeout.min(WHO_IS_DIAL_CAP);
+        let mut routes = Vec::new();
+        if let Ok(bare) = crate::adapters::iroh::validated_peer(subject, Vec::new()) {
+            routes.push(bare);
+        }
+        if let Ok(routed) = self.peer_addr_for(subject, None) {
+            routes.push(routed);
+        }
+        for addr in routes {
+            match net::connect_peer(&self.transport, &addr, SYNC_ALPN, timeout, &self.clock).await {
+                Ok(connection) => {
+                    // Reached them — their answer (or decline) is final.
+                    return if self.refresh_on(&connection, subject).await {
+                        SubjectAsk::Answered
+                    } else {
+                        SubjectAsk::Nothing
+                    };
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "subject ask: route failed; trying the next")
+                }
+            }
+        }
+        SubjectAsk::Unreachable
+    }
+
     /// One subject's refresh, rate-limited and route-fallible — the shared
     /// core of the arrival hook and the page-open trigger. `true` = healed.
     async fn refresh_subject(
@@ -528,7 +575,7 @@ mod tests {
     };
     use crate::client::{ClientConfig, RelaySource, ResolvedName};
     use crate::keystore;
-    use crate::ports::clock::TestClock;
+    use crate::ports::clock::{TestClock, TestWallClock};
     use crate::ports::transport::{Loopback, TestTransport};
     use zink_protocol::{Attestation, Claim, DeviceKey, RelayEntry, SyncResponse, Versioned};
 
@@ -655,6 +702,131 @@ mod tests {
         assert_eq!(b_net.dial.dialed(&stranger.public()), 0);
 
         let _ = std::fs::remove_dir_all(temp_root("refresh-gate"));
+    }
+
+    #[tokio::test]
+    async fn ask_subject__should_learn_their_record_when_they_serve_us() {
+        // Given: anna added bob from his QR (her gate serves him) and has
+        // a complete profile; bob holds nothing about anna — the
+        // two-fresh-devices onboarding bootstrap
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("ask-subject", "anna", &wire);
+        let (b, _b_net, _b_clock) = loop_client("ask-subject", "bob", &wire);
+        a.state
+            .save_profile(
+                "anna",
+                &[RelayEntry {
+                    mailbox: "aa@203.0.113.9:9".to_string(),
+                    relay_url: Some("http://203.0.113.9:10".to_string()),
+                }],
+            )
+            .expect("profile");
+        befriend(&a.state, b.public_key());
+
+        // When: bob deliberately asks anna who she is
+        let outcome = b.ask_subject(a.public_key()).await;
+
+        // Then: her self-served record lands as a promotable candidate —
+        // the add button's exact input — and the add completes from it
+        assert_eq!(outcome, SubjectAsk::Answered);
+        let candidates = b.learned_candidates(a.public_key()).expect("candidates");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.name, "anna");
+        let petname = b.add_contact(&candidates[0].1, None).expect("add");
+        assert_eq!(petname, "anna");
+
+        let _ = std::fs::remove_dir_all(temp_root("ask-subject"));
+    }
+
+    #[tokio::test]
+    async fn ask_subject__should_learn_nothing_from_a_responder_that_does_not_serve_us() {
+        // Given: anna has a complete profile but never added bob — her
+        // contacts-only gate declines, indistinguishable from not holding
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("ask-subject-gate", "anna", &wire);
+        let (b, _b_net, _b_clock) = loop_client("ask-subject-gate", "bob", &wire);
+        a.state
+            .save_profile(
+                "anna",
+                &[RelayEntry {
+                    mailbox: "aa@203.0.113.9:9".to_string(),
+                    relay_url: Some("http://203.0.113.9:10".to_string()),
+                }],
+            )
+            .expect("profile");
+
+        // When
+        let outcome = b.ask_subject(a.public_key()).await;
+
+        // Then: reached, nothing served, nothing learned
+        assert_eq!(outcome, SubjectAsk::Nothing);
+        assert!(
+            b.learned_candidates(a.public_key())
+                .expect("candidates")
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("ask-subject-gate"));
+    }
+
+    #[tokio::test]
+    async fn ask_subject__should_report_unreachable_when_no_route_connects() {
+        // Given: a subject whose one route (the bare dial) hangs — offline
+        let wire = Loopback::new();
+        let (b, b_net, b_clock) = loop_client("ask-subject-offline", "bob", &wire);
+        let ghost = DeviceKey::from_seed([9; 32]).public();
+        b_net.dial.hold(&ghost);
+
+        // When: the dial parks and its deadline passes
+        let (outcome, ()) = tokio::join!(b.ask_subject(ghost), async {
+            b_clock.wait_for_sleepers(1).await;
+            b_clock.advance(WHO_IS_DIAL_CAP);
+        });
+
+        // Then
+        assert_eq!(outcome, SubjectAsk::Unreachable);
+        assert!(b.learned_candidates(ghost).expect("candidates").is_empty());
+
+        let _ = std::fs::remove_dir_all(temp_root("ask-subject-offline"));
+    }
+
+    #[tokio::test]
+    async fn ask_subject__should_drop_an_answer_that_does_not_name_them() {
+        // Given: the subject answers the ask with a record naming someone
+        // else — a hostile self-serve
+        let key_path = temp_key("ask-subject-hostile", "asker");
+        keystore::create(&key_path).expect("create key");
+        let net = TestTransport::new();
+        let subject = DeviceKey::from_seed([41; 32]).public();
+        let other = DeviceKey::from_seed([42; 32]).public();
+        net.dial.connect(&subject).reply(
+            SyncResponse::new(SyncResult::Known {
+                record: Box::new(ContactRecord::new(vec![other], vec![], vec![])),
+                endorsements: vec![],
+            })
+            .to_bytes(),
+        );
+        let b = Client::with_transport(
+            keystore::load(&key_path).expect("load key"),
+            &key_path,
+            ClientConfig::default(),
+            TestClock::new(),
+            TestWallClock::new(1_000),
+            net.clone(),
+        );
+
+        // When
+        let outcome = b.ask_subject(subject).await;
+
+        // Then: reached, but the forged record is dropped, never learned
+        assert_eq!(outcome, SubjectAsk::Nothing);
+        assert!(
+            b.learned_candidates(subject)
+                .expect("candidates")
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("ask-subject-hostile"));
     }
 
     #[tokio::test]

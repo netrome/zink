@@ -98,7 +98,9 @@ marginal UX gain, so it's a deliberate non-goal, not a follow-up.
 > conversation's participants**, rate-limited per (subject, conversation)
 > per run. The whole contact list is never auto-queried. Manual control
 > over the contact store stays absolute (add-or-ignore), and the
-> responder-side gate is unchanged.
+> responder-side gate is unchanged. (Project 7 S3 also reuses
+> `who_is_among` as the person page's per-friend lens ask — one explicit
+> act, one friend, copy stating plainly that the friend learns you asked.)
 
 > **Second carve-out — the subject-refresh (R6, 2026-08-16;
 > relay-lifecycle.md §6).** Asking the *subject themself, about themself*,
@@ -106,7 +108,21 @@ marginal UX gain, so it's a deliberate non-goal, not a follow-up.
 > so message arrivals and direct-delivery acks auto-refresh a contact's
 > record this way, rate-limited (order-of-daily; eager while deposits to
 > them are owed). Third parties are still never auto-asked: the blanket
-> rule above is about them, and stands.
+> rule above is about them, and stands. (Project 7 S3 extended the same
+> trigger to page-opens: a contact's page runs the identical rate-limited
+> refresh; a stranger's page fires nothing on open.)
+
+> **The subject ask (project 7 S3b, 2026-08-21) — explicit act, not a
+> carve-out.** `Client::ask_subject(subject)`: `WhoIs(subject)` asked *of
+> the subject*, for a key we may hold nothing about — bare dial-by-key
+> first, learned route as fallback. It exists for the bootstrap the rules
+> above jointly close off: a message request on a fresh device (no
+> contacts to ask, auto-query gated by contributing-contact, no record to
+> promote). Manual trigger only, never rate-limited (a tap is never
+> silently swallowed); its cost is the dial itself — a liveness receipt to
+> a possible spammer — so the button copy states plainly that the subject
+> learns of the ask. Three honest outcomes: answered / reached-but-nothing
+> (declining and not-holding indistinguishable, §4) / unreachable.
 
 The flow, best-effort like every peer op:
 

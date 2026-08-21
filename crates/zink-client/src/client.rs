@@ -39,7 +39,7 @@ pub use persons::{PersonEntry, PersonId};
 pub use profile::AvatarReceipt;
 pub use recv::{Received, RecvReport, RelayFailure};
 pub use send::{ReplyContacts, SendReceipt, StagedSend};
-pub use who_is::{WhoIsAnswer, WhoIsOutcome};
+pub use who_is::{SubjectAsk, WhoIsAnswer, WhoIsOutcome};
 
 /// `sync.rs` serves this for a who-is about our own key; the path predates
 /// the module split.

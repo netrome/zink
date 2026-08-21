@@ -33,7 +33,8 @@ pub use client::{
     FlushReport, FriendView, HistoryMessage, Inbox, LastMessage, LearnedName, MAX_MESSAGE_REQUESTS,
     OUTBOX_GIVE_UP_MS, PersonEntry, PersonId, Reachable, Received, RecordMatch, RecordUpdate,
     RecvReport, RelayFailure, RelayHealth, RelayResolution, RelaySource, RelayStatus,
-    ReplyContacts, ResolvedName, SendReceipt, StagedSend, WhoIsAnswer, WhoIsOutcome, triage,
+    ReplyContacts, ResolvedName, SendReceipt, StagedSend, SubjectAsk, WhoIsAnswer, WhoIsOutcome,
+    triage,
 };
 pub use error::Error;
 #[cfg(target_family = "wasm")]

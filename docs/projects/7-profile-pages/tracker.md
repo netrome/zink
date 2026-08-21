@@ -143,6 +143,27 @@ per-device detail. Around it, the model work that keeps it honest:
   camelCases invoke args by default, so the webview's `device_label`
   silently arrived `None`). Re-verified: workspace green, clippy clean,
   both wasm bundles + desktop shell build.)*
+- **S3b · The subject ask — done (2026-08-21).** Live-run finding: in the
+  two-fresh-devices bootstrap (Alice scans Bob's QR, messages him), Bob
+  had *no* path to Alice's record — the scoped auto-query is gated on a
+  contributing contact, the arrival refresh is contacts-only, the page
+  fires nothing on open, and ask-everyone with zero contacts asks nobody;
+  `add_contact` needs a self-signed record, so no affordance could render.
+  The missing rung is an explicit act: `ask_subject` — `WhoIs(subject)`
+  asked *of the subject*, bare dial-by-key first, learned route as
+  fallback, answer saved subject-served via the shared `refresh_on`. No
+  rate limit (a tap is never silently swallowed); the cost is the dial —
+  a liveness receipt — so the stranger page's button copy owns it ("ask
+  them who they are — they'll know you asked") and no automatic path ever
+  calls it (who-is-this.md §5 records the stance). Three outcomes worded
+  distinctly: answered / reached-but-nothing (declining and not-holding
+  indistinguishable) / unreachable. The existing candidate rows + add
+  button complete the flow unchanged. *Done when:* on a fresh device,
+  request → page → ask → add completes; a responder that hasn't added the
+  asker yields nothing learned; a hostile answer not naming the subject
+  is dropped. *(As built: covered by unit tests for all four paths —
+  answer/add, gate decline, unreachable, forged record; workspace green,
+  clippy clean, UI wasm + desktop shell build.)*
 - **S4 · Tappable surfaces.** Sender lines, member rows, wild-key rows
   navigate to the page; the wild-key panel shrinks to a link; the R3
   stuck-cue tap target resolves from membership. *Done when:* every
@@ -178,7 +199,8 @@ per-device detail. Around it, the model work that keeps it honest:
 
 - SPEC §3.2 + §11: `DeviceLabel`, multi-key relay resolution (S1). ✅
 - who-is-this.md §5: the page-open subject-refresh joins the carve-out
-  list; the per-friend scoped ask noted beside the manual button (S3).
+  list; the per-friend scoped ask noted beside the manual button (S3);
+  the subject ask recorded as an explicit act (S3b). ✅ 2026-08-21
 - multi-device.md §7: the display-vs-addressing separation cashes in
   (S2). ✅ 2026-08-21
 - ui-design-system.md §1/§3: person entries in the view-model; the page

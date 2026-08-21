@@ -156,6 +156,18 @@ pub struct StrangerInfo {
     pub pair_back: Option<String>,
 }
 
+/// Outcome of the deliberate subject ask (project 7 — the stranger
+/// bootstrap's direct rung): three states the edge words distinctly. An
+/// answer landed; they were reached but served nothing (declining and
+/// not-holding look the same on the wire); or no route reached them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectAsk {
+    Answered,
+    Nothing,
+    Unreachable,
+}
+
 /// One member device of the page's cluster — my belief about one key.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DeviceCard {

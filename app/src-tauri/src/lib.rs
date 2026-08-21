@@ -11,7 +11,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
     AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceCard,
     DeviceRow, FriendLens, Inbox, Message, OutgoingImage, PersonInfo, PersonPage, PersonRef,
-    QrPayload, RecordPreview, RelayRow, StrangerInfo, UnknownMember, WhoIsCandidate, WhoIsReport,
+    QrPayload, RecordPreview, RelayRow, StrangerInfo, SubjectAsk, UnknownMember, WhoIsCandidate,
+    WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -1618,6 +1619,30 @@ async fn who_is(
     })
 }
 
+/// The stranger bootstrap's direct rung (project 7): ask the subject about
+/// themself — the only query that works when no mutual contact exists.
+/// Manual trigger only; the dial is a liveness receipt to the subject, and
+/// the button copy owns that. An answer lands in the learned store; the
+/// page re-reads and its candidate rows offer the add.
+#[tauri::command]
+async fn ask_subject(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+) -> Result<SubjectAsk, String> {
+    let client = client(&app, &managed).await?;
+    Ok(
+        match client
+            .ask_subject(PublicKey(hex::parse32(&subject)?))
+            .await
+        {
+            zink_client::SubjectAsk::Answered => SubjectAsk::Answered,
+            zink_client::SubjectAsk::Nothing => SubjectAsk::Nothing,
+            zink_client::SubjectAsk::Unreachable => SubjectAsk::Unreachable,
+        },
+    )
+}
+
 /// Drain the home relays into the store; the UI re-renders from the stored
 /// DAG afterwards. Returns how many messages arrived.
 #[tauri::command]
@@ -1750,6 +1775,7 @@ pub fn run() {
             key_page,
             page_refresh,
             ask_friend,
+            ask_subject,
             rename_person,
             merge_persons,
             split_person,
