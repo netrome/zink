@@ -249,9 +249,15 @@ impl SyncHandler {
                 Some(record) => SyncResult::Known {
                     record: Box::new(record),
                     // This device's OWN issued claims about the
-                    // subject (D4a) — never anything learned or
+                    // subject (D4a) — the name vouch and the avatar
+                    // share (S5) — never anything learned or
                     // relayed: hop limit 1 is structural.
-                    endorsements: self.state.vouch_for(&key).into_iter().collect(),
+                    endorsements: self
+                        .state
+                        .vouch_for(&key)
+                        .into_iter()
+                        .chain(self.state.avatar_share_for(&key))
+                        .collect(),
                 },
                 None => SyncResult::NotHeld,
             },

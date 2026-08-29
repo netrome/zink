@@ -207,25 +207,42 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         })
     }
 
-    /// Push the current avatar ciphertext to every home relay (relays
-    /// dedup by hash) — run at publish, and re-run by long-lived edges on
-    /// startup: relay caches expire (30-day TTL), and the publisher's push
-    /// is the only source contacts can fetch from. Best-effort per relay;
-    /// returns how many took it.
+    /// Push the current avatar ciphertext — own (D1d) and every issued
+    /// avatar share's (S5) — to every home relay (relays dedup by hash).
+    /// Run at publish, and re-run by long-lived edges on startup: relay
+    /// caches expire (30-day TTL), and the publisher's push is the only
+    /// source others can fetch from. Best-effort per relay; returns how
+    /// many relays took the batch.
     pub async fn push_avatar(&self) -> usize {
-        let Some((hash, _, _)) = self.state.avatar_meta() else {
+        let hashes = self
+            .state
+            .avatar_meta()
+            .map(|(hash, _, _)| hash)
+            .into_iter()
+            .chain(
+                self.state
+                    .issued_avatar_shares()
+                    .into_iter()
+                    .filter_map(|signed| match signed.attestation.claim {
+                        Claim::Avatar { hash, .. } => Some(hash),
+                        _ => None,
+                    }),
+            );
+        let blobs: Vec<EncryptedBlob> = hashes
+            .filter_map(|hash| {
+                let bytes = self.state.load_blob(&hash)?;
+                Some(EncryptedBlob { hash, bytes })
+            })
+            .collect();
+        if blobs.is_empty() {
             return 0;
-        };
-        let Some(bytes) = self.state.load_blob(&hash) else {
-            return 0;
-        };
-        let blob = EncryptedBlob { hash, bytes };
+        }
         let mut pushed = 0;
         for relay in self.state.home_relays() {
             match blobs::push_blobs(
                 &self.transport,
                 &relay,
-                std::slice::from_ref(&blob),
+                &blobs,
                 self.config.connect_timeout,
                 &self.clock,
             )
@@ -239,18 +256,148 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     }
 
     /// Set a local avatar override for a contact (U6, my lens): a photo *I*
-    /// chose, stored plaintext on this device only — never published, never a
-    /// claim. Wins over the resolved self-claim in `avatar`.
-    pub fn set_local_avatar(&self, key: PublicKey, image: Vec<u8>) -> Result<(), Error> {
+    /// chose, stored plaintext on this device only — never published, never
+    /// a claim — unless a share stands (S5): then the new photo re-shares
+    /// at the next revision, so what friends fetch is what the toggle says
+    /// it is. Wins over the resolved self-claim in `avatar`.
+    pub async fn set_local_avatar(&self, key: PublicKey, image: Vec<u8>) -> Result<(), Error> {
         if image.len() > 512 * 1024 {
             return Err(Error::InvalidInput("image too large (max 512 KiB)".into()));
         }
-        self.state.save_local_avatar(&key, &image)
+        self.state.save_local_avatar(&key, &image)?;
+        if self.state.avatar_share_for(&key).is_some() {
+            self.share_avatar(key).await?;
+        }
+        Ok(())
     }
 
-    /// Drop the local avatar override — `avatar` falls back to the self-claim.
+    /// Drop the local avatar override — `avatar` falls back to the
+    /// self-claim. A standing share is withdrawn with it: a photo no
+    /// longer held cannot honestly stay shared.
     pub fn clear_local_avatar(&self, key: PublicKey) {
         self.state.remove_local_avatar(&key);
+        self.state.remove_avatar_share(&key);
+    }
+
+    /// Share my photo of a contact with friends who ask about them
+    /// (project 7 S5): seal the local override with a fresh key (§8
+    /// key-in-claim — hash and key ride the signed attestation), store the
+    /// claim beside the name vouch, push the ciphertext to the home relays
+    /// (C3a: the publisher's own caches are where fetchers look).
+    /// **Explicit**, like the vouch — nothing shares on set; the honest
+    /// copy lives at the edge. Contacts only: endorsements only ever ride
+    /// `Known` answers, which the serving gate limits to stored contacts.
+    pub async fn share_avatar(&self, subject: PublicKey) -> Result<u64, Error> {
+        let held = self
+            .state
+            .contacts()?
+            .iter()
+            .any(|(_, record)| record.keys.contains(&subject));
+        if !held {
+            return Err(Error::InvalidInput(
+                "not a contact — add them before sharing a photo of them".into(),
+            ));
+        }
+        let Some(image) = self.state.local_avatar(&subject) else {
+            return Err(Error::InvalidInput(
+                "no photo of them set — choose one first".into(),
+            ));
+        };
+        let (blob, key) = seal_avatar(&image, &mut OsRng);
+        let revision = self
+            .state
+            .avatar_share_for(&subject)
+            .map(|prior| prior.attestation.revision + 1)
+            .unwrap_or(0);
+        let share = SignedAttestation::new(
+            Attestation {
+                version: Attestation::CURRENT,
+                attester: self.device.public(),
+                subject,
+                claim: Claim::Avatar {
+                    hash: blob.hash,
+                    key,
+                },
+                revision,
+            },
+            &self.device,
+        );
+        self.state.save_blob(&blob.hash, &blob.bytes)?;
+        self.state.save_avatar_share(&subject, &share)?;
+        self.push_avatar().await;
+        Ok(revision)
+    }
+
+    /// Withdraw an avatar share: it stops being served, and observers'
+    /// per-responder learned entries replace it away on their next
+    /// freshness pull — exactly the `unvouch` semantics.
+    pub fn unshare_avatar(&self, subject: PublicKey) {
+        self.state.remove_avatar_share(&subject);
+    }
+
+    /// Whether this device currently shares a photo of a key (drives the
+    /// share toggle, like `vouches` drives the vouch).
+    pub fn shares_avatar(&self, subject: &PublicKey) -> bool {
+        self.state.avatar_share_for(subject).is_some()
+    }
+
+    /// A friend's shared photo of a subject (S5) — "as Bob tells you":
+    /// their verified, un-voided `Avatar` endorsement from the learned
+    /// store; ciphertext from the local cache, else fetched from the
+    /// friend's resolved relays (they push to their own homes), verified
+    /// against the claim (hash + AEAD) and cached. Never enters `avatar`
+    /// resolution — my override and the subject's self-claim stay the page
+    /// and list faces; this renders only inside the through-friends lens.
+    pub async fn shared_avatar(
+        &self,
+        subject: PublicKey,
+        friend: PublicKey,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Some(entry) = self
+            .state
+            .learned(&subject)
+            .into_iter()
+            .find(|entry| entry.responder == friend)
+        else {
+            return Ok(None);
+        };
+        let Some((hash, key, _)) = super::contacts::shared_avatar_claim(&entry, subject) else {
+            return Ok(None);
+        };
+        if let Some(bytes) = self.state.load_blob(&hash)
+            && let Ok(plaintext) = open_avatar(&bytes, &hash, &key)
+        {
+            return Ok(Some(plaintext));
+        }
+        let relays = self
+            .relay_resolution(friend)
+            .map(|resolution| resolution.relays)
+            .unwrap_or_default();
+        for relay in relays {
+            match blobs::fetch_encrypted(
+                &self.transport,
+                &relay.mailbox,
+                &hash,
+                self.config.connect_timeout,
+                &self.clock,
+            )
+            .await
+            {
+                Ok(bytes) => match open_avatar(&bytes, &hash, &key) {
+                    Ok(plaintext) => {
+                        self.state.save_blob(&hash, &bytes)?;
+                        return Ok(Some(plaintext));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "shared avatar failed verification; skipping")
+                    }
+                },
+                Err(error) => {
+                    tracing::debug!(relay = relay.mailbox, %error, "shared avatar fetch failed")
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Whether a local avatar override is set for a key (drives the "remove
@@ -385,8 +532,9 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::client::test_kit::{temp_key, temp_root};
+    use crate::client::test_kit::{befriend, loop_client, temp_key, temp_root};
     use crate::hex;
+    use crate::ports::transport::Loopback;
 
     #[tokio::test]
     async fn set_profile__should_bump_the_name_attestation_revision_on_rename_only() {
@@ -526,5 +674,191 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("avatarb"));
+    }
+
+    #[tokio::test]
+    async fn share_avatar__should_serve_the_photo_to_friends_who_ask() {
+        // Given: bob holds carol with a photo he chose and shares it; bob
+        // serves anna (mutual), and anna can dial him
+        let wire = Loopback::new();
+        let (a, _a_net, _a_clock) = loop_client("share-serve", "anna", &wire);
+        let (b, _b_net, _b_clock) = loop_client("share-serve", "bob", &wire);
+        let carol = DeviceKey::from_seed([90; 32]).public();
+        let carol_record = ContactRecord::new(
+            vec![carol],
+            vec![],
+            vec![RelayEntry {
+                mailbox: "cc@203.0.113.9:9".to_string(),
+                relay_url: Some("http://203.0.113.9:9".to_string()),
+            }],
+        );
+        b.add_contact(&carol_record, Some("carol".to_string()))
+            .expect("bob adds carol");
+        b.set_local_avatar(carol, b"a picture of carol".to_vec())
+            .await
+            .expect("photo");
+        b.share_avatar(carol).await.expect("share");
+        befriend(&b.state, a.public_key());
+        a.add_contact(
+            &ContactRecord::new(
+                vec![b.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "bb@203.0.113.2:2".to_string(),
+                    relay_url: Some("http://203.0.113.2:2".to_string()),
+                }],
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("anna adds bob");
+
+        // When: anna asks about carol, and the ciphertext reaches her cache
+        // (what a successful relay fetch leaves behind)
+        a.who_is(carol).await.expect("who_is");
+        let share = b.state.avatar_share_for(&carol).expect("share stored");
+        let Claim::Avatar { hash, .. } = share.attestation.claim else {
+            panic!("expected an avatar claim");
+        };
+        let ciphertext = b.state.load_blob(&hash).expect("sealed at share");
+        a.state.save_blob(&hash, &ciphertext).expect("seed cache");
+
+        // Then: the friends lens carries the share, and the photo renders
+        // as bob tells it — while carol's own face stays unclaimed: a
+        // friend's photo never enters `avatar` resolution
+        let views = a.friend_views(carol).expect("views");
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].petname, "bob");
+        assert_eq!(views[0].responder, b.public_key());
+        assert!(views[0].shares_avatar);
+        let photo = a.shared_avatar(carol, b.public_key()).await.expect("fetch");
+        assert_eq!(photo.as_deref(), Some(b"a picture of carol".as_slice()));
+        assert_eq!(a.avatar(carol).await.expect("avatar"), None);
+
+        let _ = std::fs::remove_dir_all(temp_root("share-serve"));
+    }
+
+    #[tokio::test]
+    async fn share_avatar__should_reshare_on_a_new_photo_and_die_with_repudiation() {
+        // Given: a shared photo of carol
+        let a = Client::open_or_create(&temp_key("share-life", "a"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([91; 32]).public();
+        a.add_contact(
+            &ContactRecord::new(
+                vec![carol],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "cc@203.0.113.9:9".to_string(),
+                    relay_url: None,
+                }],
+            ),
+            Some("carol".to_string()),
+        )
+        .expect("add carol");
+        a.set_local_avatar(carol, b"first photo".to_vec())
+            .await
+            .expect("photo");
+        let first = a.share_avatar(carol).await.expect("share");
+
+        // When: the photo changes — the standing share follows it
+        a.set_local_avatar(carol, b"second photo".to_vec())
+            .await
+            .expect("new photo");
+
+        // Then: re-shared at the next revision, so what friends fetch is
+        // what the toggle says it is
+        let reshared = a.state.avatar_share_for(&carol).expect("still shared");
+        assert_eq!((first, reshared.attestation.revision), (0, 1));
+
+        // When: carol's key is repudiated
+        a.repudiate(carol).expect("repudiate");
+
+        // Then: the share is withdrawn, and the Negative out-revisions it —
+        // copies already learned void under the §4 rule
+        assert!(a.state.avatar_share_for(&carol).is_none());
+        let negative = a.state.vouch_for(&carol).expect("negative stored");
+        assert!(matches!(negative.attestation.claim, Claim::Negative));
+        assert!(negative.attestation.revision > 1);
+
+        let _ = std::fs::remove_dir_all(temp_root("share-life"));
+    }
+
+    #[tokio::test]
+    async fn clear_local_avatar__should_withdraw_the_share() {
+        // Given: a shared photo
+        let a = Client::open_or_create(&temp_key("share-clear", "a"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([92; 32]).public();
+        a.add_contact(
+            &ContactRecord::new(
+                vec![carol],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "cc@203.0.113.9:9".to_string(),
+                    relay_url: None,
+                }],
+            ),
+            Some("carol".to_string()),
+        )
+        .expect("add carol");
+        a.set_local_avatar(carol, b"photo".to_vec())
+            .await
+            .expect("photo");
+        a.share_avatar(carol).await.expect("share");
+
+        // When: the photo is removed
+        a.clear_local_avatar(carol);
+
+        // Then: a photo no longer held cannot honestly stay shared
+        assert!(a.state.avatar_share_for(&carol).is_none());
+
+        let _ = std::fs::remove_dir_all(temp_root("share-clear"));
+    }
+
+    #[test]
+    fn shared_avatar_claim__should_void_under_a_higher_negative() {
+        // Given: one learned entry whose endorsements carry the friend's
+        // avatar claim — alone, then beside a higher-revision Negative
+        // (the hostile/stale combo an honest client never serves)
+        let friend = DeviceKey::from_seed([93; 32]);
+        let subject = DeviceKey::from_seed([94; 32]).public();
+        let signed = |claim: Claim, revision: u64| {
+            SignedAttestation::new(
+                Attestation {
+                    version: Attestation::CURRENT,
+                    attester: friend.public(),
+                    subject,
+                    claim,
+                    revision,
+                },
+                &friend,
+            )
+        };
+        let avatar = signed(
+            Claim::Avatar {
+                hash: zink_protocol::BlobHash([7; 32]),
+                key: [8; 32],
+            },
+            1,
+        );
+        let entry = |endorsements: Vec<SignedAttestation>| crate::state::LearnedRecord {
+            responder: friend.public(),
+            record: ContactRecord::new(vec![subject], vec![], vec![]),
+            endorsements,
+            received_ms: 0,
+        };
+
+        // When / Then: alive alone; a higher Negative voids it; a lower
+        // one does not (the re-share won)
+        let alive = entry(vec![avatar.clone()]);
+        assert!(crate::client::contacts::shared_avatar_claim(&alive, subject).is_some());
+        let voided = entry(vec![avatar.clone(), signed(Claim::Negative, 2)]);
+        assert!(crate::client::contacts::shared_avatar_claim(&voided, subject).is_none());
+        let outlived = entry(vec![avatar, signed(Claim::Negative, 0)]);
+        assert!(crate::client::contacts::shared_avatar_claim(&outlived, subject).is_some());
+
+        let _ = std::fs::remove_dir_all(temp_root("share-void"));
     }
 }

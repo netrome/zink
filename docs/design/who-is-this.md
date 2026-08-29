@@ -271,6 +271,12 @@ Claim::Avatar { hash: BlobHash, key: [u8; 32] }   // in-place at v1; dev-stage
   open — the cache TTL (30 days) would otherwise silently expire it. Fetchers
   read the relays from the same record the claim arrived in, decrypt, verify,
   and keep it in the client blob cache (fetch once, render forever).
+  *Third-party shares* (project 7 S5 — a friend's `Avatar` endorsement about
+  someone else) follow the same pattern from the **attester's** side: the
+  friend seals their own photo of the subject, pushes to their own home
+  relays (the startup re-push covers these blobs too), and fetchers resolve
+  the *friend's* relays — the claim rode the friend's answer, so the
+  friend's caches are where the bytes live.
 - **Image handling:** pick + downscale reuses the C3c canvas path (thumb-sized;
   bounded bytes); decrypted bytes are validated as an image before rendering —
   hostile-input hygiene, same stance as everywhere.

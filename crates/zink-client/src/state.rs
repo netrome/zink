@@ -710,6 +710,70 @@ impl ClientState {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Store an issued avatar share (project 7 S5): this device's signed
+    /// `Avatar` claim about a contact — "the photo I chose for them",
+    /// served as an endorsement beside the name vouch. A sibling slot, not
+    /// a replacement: name and avatar supersede independently, like the
+    /// self-claim kinds (SPEC §3.2).
+    pub fn save_avatar_share(
+        &self,
+        subject: &PublicKey,
+        share: &SignedAttestation,
+    ) -> Result<(), Error> {
+        let path = self
+            .root
+            .join("vouches")
+            .join(hex(&subject.0))
+            .with_extension("avatar");
+        create_parent(&path)?;
+        write_atomic(&path, &share.to_bytes())
+            .map_err(|e| Error::Storage(format!("write avatar share: {e}")))
+    }
+
+    /// The issued avatar share about a subject, if any.
+    pub fn avatar_share_for(&self, subject: &PublicKey) -> Option<SignedAttestation> {
+        let path = self
+            .root
+            .join("vouches")
+            .join(hex(&subject.0))
+            .with_extension("avatar");
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| SignedAttestation::try_from_bytes(&bytes).ok())
+    }
+
+    /// Withdraw an avatar share locally — same semantics as `remove_vouch`.
+    pub fn remove_avatar_share(&self, subject: &PublicKey) {
+        let path = self
+            .root
+            .join("vouches")
+            .join(hex(&subject.0))
+            .with_extension("avatar");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Every issued avatar share (S5) — what the startup re-push keeps
+    /// alive on the home relay caches.
+    pub fn issued_avatar_shares(&self) -> Vec<SignedAttestation> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("vouches")) else {
+            return Vec::new();
+        };
+        let mut shares = Vec::new();
+        for entry in entries.flatten() {
+            if entry.path().extension().is_none_or(|ext| ext != "avatar") {
+                continue;
+            }
+            let Some(signed) = std::fs::read(entry.path())
+                .ok()
+                .and_then(|bytes| SignedAttestation::try_from_bytes(&bytes).ok())
+            else {
+                continue;
+            };
+            shares.push(signed);
+        }
+        shares
+    }
+
     /// Every issued `Negative` stance (D4b) — what `my_record` publishes
     /// so contacts learn a repudiation from any freshness pull on *us*.
     pub fn issued_negatives(&self) -> Vec<SignedAttestation> {

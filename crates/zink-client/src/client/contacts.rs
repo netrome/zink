@@ -8,7 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use zink_protocol::{
-    Attestation, Claim, ContactRecord, PublicKey, RelayEntry, SignedAttestation, Versioned,
+    Attestation, BlobHash, Claim, ContactRecord, PublicKey, RelayEntry, SignedAttestation,
+    Versioned,
 };
 
 use crate::error::Error;
@@ -16,6 +17,7 @@ use crate::hex;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::{Peer, Transport};
+use crate::state::LearnedRecord;
 
 use super::Client;
 
@@ -189,11 +191,46 @@ pub struct LearnedName {
 pub struct FriendView {
     /// My petname for the responder (short hex when no longer a contact).
     pub petname: String,
+    /// The responder's key — the `shared_avatar` fetch handle (S5).
+    pub responder: PublicKey,
     /// The subject's record as this friend holds it.
     pub record: ContactRecord,
     /// The name this friend vouches for the subject, if any (D4a).
     pub vouched_name: Option<String>,
+    /// Whether this friend shares a photo of the subject (S5) — a verified,
+    /// un-voided `Avatar` endorsement; the bytes come via `shared_avatar`.
+    pub shares_avatar: bool,
     pub received_ms: u64,
+}
+
+/// A friend's verified, un-voided `Avatar` claim about a subject from one
+/// learned entry (S5): only the responder's own claim counts (hop 1 stays
+/// structural), highest revision wins, and a higher-revision `Negative`
+/// from the same friend voids it — the same rule the vouched name follows.
+pub(super) fn shared_avatar_claim(
+    entry: &LearnedRecord,
+    subject: PublicKey,
+) -> Option<(BlobHash, [u8; 32], u64)> {
+    let (hash, key, revision) = entry
+        .endorsements
+        .iter()
+        .filter(|signed| signed.verify().is_ok())
+        .filter(|signed| {
+            signed.attestation.attester == entry.responder && signed.attestation.subject == subject
+        })
+        .filter_map(|signed| match signed.attestation.claim {
+            Claim::Avatar { hash, key } => Some((hash, key, signed.attestation.revision)),
+            _ => None,
+        })
+        .max_by_key(|(_, _, revision)| *revision)?;
+    let voided = entry
+        .endorsements
+        .iter()
+        .filter_map(zink_protocol::verified_negative)
+        .any(|(attester, disavowed, negative_revision)| {
+            attester == entry.responder && disavowed == subject && negative_revision > revision
+        });
+    (!voided).then_some((hash, key, revision))
 }
 
 /// One contact's verified link evidence for an unknown key (D3c,
@@ -479,7 +516,18 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             })
             })
             .map(|vouch| vouch.attestation.revision);
-        let revision = match stance.into_iter().chain(device_link).max() {
+        // The Negative must out-revision every standing claim it voids —
+        // the avatar share (S5) included.
+        let avatar_share = self
+            .state
+            .avatar_share_for(&key)
+            .map(|prior| prior.attestation.revision);
+        let revision = match stance
+            .into_iter()
+            .chain(device_link)
+            .chain(avatar_share)
+            .max()
+        {
             Some(highest) => highest + 1,
             None => 0,
         };
@@ -494,6 +542,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             &self.device,
         );
         self.state.save_vouch(&key, &negative)?;
+        // A repudiated key's photo stops being shared and re-pushed; the
+        // Negative's higher revision voids copies already learned.
+        self.state.remove_avatar_share(&key);
         self.state.remove_recognized_device(&key);
         Ok(())
     }
@@ -1021,8 +1072,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     .map(|(name, _)| name);
                 FriendView {
                     petname: petname_of(entry.responder),
+                    responder: entry.responder,
                     record: entry.record.clone(),
                     vouched_name,
+                    shares_avatar: shared_avatar_claim(&entry, subject).is_some(),
                     received_ms: entry.received_ms,
                 }
             })

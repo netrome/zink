@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
@@ -372,6 +374,71 @@ pub(crate) fn PersonView(
         });
     };
 
+    // The photo share toggle (S5): publishes my photo of them as an
+    // endorsement friends receive when they ask about this person —
+    // explicit, like the vouch, with the copy owning what it shares.
+    let toggle_share = move |key: String, sharing: bool| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                key: &'a str,
+            }
+            let args = Args { key: &key };
+            let command = if sharing {
+                "unshare_avatar"
+            } else {
+                "share_avatar"
+            };
+            match invoke::invoke::<serde::de::IgnoredAny>(command, &args).await {
+                Ok(_) => {
+                    load_page();
+                    ok(if sharing {
+                        "no longer sharing your photo of them"
+                    } else {
+                        "sharing — friends who ask you about them see your photo"
+                    });
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
+    // Friends' shared photos (S5), lazily fetched per friend row — "as
+    // they tell you", rendered only inside the through-friends lens.
+    let friend_avatars = RwSignal::new(HashMap::<String, String>::new());
+    Effect::new(move |_| {
+        let Some(current) = page.get() else {
+            return;
+        };
+        for friend in current.friends {
+            let Some(subject) = friend.avatar_of else {
+                continue;
+            };
+            let key = friend.key.clone();
+            if friend_avatars.with_untracked(|avatars| avatars.contains_key(&key)) {
+                continue;
+            }
+            spawn_local(async move {
+                #[derive(Serialize)]
+                struct Args<'a> {
+                    subject: &'a str,
+                    friend: &'a str,
+                }
+                let args = Args {
+                    subject: &subject,
+                    friend: &key,
+                };
+                if let Ok(Some(b64)) =
+                    invoke::invoke::<Option<String>>("friend_avatar", &args).await
+                {
+                    friend_avatars.update(|avatars| {
+                        avatars.insert(key, image::data_url(&b64));
+                    });
+                }
+            });
+        }
+    });
+
     // The per-friend scoped ask (S3): dials exactly this friend — they
     // learn you asked; nobody else does.
     let ask_friend = move |friend: String| {
@@ -550,6 +617,7 @@ pub(crate) fn PersonView(
                         let label = current.label.clone();
                         let photo_key = current.avatar_key.clone();
                         let has_local = current.has_local_avatar;
+                        let shares_my = current.shares_my_avatar;
                         let devices = current.devices.clone();
                         let device_count = devices.len();
                         // The lens closure owns its own copy; the cards
@@ -712,6 +780,7 @@ pub(crate) fn PersonView(
                                         let photo_key = photo_key.clone();
                                         let pick_key = photo_key.clone();
                                         let clear_key = photo_key.clone();
+                                        let share_key = photo_key.clone();
                                         view! {
                                             {is_person
                                                 .then(|| {
@@ -745,6 +814,28 @@ pub(crate) fn PersonView(
                                                                         on:click=move |_| clear_photo(clear_key.clone())
                                                                     >
                                                                         "use their photo instead"
+                                                                    </button>
+                                                                }
+                                                            })}
+                                                        // The photo share (S5), beside the
+                                                        // vouch in spirit: explicit, and the
+                                                        // copy owns what it publishes.
+                                                        {(is_person && has_local)
+                                                            .then(|| {
+                                                                let share_key = share_key.clone();
+                                                                view! {
+                                                                    <button
+                                                                        class="secondary"
+                                                                        on:click=move |_| toggle_share(
+                                                                            share_key.clone(),
+                                                                            shares_my,
+                                                                        )
+                                                                    >
+                                                                        {if shares_my {
+                                                                            "stop sharing your photo of them"
+                                                                        } else {
+                                                                            "share your photo of them — friends who ask you see it"
+                                                                        }}
                                                                     </button>
                                                                 }
                                                             })}
@@ -792,8 +883,20 @@ pub(crate) fn PersonView(
                                                 .into_iter()
                                                 .map(|friend| {
                                                     let ask_name = friend.petname.clone();
+                                                    let friend_key = friend.key.clone();
                                                     view! {
                                                         <div class="row">
+                                                            // Their photo of this person (S5) —
+                                                            // "as they tell you", never the
+                                                            // page face.
+                                                            {friend
+                                                                .avatar_of
+                                                                .is_some()
+                                                                .then(|| {
+                                                                    friend_avatars
+                                                                        .with(|avatars| avatars.get(&friend_key).cloned())
+                                                                        .map(|url| view! { <img class="avatar" src=url /> })
+                                                                })}
                                                             <b>{friend.petname.clone()}</b>
                                                             <span class="dim">
                                                                 {friend

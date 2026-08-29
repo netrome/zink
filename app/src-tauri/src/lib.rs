@@ -551,11 +551,14 @@ async fn set_local_avatar(
         return Err("that file does not look like an image".into());
     }
     let client = client(&app, &managed).await?;
-    client.set_local_avatar(PublicKey(hex::parse32(&key)?), image)?;
+    client
+        .set_local_avatar(PublicKey(hex::parse32(&key)?), image)
+        .await?;
     Ok(())
 }
 
-/// Drop the local photo for a contact — their self-claimed avatar shows again.
+/// Drop the local photo for a contact — their self-claimed avatar shows
+/// again. A standing share is withdrawn with it.
 #[tauri::command]
 async fn clear_local_avatar(
     app: AppHandle,
@@ -565,6 +568,53 @@ async fn clear_local_avatar(
     let client = client(&app, &managed).await?;
     client.clear_local_avatar(PublicKey(hex::parse32(&key)?));
     Ok(())
+}
+
+/// Share my photo of a contact with friends who ask about them (project 7
+/// S5) — the explicit act beside the vouch; the toggle copy owns what it
+/// publishes.
+#[tauri::command]
+async fn share_avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.share_avatar(PublicKey(hex::parse32(&key)?)).await?;
+    Ok(())
+}
+
+/// Stop sharing my photo of a contact — observers replace it away on
+/// their next freshness pull, like a withdrawn vouch.
+#[tauri::command]
+async fn unshare_avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    key: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.unshare_avatar(PublicKey(hex::parse32(&key)?));
+    Ok(())
+}
+
+/// A friend's shared photo of a subject (S5), base64 — the friends-lens
+/// row face ("as they tell you"). `None` while unfetchable: display data
+/// is best-effort, and it never replaces my override or their self-claim.
+#[tauri::command]
+async fn friend_avatar(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+    friend: String,
+) -> Result<Option<String>, String> {
+    let client = client(&app, &managed).await?;
+    let bytes = client
+        .shared_avatar(
+            PublicKey(hex::parse32(&subject)?),
+            PublicKey(hex::parse32(&friend)?),
+        )
+        .await?;
+    Ok(bytes.map(|bytes| BASE64.encode(&bytes)))
 }
 
 /// The person page for a contact person, by opaque person id (project 7
@@ -647,6 +697,7 @@ fn person_page_dto(
         has_local_avatar: first
             .map(|key| client.has_local_avatar(&key))
             .unwrap_or(false),
+        shares_my_avatar: first.map(|key| client.shares_avatar(&key)).unwrap_or(false),
         devices,
         friends: friends.into_values().collect(),
     })
@@ -701,6 +752,8 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
         }),
         avatar_key: hex::encode(&subject.0),
         has_local_avatar: client.has_local_avatar(&subject),
+        // Shares are contacts-only; a stranger page never offers the toggle.
+        shares_my_avatar: false,
         devices: vec![DeviceCard {
             petname: hex::encode(&subject.0)[..8].to_string(),
             device_label: best_record
@@ -784,11 +837,16 @@ fn merge_friend_views(
             .entry(view.petname.clone())
             .or_insert_with(|| FriendLens {
                 petname: view.petname.clone(),
+                key: hex::encode(&view.responder.0),
                 vouched_name: None,
+                avatar_of: None,
                 held: Vec::new(),
             });
         if lens.vouched_name.is_none() {
             lens.vouched_name = view.vouched_name.clone();
+        }
+        if lens.avatar_of.is_none() && view.shares_avatar {
+            lens.avatar_of = Some(hex::encode(&subject.0));
         }
         let claimed = match (
             view.record.self_claimed_name(),
@@ -1782,6 +1840,9 @@ pub fn run() {
             set_relay_override,
             set_local_avatar,
             clear_local_avatar,
+            share_avatar,
+            unshare_avatar,
+            friend_avatar,
             person_page,
             key_page,
             page_refresh,

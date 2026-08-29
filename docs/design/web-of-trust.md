@@ -76,9 +76,12 @@ SyncResult::Known {
 ```
 
 - **Serve side**: alongside the stored record, attach this device's own
-  issued claims about the subject — its vouch (`Name`) and/or disavowal
-  (`Negative`), from client state. Only claims signed by *this device's
-  key*: a responder never relays what others told it (hop 1, structural).
+  issued claims about the subject — its vouch (`Name`), its avatar share
+  (`Avatar`, project 7 S5: "the photo I chose for them", sealed with the
+  who-is-this.md §8 key-in-claim pattern and cached on this device's own
+  home relays), and/or disavowal (`Negative`), from client state. Only
+  claims signed by *this device's key*: a responder never relays what
+  others told it (hop 1, structural).
 - **Requester side**: verify each endorsement like everything else —
   signature valid, `attester == the connection key that answered`,
   `subject == the queried key`. Anything else is dropped with a warning,
@@ -180,17 +183,22 @@ The drill, end to end — every step an existing primitive plus §3/§4:
 - **Device list**: un-recognize (local) and repudiate (local + published)
   as separate acts — losing interest in a sibling is not the same as
   declaring it compromised.
-- **Per-attester lenses (future, parked — sharpened at review,
-  2026-07-20)**: nothing in this layer ever merges views — the learned
-  store and endorsements stay keyed by responder/attester — so "view this
-  profile as Bob" (Bob's name and picture for a person, rendered with an
-  according-to-Bob marker; "see this chat as Bob") is a pure presentation
-  feature a later client builds from data it already holds. Two
-  boundaries, both deliberate: a lens shows **what Bob tells you** (his
-  broadcast vouches), never "what Bob sees" — unshared petnames stay
-  private; and lenses are display-only — addressing always resolves
-  through *your* store (the multi-device.md §7 display-vs-addressing
-  separation, the same parked latitude). Nothing in D4 may preclude this.
+- **Per-attester lenses (landed with project 7 — S3 the name, S5 the
+  photo; "see this chat as Bob" stays future)**: nothing in this layer
+  ever merges views — the learned store and endorsements stay keyed by
+  responder/attester — so "view this profile as Bob" (Bob's name and
+  picture for a person, rendered with an according-to-Bob marker) is pure
+  presentation over data already held. Two boundaries, both deliberate
+  and both as built: a lens shows **what Bob tells you** (the name he
+  vouched, the photo he chose to share), never "what Bob sees" —
+  unshared petnames and unshared photos stay private; and lenses are
+  display-only — addressing always resolves through *your* store, and a
+  friend's shared photo renders only inside the through-friends rows,
+  never replacing your override or the subject's self-claim as the page
+  face. The share is an explicit toggle beside the vouch: withdrawn with
+  the local photo it publishes, voided by a higher-revision `Negative`
+  like the name (§4), re-issued at the next revision when the photo
+  changes — what friends fetch is always what the toggle says it is.
 - **Fork views** (D4d): the "crossed in flight" marker between causally
   incomparable neighbors and a merge marker on multi-parent messages.
   Advanced-view data made visible, nothing reordered. *(Orthogonal to the

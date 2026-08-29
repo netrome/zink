@@ -184,10 +184,33 @@ per-device detail. Around it, the model work that keeps it honest:
   did. Non-goal kept: no nav stack — back from a page goes to Chats/People
   as before. ui-design-system.md §3 records the rule. Verified: workspace
   green, clippy clean, UI wasm + desktop shell build.)*
-- **S5 · Lens avatars.** Third-party `Avatar` claims in endorsements +
-  per-friend rendering ("as Bob tells you"). *Done when:* a friend's
-  vouched avatar renders under *through friends*, never replacing my
-  override.
+- **S5 · Lens avatars — done (2026-08-23).** Third-party `Avatar` claims in
+  endorsements + per-friend rendering ("as Bob tells you"). *Done when:* a
+  friend's vouched avatar renders under *through friends*, never replacing
+  my override.
+  *(As built: what a friend shares is **their own local-override photo of
+  the subject** — never a relayed self-claim (hop 1 stays structural), no
+  new wire shape (`Claim::Avatar` with attester = friend, endorsement
+  validation was already kind-agnostic — no version bump, as scoped).
+  `share_avatar` seals the override fresh-keyed (§8 key-in-claim), stores
+  the attestation as a sibling slot beside the name vouch
+  (`vouches/<subject>.avatar` — kinds supersede independently, like the
+  SPEC §3.2 self-claims), pushes ciphertext to own home relays; the
+  startup `push_avatar` re-push covers shared blobs too. Lifecycle: a new
+  override re-shares at the next revision (the toggle must not lie);
+  clearing the override withdraws the share; `repudiate` withdraws it and
+  out-revisions it, so learned copies void under the §4 rule —
+  `shared_avatar_claim` applies the same voiding the vouched name uses.
+  Requester: `friend_views` marks sharing friends; `shared_avatar`
+  fetches from the *friend's* resolved relays (the claim rode their
+  answer), verifies hash + AEAD, caches. The page: a share toggle beside
+  the photo controls (contacts with an override only; strangers never
+  offer it), friend rows render the photo lazily — only inside the
+  through-friends lens, never the page face (`avatar` resolution is
+  untouched, pinned by test). Verified: 125 client tests green (share/
+  serve/fetch e2e over loopback, lifecycle, voiding incl. the
+  hostile stale-combo), clippy clean, UI wasm + desktop shell build.
+  web-of-trust.md §3/§6 + who-is-this.md §8 updated.)*
 - **S6 · Own-device lens sync.** Op vocabulary (one carrier format,
   designed here, reused by project 8), the self conversation, adoption +
   offers, conflict surfacing, chat-surface suppression. Short design doc
@@ -221,5 +244,6 @@ per-device detail. Around it, the model work that keeps it honest:
   (S2). ✅ 2026-08-21
 - ui-design-system.md §1/§3: person entries in the view-model; the page
   IA (S3/S4). §3: every identifier navigates ✅ 2026-08-21 (S4).
-- web-of-trust.md §6: the avatar lens lands (S5).
+- web-of-trust.md §6: the avatar lens lands (S5); §3 serve side names the
+  share; who-is-this.md §8 notes third-party distribution. ✅ 2026-08-23
 - New lens-sync design doc (S6), cross-referenced from project 8.

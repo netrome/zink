@@ -115,6 +115,9 @@ pub struct PersonPage {
     pub avatar_key: String,
     /// Whether I've set a local photo (U6) — drives the photo affordances.
     pub has_local_avatar: bool,
+    /// Whether I share my photo of them with friends who ask (S5) —
+    /// drives the share toggle beside the photo controls.
+    pub shares_my_avatar: bool,
     /// The per-device layer: one card per member entry (a stranger is a
     /// one-card degenerate cluster).
     pub devices: Vec<DeviceCard>,
@@ -203,8 +206,14 @@ pub struct DeviceCard {
 pub struct FriendLens {
     /// The friend, by my petname for them — also the `ask_friend` handle.
     pub petname: String,
+    /// The friend's key, hex — the `friend_avatar` fetch handle (S5).
+    pub key: String,
     /// The name they vouch for this person (their published claim), if any.
     pub vouched_name: Option<String>,
+    /// The member key this friend shares a photo of, if any (S5) — the
+    /// `friend_avatar` subject. Renders only inside this lens ("as they
+    /// tell you"); never the page face.
+    pub avatar_of: Option<String>,
     /// Render-ready held-record lines ("holds their record — 'Mårten ·
     /// laptop', from 2 d ago").
     pub held: Vec<String>,
