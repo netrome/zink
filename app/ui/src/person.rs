@@ -247,9 +247,16 @@ pub(crate) fn PersonView(
         });
     };
 
-    // Vouch per device entry (D4a) — shares that entry's petname, and the
-    // copy names it so nothing is shared silently.
+    // Vouch per device entry (D4a) — what travels is the person label
+    // (project 7 close-out), and the copy names it so nothing is shared
+    // silently.
     let toggle_vouch = move |petname: String, vouched: bool| {
+        // The published string: the page's person label, not the entry
+        // petname the act is keyed by.
+        let shared = page
+            .get_untracked()
+            .map(|current| current.label)
+            .unwrap_or_else(|| petname.clone());
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
@@ -265,7 +272,7 @@ pub(crate) fn PersonView(
                         "no longer sharing a name for them".to_string()
                     } else {
                         format!(
-                            "vouching — friends who ask you about them see \u{201c}{petname}\u{201d}"
+                            "vouching — friends who ask you about them see \u{201c}{shared}\u{201d}"
                         )
                     }
                     .as_str());
@@ -1039,6 +1046,7 @@ pub(crate) fn PersonView(
                                     device_card_view(
                                         card,
                                         is_person,
+                                        label.clone(),
                                         armed,
                                         override_input,
                                         toggle_vouch,
@@ -1089,6 +1097,7 @@ pub(crate) fn PersonView(
 fn device_card_view(
     card: DeviceCard,
     is_person: bool,
+    shared_label: String,
     armed: RwSignal<Option<String>>,
     override_input: RwSignal<String>,
     toggle_vouch: impl Fn(String, bool) + Copy + Send + 'static,
@@ -1194,7 +1203,9 @@ fn device_card_view(
                             {if card.vouched {
                                 "stop sharing your name for this device".to_string()
                             } else {
-                                format!("share \u{201c}{}\u{201d} with friends who ask", card.petname)
+                                // What travels is the person label (the
+                                // published claim), never the entry petname.
+                                format!("share \u{201c}{shared_label}\u{201d} with friends who ask")
                             }}
                         </button>
                         {card

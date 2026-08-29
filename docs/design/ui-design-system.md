@@ -63,17 +63,19 @@ detail screen):
   someone else's devices (web-of-trust.md §6). Structurally impossible; we don't
   offer it.
 
-> *Arbitrary local grouping* — bagging unrelated keys under one label you invent
-> ("someone in my football team") — is a legitimate client-policy idea but is **out
-> of scope**: the storage clusters only via signed records + own-device
-> recognition, so it would need a new local same-person store and send-by-name /
-> membership decisions. Not planned; revisit if a concrete need appears.
+> *Arbitrary local grouping* — bagging keys under one label you choose —
+> **landed with project 7 S2**: the person store (`persons/<id>`, ids minted
+> locally, labels collision-checked) is exactly the "new local same-person
+> store" this note once deferred. Merge / split / rename are explicit acts,
+> evidence only ever *offers* a merge, and send-by-name resolves the person
+> label to every member key. Nothing groups on its own — clustering stays a
+> deliberate act of yours.
 
-**Not free (tracked, not silently absorbed):** a friend's *avatar* for someone (the
-per-attester avatar lens) is deferred in web-of-trust.md §6. The UI renders
-friends' vouched **names** now and their avatars the moment third-party avatar
-claims land — that protocol/client-core work is tracked there. A **local avatar
-override** (a photo *you* assign) is client-side and shipped (U6).
+**Friends' avatars landed too** (project 7 S5, web-of-trust.md §6): a friend's
+photo of someone renders under the *through friends* lens — "as Bob tells
+you" — from third-party `Avatar` endorsements, never replacing your override
+or the subject's self-claim as the page face. A **local avatar override** (a
+photo *you* assign) remains client-side and shipped (U6).
 
 ## 2. Design system (the tokens)
 

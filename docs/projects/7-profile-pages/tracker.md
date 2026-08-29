@@ -1,8 +1,15 @@
 # Profile pages: one person page over a key cluster
 
-> **Status: 🚧 in progress — scoped 2026-08-20.** Branch: `profile-page`.
-> Trigger: a message request from an unknown key offers no way to preview
-> who sent it, and contacts have no browsable profile page.
+> **Status: ✅ done — closed 2026-08-23** (scoped 2026-08-20; branch
+> `profile-page`). Trigger: a message request from an unknown key offered
+> no way to preview who sent it, and contacts had no browsable profile
+> page. All slices landed and live-run verified (two devices + relay,
+> 2026-08-23): the stranger request → page → ask → add bootstrap, tappable
+> surfaces, lens avatars, and own-device lens sync all confirmed live.
+> *Unrelated live-run finding, to schedule separately:* an image message
+> can arrive before the sender's blob push finishes, so the receiver's
+> first fetch misses the relay cache (a sender-side ordering / receiver
+> retry question — not a project 7 surface).
 
 ## TL;DR
 
@@ -131,7 +138,12 @@ per-device detail. Around it, the model work that keeps it honest:
   gained the device field (S1's prefill split); vouch copy now names the
   exact string it shares. Follow-up noted: vouching publishes the entry
   petname — publishing the person label instead is a small client change,
-  with S5. Verified: workspace tests green, clippy clean, UI wasm +
+  with S5. *(Resolved at close, 2026-08-23: `vouch` now publishes the
+  person label — the name the lens addresses by — resolved from the entry
+  key; the toggle button and ok-flash name the label, so the copy still
+  names exactly what travels. Regression-tested: an entry petname that
+  differs from a renamed label vouches the label.)* Verified: workspace
+  tests green, clippy clean, UI wasm +
   src-tauri (desktop shell) compile, both bundles build.)*
   *(2026-08-21, with the id rework: the page and every act key on the
   person id — `View::Person { id }`, `ContactRow.id`, `PersonInfo.id`,
@@ -282,6 +294,8 @@ per-device detail. Around it, the model work that keeps it honest:
   (S2). ✅ 2026-08-21
 - ui-design-system.md §1/§3: person entries in the view-model; the page
   IA (S3/S4). §3: every identifier navigates ✅ 2026-08-21 (S4).
+  §1: the arbitrary-grouping and friends'-avatar notes un-deferred —
+  the person store (S2) and the avatar lens (S5) landed ✅ 2026-08-23.
 - web-of-trust.md §6: the avatar lens lands (S5); §3 serve side names the
   share; who-is-this.md §8 notes third-party distribution. ✅ 2026-08-23
 - New lens-sync design doc (S6), cross-referenced from project 8.

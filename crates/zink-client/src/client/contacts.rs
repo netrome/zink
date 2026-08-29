@@ -455,13 +455,24 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     }
 
     /// Vouch for a contact (D4a, web-of-trust.md §2): sign "I call this
-    /// key <petname>" and serve it as an endorsement with every `WhoIs`
-    /// answer about them from now on. **Explicit** — it broadcasts your
-    /// petname, which stays private by default (SPEC §3.2); nothing
-    /// vouches on add. A re-vouch (after a rename, say) supersedes at the
-    /// next revision. Returns the vouched key.
+    /// key <name>" and serve it as an endorsement with every `WhoIs`
+    /// answer about them from now on. The published name is the **person
+    /// label** — the person-level name my lens addresses by — not the
+    /// entry petname underneath it (project 7 close-out: the S3
+    /// follow-up). **Explicit** — it broadcasts a name that stays private
+    /// by default (SPEC §3.2); nothing vouches on add. A re-vouch (after
+    /// a rename, say) supersedes at the next revision. Returns the
+    /// vouched key.
     pub fn vouch(&self, petname: &str) -> Result<PublicKey, Error> {
         let subject = self.contact_key(petname)?;
+        let label = self
+            .persons()?
+            .into_iter()
+            .find(|person| person.keys().contains(&subject))
+            .map(|person| person.label)
+            // Every entry belongs to a person (the S2 eager invariant);
+            // the fallback only covers a mid-heal store.
+            .unwrap_or_else(|| petname.to_string());
         let revision = self
             .state
             .vouch_for(&subject)
@@ -472,7 +483,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 version: Attestation::CURRENT,
                 attester: self.device.public(),
                 subject,
-                claim: Claim::Name(petname.to_string()),
+                claim: Claim::Name(label),
                 revision,
             },
             &self.device,
@@ -2081,6 +2092,37 @@ mod tests {
         assert!(matches!(a.vouch("nobody"), Err(Error::NotAContact(_))));
 
         let _ = std::fs::remove_dir_all(temp_root("vouch"));
+    }
+
+    #[tokio::test]
+    async fn vouch__should_publish_the_person_label_not_the_entry_petname() {
+        // Given: carol added under an entry petname, then the person row
+        // renamed — the label and the petname now differ
+        let a = Client::open_or_create(&temp_key("vouch-label", "a"))
+            .await
+            .expect("open");
+        let carol = DeviceKey::from_seed([85; 32]);
+        a.add_contact(
+            &ContactRecord::new(
+                vec![carol.public()],
+                vec![],
+                mailbox_only("cc@203.0.113.1:1"),
+            ),
+            Some("carol-phone".to_string()),
+        )
+        .expect("add");
+        let person = a.person_by_label("carol-phone").expect("person");
+        a.rename_person(person.id, "Carol").expect("rename");
+
+        // When: vouching by the entry petname (the act's handle)
+        a.vouch("carol-phone").expect("vouch");
+
+        // Then: what travels is the person label — the name my lens
+        // addresses by, exactly what the toggle copy promises
+        let stored = a.state.vouch_for(&carol.public()).expect("stored");
+        assert_eq!(stored.attestation.claim, Claim::Name("Carol".to_string()));
+
+        let _ = std::fs::remove_dir_all(temp_root("vouch-label"));
     }
 
     #[tokio::test]
