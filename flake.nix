@@ -103,6 +103,12 @@
             pkgs.atk
             pkgs.librsvg
             pkgs.openssl
+            # GSettings schemas the GTK stack reads at runtime: gtk3 brings
+            # org.gtk.Settings.FileChooser (the file picker), this one brings
+            # org.gnome.desktop.interface (theme / dark mode). Listed
+            # explicitly rather than relying on gtk3 propagating it — see the
+            # XDG_DATA_DIRS note in the desktop shellHook.
+            pkgs.gsettings-desktop-schemas
           ];
         in
         {
@@ -137,6 +143,19 @@
                 export __EGL_VENDOR_LIBRARY_FILENAMES="${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
                 export LIBGL_DRIVERS_PATH="${pkgs.mesa}/lib/dri"
                 export GBM_BACKENDS_PATH="${pkgs.mesa}/lib/gbm"
+              fi
+
+              # GIO finds GSettings schemas only under XDG_DATA_DIRS. nixpkgs'
+              # glib setup hook collects them into GSETTINGS_SCHEMAS_PATH
+              # instead, and normally wrapGAppsHook translates that into
+              # XDG_DATA_DIRS when wrapping an installed app — but a mkShell
+              # has no wrapper, so a bare `cargo tauri dev` binary sees none.
+              # WebKitGTK's file picker (<input type="file">) then aborts the
+              # whole process with "No GSettings schemas are installed on the
+              # system". Do the translation ourselves. Also needed on NixOS:
+              # the system profile carries no schemas for unwrapped binaries.
+              if [ -n "''${GSETTINGS_SCHEMAS_PATH:-}" ]; then
+                export XDG_DATA_DIRS="$GSETTINGS_SCHEMAS_PATH''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
               fi
 
               echo "zink desktop shell — webkit2gtk + tauri-cli ready"

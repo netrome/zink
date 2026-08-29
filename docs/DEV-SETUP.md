@@ -37,6 +37,13 @@ missing path and points EGL/GBM at the nixpkgs Mesa instead; nothing to do by
 hand. (Note the shells are layered by *purpose*, not supersets: `.#android`
 does not include the desktop GTK libs.)
 
+The `desktop` shell also folds `GSETTINGS_SCHEMAS_PATH` into `XDG_DATA_DIRS`.
+GIO only looks for GSettings schemas under `XDG_DATA_DIRS`; installed GTK apps
+get that translation from `wrapGAppsHook`, but a dev shell has no wrapper, so
+without it WebKitGTK's file picker (`<input type="file">`, e.g. choosing a
+profile picture) kills the process with `No GSettings schemas are installed on
+the system`. Again nothing to do by hand.
+
 If you're not on Nix, follow the manual sections below instead.
 
 ## 1. Core (all crates, all tests)
