@@ -76,6 +76,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         self.auto_who_is(received).await;
         self.auto_rewrap(received).await;
         self.auto_refresh(received).await;
+        // Sibling lens ops adopt after every arrival path (lens-sync.md
+        // §5) — store-driven, so it also picks up what auto_sync healed.
+        self.adopt_lens_ops();
     }
 
     /// Drain every relay: register, then fetch page-by-page, dedup by
@@ -140,6 +143,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         self.auto_who_is(&received).await;
         self.auto_rewrap(&received).await;
         self.auto_refresh(&received).await;
+        // Sibling lens ops adopt after every arrival path (lens-sync.md §5).
+        self.adopt_lens_ops();
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
@@ -234,6 +239,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             self.auto_who_is(&received).await;
             self.auto_rewrap(&received).await;
             self.auto_refresh(&received).await;
+            self.adopt_lens_ops();
             on_new(received);
         }
         let _ = self.flush_outbox().await;
@@ -263,6 +269,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 self.auto_who_is(&received).await;
                 self.auto_rewrap(&received).await;
                 self.auto_refresh(&received).await;
+                self.adopt_lens_ops();
                 on_new(received);
             }
         }

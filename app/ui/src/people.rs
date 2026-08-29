@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{AddPreview, AppState, RELAY_QR_PREFIX};
+use zink_app_dto::{AddPreview, AppState, RELAY_QR_PREFIX, SiblingOffer};
 
 use crate::{NoArgs, avatar_data_url, invoke};
 
@@ -166,6 +166,51 @@ pub(crate) fn PeopleView(
         }
     });
 
+    // Offers from sibling devices (S6, lens-sync.md §6): rendered with
+    // provenance; only the explicit accept below writes the contact store.
+    let offers = RwSignal::new(Vec::<SiblingOffer>::new());
+    let load_offers = move || {
+        spawn_local(async move {
+            if let Ok(list) = invoke::invoke::<Vec<SiblingOffer>>("lens_offers", &NoArgs {}).await {
+                offers.set(list);
+            }
+        });
+    };
+    load_offers();
+    let accept = move |subject: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &subject };
+            match invoke::invoke::<String>("accept_offer", &args).await {
+                Ok(petname) => {
+                    reload();
+                    load_offers();
+                    ok(&format!("added {petname}"));
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+    let decline = move |subject: String| {
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                subject: &'a str,
+            }
+            let args = Args { subject: &subject };
+            match invoke::invoke::<serde::de::IgnoredAny>("decline_offer", &args).await {
+                Ok(_) => {
+                    load_offers();
+                    ok("dismissed — your other device keeps its own copy");
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     // Scanning state drives the cancel overlay AND page transparency (see the
     // note in `MeView`). This scan always adds a contact.
     let scanning = RwSignal::new(false);
@@ -290,6 +335,45 @@ pub(crate) fn PeopleView(
                     // The plain list + the deliberate "+" to add a contact.
                     view! {
                         <button on:click=move |_| adding.set(true)>"+ add contact"</button>
+                        // Sibling offers (S6): "your phone added X — add
+                        // them here too?" Accept is the only write.
+                        {move || {
+                            let pending = offers.get();
+                            (!pending.is_empty())
+                                .then(|| {
+                                    view! {
+                                        <div class="panel">
+                                            {pending
+                                                .into_iter()
+                                                .map(|offer| {
+                                                    let accept_key = offer.subject.clone();
+                                                    let decline_key = offer.subject.clone();
+                                                    view! {
+                                                        <div class="row">
+                                                            <span class="dim">
+                                                                {format!(
+                                                                    "your {} added {} — add them here too?",
+                                                                    offer.from,
+                                                                    offer.petname,
+                                                                )}
+                                                            </span>
+                                                            <button on:click=move |_| accept(
+                                                                accept_key.clone(),
+                                                            )>"add"</button>
+                                                            <button
+                                                                class="secondary"
+                                                                on:click=move |_| decline(decline_key.clone())
+                                                            >
+                                                                "dismiss"
+                                                            </button>
+                                                        </div>
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>()}
+                                        </div>
+                                    }
+                                })
+                        }}
                         {move || {
                             let mut contacts = state
                                 .get()

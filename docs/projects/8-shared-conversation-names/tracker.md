@@ -48,6 +48,12 @@ follow the proposal.
 - Abuse posture: a member who renames constantly (rate/last-writer
   presentation policy — client-side, but decide it).
 - Does the CLI get any of this, or app-only at first?
-- The body encoding is shared with project 7's own-device lens sync
+- ~~The body encoding is shared with project 7's own-device lens sync
   (advisory claims riding a conversation — there pointed at siblings, here
-  at friends): design the carrier format once, sequence the two proposals.
+  at friends): design the carrier format once, sequence the two
+  proposals.~~ **Designed and landed with project 7 S6:** the op frame
+  (`docs/design/lens-sync.md` §2) — a sealed body `zop\0` + borsh-encoded
+  versioned enum; this project appends its name-claim variant to the same
+  frame and owns the SPEC §11 body-encoding proposal, with that doc as
+  input. The rendering rule (frames render as nothing in chat surfaces)
+  and per-kind author gating are already in place.

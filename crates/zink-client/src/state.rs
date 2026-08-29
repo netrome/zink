@@ -1087,6 +1087,210 @@ impl ClientState {
             .collect()
     }
 
+    // ===== the lens-sync store (project 7 S6, lens-sync.md) =====
+
+    /// The channel this device emits lens ops into (lens-sync.md §3).
+    pub fn lens_conversation(&self) -> Option<MessageId> {
+        std::fs::read_to_string(self.root.join("lens").join("emit"))
+            .ok()
+            .and_then(|content| crate::hex::parse32(content.trim()).ok())
+            .map(MessageId)
+    }
+
+    pub fn set_lens_conversation(&self, id: MessageId) -> Result<(), Error> {
+        let path = self.root.join("lens").join("emit");
+        create_parent(&path)?;
+        write_atomic(&path, format!("{}\n", hex(&id.0)).as_bytes())
+            .map_err(|e| Error::Storage(format!("write lens emit channel: {e}")))
+    }
+
+    /// Every conversation classified as a lens channel (lens-sync.md §3)
+    /// — what `conversations()` filters out of the inbox. One hex id per
+    /// line; grows as replay classifies, never shrinks.
+    pub fn lens_channels(&self) -> BTreeSet<MessageId> {
+        std::fs::read_to_string(self.root.join("lens").join("channels"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| crate::hex::parse32(line.trim()).ok())
+            .map(MessageId)
+            .collect()
+    }
+
+    pub fn add_lens_channel(&self, id: MessageId) -> Result<(), Error> {
+        let mut channels = self.lens_channels();
+        if !channels.insert(id) {
+            return Ok(());
+        }
+        let path = self.root.join("lens").join("channels");
+        create_parent(&path)?;
+        let content: String = channels
+            .iter()
+            .map(|id| format!("{}\n", hex(&id.0)))
+            .collect();
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write lens channels: {e}")))
+    }
+
+    /// The applied-ops ledger (lens-sync.md §5): op message ids the replay
+    /// may skip. Marked only *after* an op's effect lands, so a crash
+    /// between the two re-applies idempotently rather than losing the op.
+    pub fn lens_applied(&self) -> BTreeSet<MessageId> {
+        std::fs::read_to_string(self.root.join("lens").join("applied"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| crate::hex::parse32(line.trim()).ok())
+            .map(MessageId)
+            .collect()
+    }
+
+    pub fn add_lens_applied(&self, id: MessageId) -> Result<(), Error> {
+        let mut applied = self.lens_applied();
+        if !applied.insert(id) {
+            return Ok(());
+        }
+        let path = self.root.join("lens").join("applied");
+        create_parent(&path)?;
+        let content: String = applied
+            .iter()
+            .map(|id| format!("{}\n", hex(&id.0)))
+            .collect();
+        write_atomic(&path, content.as_bytes())
+            .map_err(|e| Error::Storage(format!("write lens applied: {e}")))
+    }
+
+    /// Store a contact-add offer (lens-sync.md §6), latest per subject —
+    /// the sibling multi-file pattern the learned store uses.
+    pub fn save_offer(
+        &self,
+        subject: &PublicKey,
+        author: &PublicKey,
+        petname: &str,
+        record: &ContactRecord,
+    ) -> Result<(), Error> {
+        let stem = self.root.join("lens").join("offers").join(hex(&subject.0));
+        create_parent(&stem.with_extension("record"))?;
+        write_atomic(&stem.with_extension("record"), &record.to_bytes())
+            .map_err(|e| Error::Storage(format!("write offer record: {e}")))?;
+        write_atomic(&stem.with_extension("author"), hex(&author.0).as_bytes())
+            .map_err(|e| Error::Storage(format!("write offer author: {e}")))?;
+        write_atomic(&stem.with_extension("petname"), petname.as_bytes())
+            .map_err(|e| Error::Storage(format!("write offer petname: {e}")))
+    }
+
+    /// Every stored offer: (subject, author, petname, record). Damaged
+    /// entries are skipped with a warning — advisory data, never fatal.
+    pub fn offers(&self) -> Vec<(PublicKey, PublicKey, String, ContactRecord)> {
+        let dir = self.root.join("lens").join("offers");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut offers = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "record") {
+                continue;
+            }
+            let subject = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| crate::hex::parse32(stem).ok())
+                .map(PublicKey);
+            let record = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| ContactRecord::try_from_bytes(&bytes).ok());
+            let author = std::fs::read_to_string(path.with_extension("author"))
+                .ok()
+                .and_then(|content| crate::hex::parse32(content.trim()).ok())
+                .map(PublicKey);
+            let petname = std::fs::read_to_string(path.with_extension("petname")).ok();
+            let (Some(subject), Some(author), Some(petname), Some(record)) =
+                (subject, author, petname, record)
+            else {
+                tracing::warn!(?path, "skipping a damaged offer entry");
+                continue;
+            };
+            offers.push((subject, author, petname, record));
+        }
+        offers
+    }
+
+    pub fn remove_offer(&self, subject: &PublicKey) {
+        let stem = self.root.join("lens").join("offers").join(hex(&subject.0));
+        for ext in ["record", "author", "petname"] {
+            let _ = std::fs::remove_file(stem.with_extension(ext));
+        }
+    }
+
+    /// Void every offer a device authored (lens-sync.md §6): the
+    /// repudiation hook.
+    pub fn remove_offers_by(&self, author: &PublicKey) {
+        for (subject, offer_author, _, _) in self.offers() {
+            if offer_author == *author {
+                self.remove_offer(&subject);
+            }
+        }
+    }
+
+    /// Surface a label conflict (lens-sync.md §5), latest per person.
+    pub fn save_conflict(
+        &self,
+        person: u128,
+        theirs: &str,
+        author: &PublicKey,
+    ) -> Result<(), Error> {
+        let stem = self
+            .root
+            .join("lens")
+            .join("conflicts")
+            .join(format!("{person:032x}"));
+        create_parent(&stem.with_extension("label"))?;
+        write_atomic(&stem.with_extension("label"), theirs.as_bytes())
+            .map_err(|e| Error::Storage(format!("write conflict label: {e}")))?;
+        write_atomic(&stem.with_extension("author"), hex(&author.0).as_bytes())
+            .map_err(|e| Error::Storage(format!("write conflict author: {e}")))
+    }
+
+    /// Every surfaced conflict: (person storage id, their label, author).
+    pub fn conflicts(&self) -> Vec<(u128, String, PublicKey)> {
+        let dir = self.root.join("lens").join("conflicts");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut conflicts = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "label") {
+                continue;
+            }
+            let person = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| u128::from_str_radix(stem, 16).ok());
+            let theirs = std::fs::read_to_string(&path).ok();
+            let author = std::fs::read_to_string(path.with_extension("author"))
+                .ok()
+                .and_then(|content| crate::hex::parse32(content.trim()).ok())
+                .map(PublicKey);
+            let (Some(person), Some(theirs), Some(author)) = (person, theirs, author) else {
+                tracing::warn!(?path, "skipping a damaged conflict entry");
+                continue;
+            };
+            conflicts.push((person, theirs, author));
+        }
+        conflicts
+    }
+
+    pub fn remove_conflict(&self, person: u128) {
+        let stem = self
+            .root
+            .join("lens")
+            .join("conflicts")
+            .join(format!("{person:032x}"));
+        for ext in ["label", "author"] {
+            let _ = std::fs::remove_file(stem.with_extension(ext));
+        }
+    }
+
     /// Peers whose last direct dial got nowhere, and when (De6b):
     /// `<hex key> <wall-clock ms>` per line, replacing the file wholesale.
     ///

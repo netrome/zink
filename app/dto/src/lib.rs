@@ -125,6 +125,9 @@ pub struct PersonPage {
     /// names and held records; never their private petnames
     /// (web-of-trust.md §6). Display-only; addressing stays mine.
     pub friends: Vec<FriendLens>,
+    /// Surfaced label conflicts from sibling devices (S6) — provenance
+    /// lines plus the take-theirs act (which is just a rename).
+    pub conflicts: Vec<LabelConflict>,
 }
 
 /// The contact-person half of the page.
@@ -157,6 +160,27 @@ pub struct StrangerInfo {
     /// MY devices (the one-way pairing case) — feeds the pair-confirm
     /// fingerprint flow; recognizing is never one tap.
     pub pair_back: Option<String>,
+}
+
+/// A pending contact-add offer from a sibling device (project 7 S6,
+/// lens-sync.md §6): renders with provenance; only the explicit accept
+/// writes the contact store.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SiblingOffer {
+    /// The offered contact's key, hex — the accept / decline handle.
+    pub subject: String,
+    pub petname: String,
+    /// Which of my devices added them — the provenance line.
+    pub from: String,
+}
+
+/// A surfaced label conflict (S6, lens-sync.md §5): concurrent renames
+/// keep mine and show theirs — "your phone calls them X"; nothing
+/// arbitrates.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LabelConflict {
+    pub theirs: String,
+    pub from: String,
 }
 
 /// Outcome of the deliberate subject ask (project 7 — the stranger

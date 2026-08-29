@@ -353,15 +353,15 @@ pub(crate) async fn open_homed_with(
 
 /// A loopback-wired client: dialable by its device key, dialing other
 /// wired clients — both ends run their real handlers (transport.md §7).
+/// The loopback-wired client type the kit constructs — for helpers that
+/// pass clients around.
+pub(crate) type LoopClient = Client<TestClock, SystemClock, TestTransport>;
+
 pub(crate) fn loop_client(
     test: &str,
     name: &str,
     wire: &Loopback,
-) -> (
-    Client<TestClock, SystemClock, TestTransport>,
-    TestTransport,
-    TestClock,
-) {
+) -> (LoopClient, TestTransport, TestClock) {
     let key_path = temp_key(test, name);
     keystore::create(&key_path).expect("key");
     let device = keystore::load(&key_path).expect("load key");

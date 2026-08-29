@@ -296,8 +296,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // Loaded once for the whole pass, not once per conversation.
         let contacts = self.state.contacts()?;
         let own = self.own_keys();
+        // Lens channels leave the inbox here (lens-sync.md §7), so the
+        // CLI and the app inherit the filter. Stored, never deleted —
+        // the DAG stays inspectable history.
+        let lens = self.state.lens_channels();
         let mut summaries = Vec::new();
         for id in self.state.conversations() {
+            if lens.contains(&id) {
+                continue;
+            }
             let envelopes = self.state.load_envelopes(id)?;
             if envelopes.is_empty() {
                 continue;

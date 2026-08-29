@@ -300,6 +300,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 if let Some(&stem) = record.keys.first() {
                     self.claim_entry(&petname, stem)?;
                 }
+                // The add travels as an offer (lens-sync.md §6): siblings
+                // render it; only their explicit accept writes anything.
+                self.emit_lens_op(super::lens::LensOp::OfferContact {
+                    record: record.to_bytes(),
+                    petname: petname.clone(),
+                });
             }
             [(existing_name, existing)] => {
                 if *existing_name != petname {
@@ -545,6 +551,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // A repudiated key's photo stops being shared and re-pushed; the
         // Negative's higher revision voids copies already learned.
         self.state.remove_avatar_share(&key);
+        // …and its pending contact-add offers void with it
+        // (lens-sync.md §6): the offer gates the write surface.
+        self.state.remove_offers_by(&key);
         self.state.remove_recognized_device(&key);
         Ok(())
     }

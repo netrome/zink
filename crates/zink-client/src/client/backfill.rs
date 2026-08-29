@@ -256,6 +256,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         for conversation in self.state.conversations() {
             healed += self.rewrap_conversation(conversation).await;
         }
+        if healed > 0 {
+            // Bodies just became openable — the new-device bootstrap's
+            // lens history adopts now (lens-sync.md §5).
+            self.adopt_lens_ops();
+        }
         healed
     }
 
@@ -354,6 +359,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             let healed = self.rewrap_conversation(conversation).await;
             if healed > 0 {
                 tracing::info!(healed, "re-wrapped history from a paired device");
+                // Freshly openable bodies may be lens ops (lens-sync.md §5).
+                self.adopt_lens_ops();
             }
         }
     }

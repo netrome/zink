@@ -165,7 +165,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// The draft of a conversation-opening message: no parents, seq/logical
     /// 0 — its own id becomes the conversation id at seal time.
-    fn genesis_draft(&self, recipients: Vec<PublicKey>) -> MessageDraft {
+    pub(super) fn genesis_draft(&self, recipients: Vec<PublicKey>) -> MessageDraft {
         MessageDraft {
             conversation: None,
             parents: vec![],
@@ -266,7 +266,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// A draft threaded onto the stored DAG's heads (body filled by
     /// `finish_send`).
-    fn threaded_draft(
+    pub(super) fn threaded_draft(
         &self,
         conversation: MessageId,
         recipients: Vec<PublicKey>,
@@ -287,7 +287,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The local half of every send: seal, persist (envelope, own-blob cache,
     /// outbox ledger, participant mapping), and stop. Everything here is
     /// filesystem work — no network, nothing that can hang.
-    fn stage(
+    pub(super) fn stage(
         &self,
         mut draft: MessageDraft,
         plaintext: Vec<u8>,

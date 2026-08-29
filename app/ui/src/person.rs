@@ -374,6 +374,34 @@ pub(crate) fn PersonView(
         });
     };
 
+    // Take a sibling's concurrent rename (S6, lens-sync.md §5): "use
+    // theirs" is just a rename — my act, which supersedes and clears the
+    // surfaced conflict.
+    let use_theirs = move |theirs: String| {
+        let Some(info) = page.get_untracked().and_then(|current| current.person) else {
+            return;
+        };
+        spawn_local(async move {
+            #[derive(Serialize)]
+            struct Args<'a> {
+                id: &'a str,
+                new: &'a str,
+            }
+            let args = Args {
+                id: &info.id,
+                new: &theirs,
+            };
+            match invoke::invoke::<serde::de::IgnoredAny>("rename_person", &args).await {
+                Ok(_) => {
+                    reload();
+                    load_page();
+                    ok(&format!("renamed to {theirs}"));
+                }
+                Err(e) => err(e),
+            }
+        });
+    };
+
     // The photo share toggle (S5): publishes my photo of them as an
     // endorsement friends receive when they ask about this person —
     // explicit, like the vouch, with the copy owning what it shares.
@@ -618,6 +646,7 @@ pub(crate) fn PersonView(
                         let photo_key = current.avatar_key.clone();
                         let has_local = current.has_local_avatar;
                         let shares_my = current.shares_my_avatar;
+                        let conflicts = current.conflicts.clone();
                         let devices = current.devices.clone();
                         let device_count = devices.len();
                         // The lens closure owns its own copy; the cards
@@ -795,6 +824,32 @@ pub(crate) fn PersonView(
                                                         </button>
                                                     }
                                                 })}
+                                            // Sibling rename conflicts (S6):
+                                            // provenance shown, nothing
+                                            // arbitrates — taking theirs is
+                                            // just a rename.
+                                            {conflicts
+                                                .iter()
+                                                .map(|conflict| {
+                                                    let theirs = conflict.theirs.clone();
+                                                    let line = format!(
+                                                        "your {} calls them \u{201c}{}\u{201d}",
+                                                        conflict.from,
+                                                        conflict.theirs,
+                                                    );
+                                                    view! {
+                                                        <div class="row">
+                                                            <span class="dim">{line}</span>
+                                                            <button
+                                                                class="secondary"
+                                                                on:click=move |_| use_theirs(theirs.clone())
+                                                            >
+                                                                "use theirs"
+                                                            </button>
+                                                        </div>
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>()}
                                             {(!photo_key.is_empty())
                                                 .then(|| {
                                                     view! {

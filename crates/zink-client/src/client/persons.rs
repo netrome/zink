@@ -52,6 +52,11 @@ impl PersonId {
     pub(crate) fn to_storage(self) -> u128 {
         self.0
     }
+
+    /// Rehydrate from the storage form — read paths only.
+    pub(crate) fn from_storage(raw: u128) -> Self {
+        Self(raw)
+    }
 }
 
 impl fmt::Display for PersonId {
@@ -267,16 +272,33 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// unambiguous.
     pub fn rename_person(&self, id: PersonId, new: &str) -> Result<(), Error> {
         let new = new.trim();
-        if new.is_empty() {
-            return Err(Error::InvalidInput("person label cannot be empty".into()));
-        }
         let person = self.person_by_id(id)?;
         if new == person.label {
             return Ok(());
         }
-        self.ensure_label_free(new, Some(&person))?;
+        self.set_person_label(&person, new)?;
+        // My act supersedes (lens-sync.md §5): a surfaced conflict for
+        // this person clears, and the rename travels to the siblings.
+        self.state.remove_conflict(id.to_storage());
+        self.emit_lens_op(super::lens::LensOp::LabelPerson {
+            members: person.keys().iter().map(|key| key.0).collect(),
+            label: new.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Validation + store write, shared by the manual act above (which
+    /// emits) and the adoption replay (which must not — re-emitting an
+    /// adopted op would amplify; the original reaches every sibling by
+    /// itself).
+    pub(super) fn set_person_label(&self, person: &PersonEntry, new: &str) -> Result<(), Error> {
+        let new = new.trim();
+        if new.is_empty() {
+            return Err(Error::InvalidInput("person label cannot be empty".into()));
+        }
+        self.ensure_label_free(new, Some(person))?;
         self.state
-            .save_person(id.to_storage(), new, &person.member_stems())
+            .save_person(person.id.to_storage(), new, &person.member_stems())
     }
 
     /// Look a person up by id — the reference every act takes. Total over

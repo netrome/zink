@@ -10,9 +10,9 @@ use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
     AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceCard,
-    DeviceRow, FriendLens, Inbox, MemberRow, Message, OutgoingImage, PersonInfo, PersonPage,
-    PersonRef, QrPayload, RecordPreview, RelayRow, StrangerInfo, SubjectAsk, UnknownMember,
-    WhoIsCandidate, WhoIsReport,
+    DeviceRow, FriendLens, Inbox, LabelConflict, MemberRow, Message, OutgoingImage, PersonInfo,
+    PersonPage, PersonRef, QrPayload, RecordPreview, RelayRow, SiblingOffer, StrangerInfo,
+    SubjectAsk, UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -159,6 +159,11 @@ fn notify_arrivals(
         let Ok(body) = &message.body else {
             continue; // nothing readable to preview
         };
+        // Op frames render as nothing anywhere (lens-sync.md §2) — own
+        // devices are already silent below; this covers hostile frames.
+        if zink_client::is_op_frame(body) {
+            continue;
+        }
         if own.contains(&message.envelope.core.sender) {
             continue;
         }
@@ -700,6 +705,22 @@ fn person_page_dto(
         shares_my_avatar: first.map(|key| client.shares_avatar(&key)).unwrap_or(false),
         devices,
         friends: friends.into_values().collect(),
+        // Sibling rename conflicts for this person (S6): provenance
+        // rendered; "use theirs" is just a rename.
+        conflicts: client
+            .lens_conflicts()
+            .into_iter()
+            .filter(|conflict| conflict.person == person.id)
+            .map(|conflict| {
+                Ok(LabelConflict {
+                    theirs: conflict.theirs,
+                    from: client
+                        .participant_labels(&[conflict.author])?
+                        .pop()
+                        .unwrap_or_else(|| "another device".to_string()),
+                })
+            })
+            .collect::<Result<_, String>>()?,
     })
 }
 
@@ -774,6 +795,7 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
             can_split: false,
         }],
         friends: friends.into_values().collect(),
+        conflicts: vec![], // labels are person acts; a stranger has none
     })
 }
 
@@ -1094,6 +1116,9 @@ fn conversation_row(
         Some(last) => {
             let what = match &last.body {
                 None => "🔒 can't read this yet".to_string(),
+                // An op frame renders as nothing (lens-sync.md §2) —
+                // like a bare membership change.
+                Some(bytes) if zink_client::is_op_frame(bytes) => String::new(),
                 Some(bytes) => {
                     let text = String::from_utf8_lossy(bytes);
                     let text = text.trim();
@@ -1342,6 +1367,14 @@ async fn messages(
     Ok(client
         .history(conversation)?
         .into_iter()
+        // Op frames render as nothing in the chat (lens-sync.md §2) —
+        // whatever the author; effects are gated elsewhere.
+        .filter(|message| {
+            !message
+                .body
+                .as_ref()
+                .is_ok_and(|body| zink_client::is_op_frame(body))
+        })
         .map(|message| Message {
             id: hex::encode(&message.id.0),
             conversation: hex::encode(&conversation.0),
@@ -1712,6 +1745,52 @@ async fn ask_subject(
     )
 }
 
+/// Pending contact-add offers from sibling devices (project 7 S6):
+/// provenance rendered, nothing auto-adopted.
+#[tauri::command]
+async fn lens_offers(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+) -> Result<Vec<SiblingOffer>, String> {
+    let client = client(&app, &managed).await?;
+    let mut rows = Vec::new();
+    for offer in client.lens_offers()? {
+        rows.push(SiblingOffer {
+            subject: hex::encode(&offer.subject.0),
+            petname: offer.petname,
+            from: client
+                .participant_labels(&[offer.author])?
+                .pop()
+                .unwrap_or_else(|| "another device".to_string()),
+        });
+    }
+    Ok(rows)
+}
+
+/// The explicit accept (lens-sync.md §6) — the ordinary add, the only
+/// write the contact store takes from this path. Returns the petname.
+#[tauri::command]
+async fn accept_offer(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+) -> Result<String, String> {
+    let client = client(&app, &managed).await?;
+    Ok(client.accept_offer(&PublicKey(hex::parse32(&subject)?))?)
+}
+
+/// Decline an offer — dropped, never a stance.
+#[tauri::command]
+async fn decline_offer(
+    app: AppHandle,
+    managed: State<'_, ManagedClient>,
+    subject: String,
+) -> Result<(), String> {
+    let client = client(&app, &managed).await?;
+    client.decline_offer(&PublicKey(hex::parse32(&subject)?));
+    Ok(())
+}
+
 /// Drain the home relays into the store; the UI re-renders from the stored
 /// DAG afterwards. Returns how many messages arrived.
 #[tauri::command]
@@ -1843,6 +1922,9 @@ pub fn run() {
             share_avatar,
             unshare_avatar,
             friend_avatar,
+            lens_offers,
+            accept_offer,
+            decline_offer,
             person_page,
             key_page,
             page_refresh,

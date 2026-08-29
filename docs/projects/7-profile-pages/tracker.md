@@ -211,20 +211,58 @@ per-device detail. Around it, the model work that keeps it honest:
   serve/fetch e2e over loopback, lifecycle, voiding incl. the
   hostile stale-combo), clippy clean, UI wasm + desktop shell build.
   web-of-trust.md §3/§6 + who-is-this.md §8 updated.)*
-- **S6 · Own-device lens sync.** Op vocabulary (one carrier format,
-  designed here, reused by project 8), the self conversation, adoption +
-  offers, conflict surfacing, chat-surface suppression. Short design doc
-  just-in-time. *Done when:* paired devices converge on a rename made
-  while one was offline; a contact add is offer-then-accept; a repudiated
-  sibling's offers are voided.
+- **S6 · Own-device lens sync — done (2026-08-23).** Op vocabulary (one
+  carrier format, designed here, reused by project 8), the self
+  conversation, adoption + offers, conflict surfacing, chat-surface
+  suppression. Short design doc just-in-time. *Done when:* paired devices
+  converge on a rename made while one was offline; a contact add is
+  offer-then-accept; a repudiated sibling's offers are voided.
+  *(As built — the design is `docs/design/lens-sync.md`; highlights: an
+  **op frame** is a sealed body `zop\0` + borsh-encoded versioned enum
+  (`Hello` / `LabelPerson{keys,label}` / `OfferContact{record,petname}`)
+  — client vocabulary in `zink-client` (borsh added: already in-tree via
+  the protocol crate), never zink-protocol's; project 8 appends its
+  variants to the same frame. The **channel** is an ordinary conversation
+  (`Hello` genesis, no human recipients) riding the existing
+  send-to-self / deposits / backfill / re-wrap machinery — emission is
+  stage-only (sync; delivery via the normal outbox flush), several
+  channels tolerated with a smallest-id emission tiebreak. **Adoption**
+  is a store-driven idempotent replay (applied-ops ledger; unopenable
+  bodies retry after re-wrap — the new-device bootstrap) run after every
+  drain and re-wrap: renames auto-adopt iff every op I authored about
+  that person is a DAG ancestor of the sibling's (manual edits win);
+  concurrent or colliding labels surface as conflicts with provenance
+  ("your phone calls them X" + use-theirs on the person page), cleared by
+  any rename. **Offers**: `add_contact` emits; siblings store latest per
+  subject (already-held records drop — this also breaks the
+  accept→re-offer loop); the People view renders "your phone added X —
+  add them here too?"; accept IS `add_contact` — the contact store is
+  never modified by network input; repudiation voids the sibling's
+  offers, and the read path also filters un-recognized authors.
+  **Suppression**: lens channels leave the inbox in
+  `client.conversations()` (CLI + app inherit); op frames render as
+  nothing in chat, previews, and notifications (own-device senders were
+  already silent, covering every honest op). Effects are author-gated to
+  recognized own devices — never parsed into effect from anyone else.
+  Verified: 130 client tests green — offline-rename convergence,
+  concurrent-rename conflict + take-theirs, offer-accept e2e with the
+  loop-break roundtrip, repudiation voiding, hostile mimicry (non-sibling
+  Hello + rename: no effect, no classification); clippy clean, UI wasm +
+  desktop shell build.)*
 
 ## Open questions
 
-- The carrier format is shared with project 8 (shared conversation
-  names) — design it once, sequence the two proposals.
-- How the lens conversation stays out of the chat surface (list and
-  notification rendering — local policy; pushes carry no content anyway).
-- Do contact-add offers batch ("your phone added 3 contacts")?
+*(All resolved with S6 — kept for the record.)*
+
+- ~~The carrier format is shared with project 8~~ → designed once in
+  lens-sync.md §2 (the op frame); project 8's scoping session owns the
+  SPEC §11 body-encoding proposal, with that doc as its input.
+- ~~How the lens conversation stays out of the chat surface~~ →
+  client-side: channels filtered from `conversations()` (CLI + app
+  inherit), op frames render as nothing, notifications were already
+  silent for own-device senders (lens-sync.md §7).
+- ~~Do contact-add offers batch?~~ → deferred, presentation-only
+  (lens-sync.md §8), alongside the audit-trail viewer.
 
 ## Non-goals
 
@@ -247,3 +285,5 @@ per-device detail. Around it, the model work that keeps it honest:
 - web-of-trust.md §6: the avatar lens lands (S5); §3 serve side names the
   share; who-is-this.md §8 notes third-party distribution. ✅ 2026-08-23
 - New lens-sync design doc (S6), cross-referenced from project 8.
+  ✅ 2026-08-23 — `docs/design/lens-sync.md`; project 8's tracker points
+  at it for the shared carrier.

@@ -20,6 +20,7 @@ use crate::state::ClientState;
 mod backfill;
 mod contacts;
 mod history;
+mod lens;
 mod outbox;
 mod persons;
 mod profile;
@@ -31,6 +32,8 @@ pub use contacts::{
     Contact, DeviceEvidence, Disavowal, FriendView, LearnedName, RecordMatch, RecordUpdate,
     RelayHealth, RelayResolution, RelaySource, RelayStatus, ResolvedName,
 };
+pub use lens::{LensConflict, LensOffer, is_op_frame};
+
 pub use history::{
     ConversationSummary, HistoryMessage, Inbox, LastMessage, MAX_MESSAGE_REQUESTS, triage,
 };

@@ -30,11 +30,11 @@ mod sync;
 #[cfg(not(target_family = "wasm"))]
 pub use client::{
     AvatarReceipt, Client, ClientConfig, Contact, ConversationSummary, DeviceEvidence, Disavowal,
-    FlushReport, FriendView, HistoryMessage, Inbox, LastMessage, LearnedName, MAX_MESSAGE_REQUESTS,
-    OUTBOX_GIVE_UP_MS, PersonEntry, PersonId, Reachable, Received, RecordMatch, RecordUpdate,
-    RecvReport, RelayFailure, RelayHealth, RelayResolution, RelaySource, RelayStatus,
-    ReplyContacts, ResolvedName, SendReceipt, StagedSend, SubjectAsk, WhoIsAnswer, WhoIsOutcome,
-    triage,
+    FlushReport, FriendView, HistoryMessage, Inbox, LastMessage, LearnedName, LensConflict,
+    LensOffer, MAX_MESSAGE_REQUESTS, OUTBOX_GIVE_UP_MS, PersonEntry, PersonId, Reachable, Received,
+    RecordMatch, RecordUpdate, RecvReport, RelayFailure, RelayHealth, RelayResolution, RelaySource,
+    RelayStatus, ReplyContacts, ResolvedName, SendReceipt, StagedSend, SubjectAsk, WhoIsAnswer,
+    WhoIsOutcome, is_op_frame, triage,
 };
 pub use error::Error;
 #[cfg(target_family = "wasm")]
