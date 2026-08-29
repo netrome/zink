@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use leptos::prelude::*;
-use zink_app_dto::{AppState, Conversation, Inbox};
+use zink_app_dto::{AppState, Conversation, Inbox, Key};
 
 use crate::picker::PeoplePicker;
 
@@ -69,7 +69,7 @@ pub(crate) fn ChatsView(
     picker: NewChatPicker,
     open_chat: impl Fn(String, String) + Copy + Send + 'static,
     start_draft: impl Fn(Vec<String>) + Copy + Send + 'static,
-    open_key: impl Fn(String) + Copy + Send + 'static,
+    open_key: impl Fn(Key) + Copy + Send + 'static,
 ) -> impl IntoView {
     // Whether the "new chat" picker is open (vs the plain list), plus the
     // picks — App-owned, surviving a tab bounce.

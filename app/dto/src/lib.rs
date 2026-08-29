@@ -1,9 +1,32 @@
 //! The Tauri-command wire types shared by `app/src-tauri` (serializes) and
-//! `app/ui` (deserializes). Presentation-shaped on purpose: ids and keys are
-//! hex strings, senders are labels — the command layer resolves petnames so
-//! the webview never re-implements naming policy.
+//! `app/ui` (deserializes). Presentation-shaped on purpose: senders are
+//! labels — the command layer resolves petnames so the webview never
+//! re-implements naming policy. **Handles are nominal types, display text
+//! is `String`** ("ids identify; labels display", the S2 rule in the type
+//! system): a [`Key`] can't be confused with a petname, and person ids
+//! carry their own `person:` prefix.
 
 use serde::{Deserialize, Serialize};
+
+/// A public key as the IPC carries it — hex of the 32 bytes. A nominal
+/// type, not a validation: handles must not read as just another string;
+/// parsing stays where it always was, at the command boundary
+/// (`hex::parse32`). Serializes transparently, so the JSON is unchanged.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct Key(pub String);
+
+impl Key {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// The relay-spec QR prefix (R4) — the webview's routing copy of
 /// `zink_protocol::RelayEntry::QR_PREFIX` (the source of truth, which the
@@ -14,7 +37,7 @@ pub const RELAY_QR_PREFIX: &str = "ZINK-RELAY:";
 /// Everything the UI needs on load, in one call.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppState {
-    pub my_key: String,
+    pub my_key: Key,
     pub name: Option<String>,
     /// This device's self-claimed device label ("phone", "laptop") — the
     /// qualifier beside the person name (SPEC §3.2 `DeviceLabel`, S1).
@@ -35,8 +58,8 @@ pub struct AppState {
 pub struct DeviceRow {
     /// The device's self-claimed name ("mårten laptop"), or short hex.
     pub name: String,
-    /// The vouched device key, hex.
-    pub key: String,
+    /// The vouched device key.
+    pub key: Key,
 }
 
 /// A decoded-but-not-yet-trusted record (D3e): what the pair-mode confirm
@@ -48,7 +71,7 @@ pub struct RecordPreview {
     pub name: Option<String>,
     /// The device key (the record's first key), full hex — the fingerprint
     /// the user confirms against the other device's me-view.
-    pub key: String,
+    pub key: Key,
 }
 
 /// Add-flow triage for a scanned/pasted record (R1, relay lifecycle): a
@@ -82,12 +105,12 @@ pub struct ContactRow {
     /// A verified self-claimed name from the cluster, if any — a row's dim
     /// second line when it differs from the label (S5).
     pub self_name: Option<String>,
-    /// The first member's first key, hex — the row's avatar handle.
-    pub key: String,
-    /// Every key across the person's member entries, hex — cluster-first
+    /// The first member's first key — the row's avatar handle.
+    pub key: Key,
+    /// Every key across the person's member entries — cluster-first
     /// (ui-design-system.md §1); consumers read the set, never assume
     /// `key` is the only one.
-    pub keys: Vec<String>,
+    pub keys: Vec<Key>,
     /// How many device entries this person spans (the "2 devices" hint).
     pub members: usize,
     /// Whether this device vouches for any member (D4c).
@@ -112,7 +135,7 @@ pub struct PersonPage {
     /// Set for a non-contact key — the stranger variant.
     pub stranger: Option<StrangerInfo>,
     /// The key avatar lookup uses (first member's first key).
-    pub avatar_key: String,
+    pub avatar_key: Key,
     /// Whether I've set a local photo (U6) — drives the photo affordances.
     pub has_local_avatar: bool,
     /// Whether I share my photo of them with friends who ask (S5) —
@@ -151,8 +174,8 @@ pub struct PersonRef {
 /// proposal): everything believed about an unknown key, plus the acts.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StrangerInfo {
-    /// The key, hex — the handle for who-is / dismiss / add.
-    pub key: String,
+    /// The key — the handle for who-is / dismiss / add.
+    pub key: Key,
     /// Ranked name candidates from the learned store (no query fired).
     pub candidates: Vec<WhoIsCandidate>,
     pub dismissed: bool,
@@ -167,8 +190,8 @@ pub struct StrangerInfo {
 /// writes the contact store.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SiblingOffer {
-    /// The offered contact's key, hex — the accept / decline handle.
-    pub subject: String,
+    /// The offered contact's key — the accept / decline handle.
+    pub subject: Key,
     pub petname: String,
     /// Which of my devices added them — the provenance line.
     pub from: String,
@@ -205,8 +228,8 @@ pub struct DeviceCard {
     pub device_label: Option<String>,
     /// Their self-claimed person name.
     pub self_name: Option<String>,
-    /// Full key hex — the fingerprint, shown at trust moments.
-    pub key: String,
+    /// The full key — the fingerprint, shown at trust moments.
+    pub key: Key,
     /// Link evidence with direction, render-ready ("mårten-phone says this
     /// is their device", "…mutually confirmed"); empty = clustered by you
     /// alone, no cryptographic link.
@@ -230,14 +253,14 @@ pub struct DeviceCard {
 pub struct FriendLens {
     /// The friend, by my petname for them — also the `ask_friend` handle.
     pub petname: String,
-    /// The friend's key, hex — the `friend_avatar` fetch handle (S5).
-    pub key: String,
+    /// The friend's key — the `friend_avatar` fetch handle (S5).
+    pub key: Key,
     /// The name they vouch for this person (their published claim), if any.
     pub vouched_name: Option<String>,
     /// The member key this friend shares a photo of, if any (S5) — the
     /// `friend_avatar` subject. Renders only inside this lens ("as they
     /// tell you"); never the page face.
-    pub avatar_of: Option<String>,
+    pub avatar_of: Option<Key>,
     /// Render-ready held-record lines ("holds their record — 'Mårten ·
     /// laptop', from 2 d ago").
     pub held: Vec<String>,
@@ -285,7 +308,7 @@ pub struct Conversation {
     /// For a request row: an unknown sender's key (hex) — the "who is
     /// this?" preview handle, opening the person page (S3). `None` on
     /// ordinary conversations.
-    pub stranger_key: Option<String>,
+    pub stranger_key: Option<Key>,
 }
 
 /// The chats screen's two lists (groups.md §6, unknown-sender quarantine).
@@ -308,8 +331,8 @@ pub struct Message {
     pub conversation: String,
     /// Sender label ("me", a petname, or short hex).
     pub sender: String,
-    /// Sender key, hex — the `avatar` lookup handle (D1d).
-    pub sender_key: String,
+    /// The sender's key — the `avatar` lookup handle (D1d).
+    pub sender_key: Key,
     pub mine: bool,
     /// Lossy-decoded body; `None` when this device cannot open it.
     pub text: Option<String>,
@@ -337,7 +360,7 @@ pub struct Message {
     pub merged: bool,
     /// The sender's key (hex) when it belongs to no stored contact — the
     /// "who is this?" handle (D1c). `None` for own and contacts' messages.
-    pub unknown_sender: Option<String>,
+    pub unknown_sender: Option<Key>,
     /// Membership deltas vs this message's parents (D2c, groups.md §2) —
     /// labels of keys this message added to / dropped from the addressed
     /// set. Derived from signed cores; empty for genesis / partial views.
@@ -359,8 +382,8 @@ pub struct Message {
 /// the row only surfaces the key and navigates. `dismissed` dims it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UnknownMember {
-    /// The key, hex — the person-page target.
-    pub key: String,
+    /// The key — the person-page target.
+    pub key: Key,
     pub dismissed: bool,
 }
 
@@ -421,7 +444,7 @@ pub struct ConversationMembers {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MemberRow {
     pub label: String,
-    pub key: Option<String>,
+    pub key: Option<Key>,
 }
 
 /// One blob reference of a message.

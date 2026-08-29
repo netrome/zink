@@ -25,7 +25,7 @@ use me::MeView;
 use onboarding::OnboardingView;
 use people::PeopleView;
 use person::PersonView;
-use zink_app_dto::{AppState, Inbox, Message};
+use zink_app_dto::{AppState, Inbox, Key, Message};
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -55,7 +55,7 @@ enum View {
     /// The same page for a bare key — the stranger variant (S3): message
     /// requests preview here without opening the chat.
     Key {
-        key: String,
+        key: Key,
     },
     Me,
 }
@@ -175,7 +175,7 @@ fn App() -> impl IntoView {
     };
     let start_draft = move |to: Vec<String>| view.set(View::Draft { to });
     let open_person = move |id: String| view.set(View::Person { id });
-    let open_key = move |key: String| view.set(View::Key { key });
+    let open_key = move |key: Key| view.set(View::Key { key });
     // Onboarding done → drop the takeover and land on Chats.
     let finish_onboarding = move || {
         onboarding.set(false);

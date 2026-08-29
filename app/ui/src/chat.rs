@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{AppState, ConversationMembers, Message, OutgoingImage, UnknownMember};
+use zink_app_dto::{AppState, ConversationMembers, Key, Message, OutgoingImage, UnknownMember};
 
 use crate::picker::PeoplePicker;
 use crate::{avatar_data_url, image, invoke};
@@ -35,7 +35,7 @@ pub(crate) fn ChatView(
     state: RwSignal<Option<AppState>>,
     drafts: RwSignal<HashMap<String, String>>,
     reload_messages: impl Fn(String) + Copy + Send + 'static,
-    open_key: impl Fn(String) + Copy + Send + 'static,
+    open_key: impl Fn(Key) + Copy + Send + 'static,
     back: impl Fn() + Copy + Send + 'static,
     ok: impl Fn(&str) + Copy + Send + 'static,
     err: impl Fn(String) + Copy + Send + 'static,
@@ -194,7 +194,7 @@ pub(crate) fn ChatView(
 
     // Sender avatars (D1d), lazily fetched per key; present-but-empty
     // marks in-flight or none (both render nothing).
-    let avatars = RwSignal::new(HashMap::<String, String>::new());
+    let avatars = RwSignal::new(HashMap::<Key, String>::new());
     Effect::new(move |_| {
         for message in messages.get() {
             if message.mine {
@@ -208,7 +208,7 @@ pub(crate) fn ChatView(
                 avatars.insert(key.clone(), String::new());
             });
             spawn_local(async move {
-                if let Ok(Some(url)) = avatar_data_url(&key).await {
+                if let Ok(Some(url)) = avatar_data_url(key.as_str()).await {
                     avatars.update(|avatars| {
                         avatars.insert(key, url);
                     });
@@ -517,7 +517,7 @@ pub(crate) fn ChatView(
                                 {list
                                     .into_iter()
                                     .map(|member| {
-                                        let short = member.key.chars().take(8).collect::<String>();
+                                        let short = member.key.0.chars().take(8).collect::<String>();
                                         let key = member.key;
                                         view! {
                                             <div class="row">

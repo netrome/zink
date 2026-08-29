@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 use zink_app_dto::{
-    Conversation, DeviceCard, PersonPage, PersonRef, RecordPreview, SubjectAsk, WhoIsReport,
+    Conversation, DeviceCard, Key, PersonPage, PersonRef, RecordPreview, SubjectAsk, WhoIsReport,
 };
 
 use crate::chats::ConversationRow;
@@ -17,7 +17,7 @@ use crate::{avatar_data_url, image, invoke};
 #[derive(Clone, PartialEq)]
 pub(crate) enum PageTarget {
     Person(String),
-    Key(String),
+    Key(Key),
 }
 
 /// The lens switcher (S3): my names · what they claim · through friends.
@@ -42,7 +42,7 @@ async fn fetch_page(target: &PageTarget) -> Result<PersonPage, String> {
             struct Args<'a> {
                 key: &'a str,
             }
-            invoke::invoke::<PersonPage>("key_page", &Args { key }).await
+            invoke::invoke::<PersonPage>("key_page", &Args { key: key.as_str() }).await
         }
     }
 }
@@ -103,8 +103,8 @@ pub(crate) fn PersonView(
         }
         page.set(Some(loaded));
         spawn_local(async move {
-            if !avatar_key.is_empty()
-                && let Ok(url) = avatar_data_url(&avatar_key).await
+            if !avatar_key.0.is_empty()
+                && let Ok(url) = avatar_data_url(avatar_key.as_str()).await
             {
                 avatar.set(url);
             }
@@ -131,7 +131,7 @@ pub(crate) fn PersonView(
                     if let Some(keys) = refresh_keys {
                         #[derive(Serialize)]
                         struct Args {
-                            keys: Vec<String>,
+                            keys: Vec<Key>,
                         }
                         if matches!(
                             invoke::invoke::<bool>("page_refresh", &Args { keys }).await,
@@ -433,7 +433,7 @@ pub(crate) fn PersonView(
 
     // Friends' shared photos (S5), lazily fetched per friend row — "as
     // they tell you", rendered only inside the through-friends lens.
-    let friend_avatars = RwSignal::new(HashMap::<String, String>::new());
+    let friend_avatars = RwSignal::new(HashMap::<Key, String>::new());
     Effect::new(move |_| {
         let Some(current) = page.get() else {
             return;
@@ -453,8 +453,8 @@ pub(crate) fn PersonView(
                     friend: &'a str,
                 }
                 let args = Args {
-                    subject: &subject,
-                    friend: &key,
+                    subject: subject.as_str(),
+                    friend: key.as_str(),
                 };
                 if let Ok(Some(b64)) =
                     invoke::invoke::<Option<String>>("friend_avatar", &args).await
@@ -481,7 +481,7 @@ pub(crate) fn PersonView(
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
-                keys: Vec<String>,
+                keys: Vec<Key>,
                 friend: &'a str,
             }
             let args = Args {
@@ -643,7 +643,7 @@ pub(crate) fn PersonView(
                     .map(|current| {
                         let is_person = current.person.is_some();
                         let label = current.label.clone();
-                        let photo_key = current.avatar_key.clone();
+                        let photo_key = current.avatar_key.0.clone();
                         let has_local = current.has_local_avatar;
                         let shares_my = current.shares_my_avatar;
                         let conflicts = current.conflicts.clone();
@@ -675,7 +675,7 @@ pub(crate) fn PersonView(
                             {stranger
                                 .as_ref()
                                 .map(|info| {
-                                    let key = info.key.clone();
+                                    let key = info.key.0.clone();
                                     let candidates = info.candidates.clone();
                                     let dismissed = info.dismissed;
                                     let pair_back = info.pair_back.clone();
@@ -757,7 +757,7 @@ pub(crate) fn PersonView(
                                                         <div class="row">
                                                             <b>{shown}</b>
                                                         </div>
-                                                        <div class="dim" id="record-text">{preview.key.clone()}</div>
+                                                        <div class="dim" id="record-text">{preview.key.0.clone()}</div>
                                                         <div class="dim">
                                                             "compare this fingerprint with the key shown \
                                                              in the other device's Me view"
@@ -1096,7 +1096,9 @@ fn device_card_view(
     set_override: impl Fn(String, Vec<String>) + Copy + Send + 'static,
     repudiate: impl Fn(String) + Copy + Send + 'static,
 ) -> impl IntoView {
-    let key = card.key.clone();
+    // The card's acts and fingerprint work on the bare hex — the display
+    // and invoke-arg form; the nominal `Key` stops at the dto boundary.
+    let key = card.key.0.clone();
     let armed_key = key.clone();
     let repudiate_key = key.clone();
     let vouch_name = card.petname.clone();

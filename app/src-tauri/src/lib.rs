@@ -10,9 +10,9 @@ use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zink_app_dto::{
     AddPreview, AppState, BlobInfo, ContactRow, Conversation, ConversationMembers, DeviceCard,
-    DeviceRow, FriendLens, Inbox, LabelConflict, MemberRow, Message, OutgoingImage, PersonInfo,
-    PersonPage, PersonRef, QrPayload, RecordPreview, RelayRow, SiblingOffer, StrangerInfo,
-    SubjectAsk, UnknownMember, WhoIsCandidate, WhoIsReport,
+    DeviceRow, FriendLens, Inbox, Key, LabelConflict, MemberRow, Message, OutgoingImage,
+    PersonInfo, PersonPage, PersonRef, QrPayload, RecordPreview, RelayRow, SiblingOffer,
+    StrangerInfo, SubjectAsk, UnknownMember, WhoIsCandidate, WhoIsReport,
 };
 use zink_client::{Client, RecordMatch, RecordUpdate, RelaySource, ResolvedName, hex};
 use zink_protocol::{BlobDraft, BlobHash, BlobKind, ContactRecord, MessageId, PublicKey};
@@ -209,7 +209,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
         Err(_) => None, // no profile yet — the UI shows the setup form
     };
     Ok(AppState {
-        my_key: hex::encode(&client.public_key().0),
+        my_key: key_dto(&client.public_key()),
         name: client.profile_name(),
         device_label: client.device_label(),
         // The full specs (`dial[#relay-url]`): these round-trip through the
@@ -239,8 +239,8 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
                         .iter()
                         .find_map(|(_, record)| record.self_claimed_name())
                         .map(str::to_string),
-                    key: first.map(|key| hex::encode(&key.0)).unwrap_or_default(),
-                    keys: keys.iter().map(|key| hex::encode(&key.0)).collect(),
+                    key: first.map(|key| key_dto(&key)).unwrap_or_default(),
+                    keys: keys.iter().map(key_dto).collect(),
                     members: person.members.len(),
                     vouched: keys.iter().any(|key| client.vouches(key)),
                     disavowals,
@@ -257,7 +257,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
                     .self_claimed_name()
                     .map(str::to_string)
                     .unwrap_or_else(|| hex::encode(&key.0)[..8].to_string()),
-                key: hex::encode(&key.0),
+                key: key_dto(&key),
             })
             .collect(),
     })
@@ -348,7 +348,7 @@ async fn inspect_record(payload: String) -> Result<RecordPreview, String> {
         .ok_or("record has no keys".to_string())?;
     Ok(RecordPreview {
         name: record.self_claimed_name().map(str::to_string),
-        key: hex::encode(&key.0),
+        key: key_dto(&key),
     })
 }
 
@@ -698,7 +698,7 @@ fn person_page_dto(
             merge_candidates,
         }),
         stranger: None,
-        avatar_key: first.map(|key| hex::encode(&key.0)).unwrap_or_default(),
+        avatar_key: first.map(|key| key_dto(&key)).unwrap_or_default(),
         has_local_avatar: first
             .map(|key| client.has_local_avatar(&key))
             .unwrap_or(false),
@@ -764,14 +764,14 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
         label,
         person: None,
         stranger: Some(StrangerInfo {
-            key: hex::encode(&subject.0),
+            key: key_dto(&subject),
             candidates,
             dismissed: client.dismissed().contains(&subject),
             pair_back: client
                 .claims_to_be_my_device(subject)
                 .map(|record| record.to_qr_string()),
         }),
-        avatar_key: hex::encode(&subject.0),
+        avatar_key: key_dto(&subject),
         has_local_avatar: client.has_local_avatar(&subject),
         // Shares are contacts-only; a stranger page never offers the toggle.
         shares_my_avatar: false,
@@ -785,7 +785,7 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
                 .as_ref()
                 .and_then(|record| record.self_claimed_name())
                 .map(str::to_string),
-            key: hex::encode(&subject.0),
+            key: key_dto(&subject),
             link: evidence_lines(client, subject)?,
             disavowals: disavowal_lines(client, subject)?,
             relay_source,
@@ -818,7 +818,7 @@ fn device_card(
         petname: petname.to_string(),
         device_label: record.self_device_label().map(str::to_string),
         self_name: record.self_claimed_name().map(str::to_string),
-        key: hex::encode(&key.0),
+        key: key_dto(&key),
         link: evidence_lines(client, key)?,
         disavowals: disavowal_lines(client, key)?,
         relay_source: relay_source_line(&status.source),
@@ -859,7 +859,7 @@ fn merge_friend_views(
             .entry(view.petname.clone())
             .or_insert_with(|| FriendLens {
                 petname: view.petname.clone(),
-                key: hex::encode(&view.responder.0),
+                key: key_dto(&view.responder),
                 vouched_name: None,
                 avatar_of: None,
                 held: Vec::new(),
@@ -868,7 +868,7 @@ fn merge_friend_views(
             lens.vouched_name = view.vouched_name.clone();
         }
         if lens.avatar_of.is_none() && view.shares_avatar {
-            lens.avatar_of = Some(hex::encode(&subject.0));
+            lens.avatar_of = Some(key_dto(&subject));
         }
         let claimed = match (
             view.record.self_claimed_name(),
@@ -1168,7 +1168,7 @@ fn conversation_row(
                         .copied()
                         .find(|key| unknown(key))
                 })
-                .map(|key| hex::encode(&key.0))
+                .map(|key| key_dto(&key))
         })
         .flatten();
     Ok(Conversation {
@@ -1214,7 +1214,7 @@ async fn conversation_members(
             .into_iter()
             .map(|(key, label)| MemberRow {
                 label,
-                key: Some(hex::encode(&key.0)),
+                key: Some(key_dto(&key)),
             }),
     );
     // Person labels (S2/S3): the add-picker rows are persons, so the
@@ -1390,8 +1390,8 @@ async fn messages(
                 && !contacts
                     .iter()
                     .any(|(_, record)| record.keys.contains(&message.sender)))
-            .then(|| hex::encode(&message.sender.0)),
-            sender_key: hex::encode(&message.sender.0),
+            .then(|| key_dto(&message.sender)),
+            sender_key: key_dto(&message.sender),
             joined: message
                 .joined
                 .iter()
@@ -1651,7 +1651,7 @@ async fn unknown_members(
             continue;
         }
         members.push(UnknownMember {
-            key: hex::encode(&key.0),
+            key: key_dto(&key),
             dismissed: dismissed.contains(&key),
         });
     }
@@ -1756,7 +1756,7 @@ async fn lens_offers(
     let mut rows = Vec::new();
     for offer in client.lens_offers()? {
         rows.push(SiblingOffer {
-            subject: hex::encode(&offer.subject.0),
+            subject: key_dto(&offer.subject),
             petname: offer.petname,
             from: client
                 .participant_labels(&[offer.author])?
@@ -1810,6 +1810,11 @@ async fn refresh(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<us
         tracing::warn!(relay = %failure.relay, error = %failure.error, "relay not drained");
     }
     Ok(report.received.len())
+}
+
+/// A key in its IPC form — the one place the nominal wrapper is built.
+fn key_dto(key: &PublicKey) -> Key {
+    Key(hex::encode(&key.0))
 }
 
 fn parse_id(id_hex: &str) -> Result<MessageId, String> {

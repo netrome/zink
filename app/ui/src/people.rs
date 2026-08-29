@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
-use zink_app_dto::{AddPreview, AppState, RELAY_QR_PREFIX, SiblingOffer};
+use zink_app_dto::{AddPreview, AppState, Key, RELAY_QR_PREFIX, SiblingOffer};
 
 use crate::{NoArgs, avatar_data_url, invoke};
 
@@ -144,11 +144,11 @@ pub(crate) fn PeopleView(
     };
 
     // Contact avatars, lazily fetched per row (same pattern as the chat).
-    let contact_avatars = RwSignal::new(HashMap::<String, String>::new());
+    let contact_avatars = RwSignal::new(HashMap::<Key, String>::new());
     Effect::new(move |_| {
         for contact in state.get().map(|state| state.contacts).unwrap_or_default() {
             let key = contact.key;
-            if key.is_empty()
+            if key.0.is_empty()
                 || contact_avatars.with_untracked(|avatars| avatars.contains_key(&key))
             {
                 continue;
@@ -157,7 +157,7 @@ pub(crate) fn PeopleView(
                 avatars.insert(key.clone(), String::new());
             });
             spawn_local(async move {
-                if let Ok(Some(url)) = avatar_data_url(&key).await {
+                if let Ok(Some(url)) = avatar_data_url(key.as_str()).await {
                     contact_avatars.update(|avatars| {
                         avatars.insert(key, url);
                     });
@@ -177,13 +177,15 @@ pub(crate) fn PeopleView(
         });
     };
     load_offers();
-    let accept = move |subject: String| {
+    let accept = move |subject: Key| {
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
                 subject: &'a str,
             }
-            let args = Args { subject: &subject };
+            let args = Args {
+                subject: subject.as_str(),
+            };
             match invoke::invoke::<String>("accept_offer", &args).await {
                 Ok(petname) => {
                     reload();
@@ -194,13 +196,15 @@ pub(crate) fn PeopleView(
             }
         });
     };
-    let decline = move |subject: String| {
+    let decline = move |subject: Key| {
         spawn_local(async move {
             #[derive(Serialize)]
             struct Args<'a> {
                 subject: &'a str,
             }
-            let args = Args { subject: &subject };
+            let args = Args {
+                subject: subject.as_str(),
+            };
             match invoke::invoke::<serde::de::IgnoredAny>("decline_offer", &args).await {
                 Ok(_) => {
                     load_offers();

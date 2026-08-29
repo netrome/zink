@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use zink_app_dto::ContactRow;
+use zink_app_dto::{ContactRow, Key};
 
 use crate::avatar_data_url;
 
@@ -24,18 +24,18 @@ pub(crate) fn PeoplePicker(
     let filter = RwSignal::new(String::new());
 
     // Contact avatars, lazily fetched per row (same pattern as PeopleView).
-    let avatars = RwSignal::new(HashMap::<String, String>::new());
+    let avatars = RwSignal::new(HashMap::<Key, String>::new());
     Effect::new(move |_| {
         for contact in contacts.get() {
             let key = contact.key;
-            if key.is_empty() || avatars.with_untracked(|avatars| avatars.contains_key(&key)) {
+            if key.0.is_empty() || avatars.with_untracked(|avatars| avatars.contains_key(&key)) {
                 continue;
             }
             avatars.update(|avatars| {
                 avatars.insert(key.clone(), String::new());
             });
             spawn_local(async move {
-                if let Ok(Some(url)) = avatar_data_url(&key).await {
+                if let Ok(Some(url)) = avatar_data_url(key.as_str()).await {
                     avatars.update(|avatars| {
                         avatars.insert(key, url);
                     });

@@ -139,7 +139,7 @@ pub(crate) fn MeView(
         if let Some(loaded) = state.get() {
             let key = loaded.my_key.clone();
             spawn_local(async move {
-                if let Ok(url) = avatar_data_url(&key).await {
+                if let Ok(url) = avatar_data_url(key.as_str()).await {
                     my_avatar.set(url);
                 }
             });
@@ -423,10 +423,10 @@ pub(crate) fn MeView(
                     devices
                         .into_iter()
                         .map(|device| {
-                            let short = device.key.chars().take(8).collect::<String>();
-                            let unrec_key = device.key.clone();
-                            let arm_key = device.key.clone();
-                            let label_key = device.key.clone();
+                            let short = device.key.0.chars().take(8).collect::<String>();
+                            let unrec_key = device.key.0.clone();
+                            let arm_key = device.key.0.clone();
+                            let label_key = device.key.0.clone();
                             view! {
                                 <div class="row">
                                     <b>{device.name}</b>
