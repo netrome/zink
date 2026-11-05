@@ -29,9 +29,14 @@ use crate::hex;
 #[derive(Clone)]
 pub(crate) struct TestTransport {
     pub dial: ScriptedDial,
-    pub blobs: ScriptedDialBlobs,
+    pub blobs: TestBlobs,
     pub accept: ChannelAccept,
     pub home: TestHome,
+    /// Every domain-initiated wire act, in the order it happened, across
+    /// scripted dials, wired peers and blob caches alike — the one place
+    /// an *ordering* claim ("the blobs landed before the deposit") can be
+    /// asserted.
+    pub log: WireLog,
     /// The relay set as `insert_relay`/`remove_relay` left it — keyed by
     /// URL like the real endpoint's map, so re-inserting is a no-op.
     relays: Arc<Mutex<Vec<String>>>,
@@ -42,11 +47,13 @@ pub(crate) struct TestTransport {
 
 impl TestTransport {
     pub(crate) fn new() -> Self {
+        let log = WireLog::default();
         Self {
             dial: ScriptedDial::default(),
-            blobs: ScriptedDialBlobs,
+            blobs: TestBlobs::new(log.clone()),
             accept: ChannelAccept::new(),
             home: TestHome,
+            log,
             relays: Arc::new(Mutex::new(Vec::new())),
             wiring: None,
         }
@@ -58,16 +65,23 @@ impl Dial for TestTransport {
     /// Scripts take precedence over wiring — enqueueing a `hold` for a wired
     /// key is how a loopback peer goes offline for the next dial.
     async fn dial(&self, to: &Peer, _alpn: &[u8]) -> Result<TestConn, DialError> {
+        let logged = |link| TestConn {
+            to: to.key,
+            log: self.log.clone(),
+            link,
+        };
         if let Some(script) = self.dial.take(&to.key) {
-            return ScriptedDial::resolve(script).await.map(TestConn::Scripted);
+            return ScriptedDial::resolve(script)
+                .await
+                .map(|conn| logged(Link::Scripted(conn)));
         }
         if let Some((me, loopback)) = &self.wiring
             && let Some(target) = loopback.target(&to.key)
         {
-            return Ok(TestConn::Routed(LoopConn {
+            return Ok(logged(Link::Routed(LoopConn {
                 caller: *me,
                 target,
-            }));
+            })));
         }
         panic!("unscripted dial to {}", hex::encode(&to.key.0));
     }
@@ -201,28 +215,86 @@ impl Dial for ScriptedDial {
     }
 }
 
-/// A connection a `TestTransport` produced: scripted (the test answers) or
-/// routed (another wired client's real handler answers).
-pub(crate) enum TestConn {
+/// A connection a `TestTransport` produced — scripted (the test answers) or
+/// routed (another wired client's real handler answers) — that logs each
+/// request to the transport's `WireLog` before it goes out.
+pub(crate) struct TestConn {
+    to: PublicKey,
+    log: WireLog,
+    link: Link,
+}
+
+enum Link {
     Scripted(ScriptedConn),
     Routed(LoopConn),
 }
 
 impl Request for TestConn {
     async fn request(&self, frame: &[u8], max_response: usize) -> Result<Vec<u8>, ConnError> {
-        match self {
-            TestConn::Scripted(conn) => conn.request(frame, max_response).await,
-            TestConn::Routed(conn) => conn.request(frame, max_response).await,
+        self.log.record(WireEvent::Request {
+            to: self.to,
+            frame: frame.to_vec(),
+        });
+        match &self.link {
+            Link::Scripted(conn) => conn.request(frame, max_response).await,
+            Link::Routed(conn) => conn.request(frame, max_response).await,
         }
     }
 }
 
 impl AcceptUni for TestConn {
     async fn accept_uni(&self, max: usize) -> Result<Vec<u8>, ConnError> {
-        match self {
-            TestConn::Scripted(conn) => conn.accept_uni(max).await,
-            TestConn::Routed(conn) => conn.accept_uni(max).await,
+        match &self.link {
+            Link::Scripted(conn) => conn.accept_uni(max).await,
+            Link::Routed(conn) => conn.accept_uni(max).await,
         }
+    }
+}
+
+/// The ordered record of what the domain put on the wire. Frames are kept
+/// raw — the log never inspects them; a test decodes what it asserts on.
+#[derive(Clone, Default)]
+pub(crate) struct WireLog(Arc<Mutex<Vec<WireEvent>>>);
+
+#[derive(Clone)]
+pub(crate) enum WireEvent {
+    /// A framed request sent to `to` (mailbox or sync ALPN alike).
+    Request { to: PublicKey, frame: Vec<u8> },
+    /// A blob push to `to` *confirmed* — the point `PushBlob::push` resolves.
+    Pushed { to: PublicKey, hash: BlobHash },
+}
+
+/// Short form for assertion messages: a frame is its length, a key its
+/// first bytes — a failing ordering claim should read as a timeline.
+impl std::fmt::Debug for WireEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireEvent::Request { to, frame } => {
+                write!(
+                    f,
+                    "Request(to {}…, {} bytes)",
+                    &hex::encode(&to.0)[..8],
+                    frame.len()
+                )
+            }
+            WireEvent::Pushed { to, hash } => write!(
+                f,
+                "Pushed(to {}…, blob {}…)",
+                &hex::encode(&to.0)[..8],
+                &hex::encode(&hash.0)[..8]
+            ),
+        }
+    }
+}
+
+impl WireLog {
+    fn record(&self, event: WireEvent) {
+        self.0.lock().expect("wire log lock").push(event);
+    }
+
+    /// Everything so far, oldest first.
+    pub(crate) fn events(&self) -> Vec<WireEvent> {
+        self.0.lock().expect("wire log lock").clone()
     }
 }
 
@@ -337,31 +409,131 @@ impl AcceptUni for ScriptedConn {
     }
 }
 
-/// Blob dials: no migrated test scripts blobs yet (the image e2e stays on
-/// real iroh), so every blob dial is unscripted — loudly. Scripting arrives
-/// with the first blob migration.
-#[derive(Clone, Default)]
-pub(crate) struct ScriptedDialBlobs;
+/// Blob caches, one per scripted key: `cache(&key)` says a cache answers
+/// at `key` from now on — pushes are held (and logged) and fetches serve
+/// what is held, exactly the relay contract. A blob dial to a key no test
+/// scripted is unscripted — loudly, like a dial.
+#[derive(Clone)]
+pub(crate) struct TestBlobs {
+    caches: Arc<Mutex<BTreeMap<[u8; 32], Held>>>,
+    /// Keys whose next blob dial hangs until the caller's deadline drops
+    /// it — consumed one per attempt, like `ScriptedDial::hold`.
+    holds: Arc<Mutex<BTreeMap<[u8; 32], usize>>>,
+    log: WireLog,
+}
 
-impl DialBlobs for ScriptedDialBlobs {
-    type Conn = TestBlobConn;
-    async fn dial_blobs(&self, to: &Peer) -> Result<TestBlobConn, DialError> {
-        panic!("unscripted blob dial to {}", hex::encode(&to.key.0));
+type Held = Arc<Mutex<BTreeMap<[u8; 32], Vec<u8>>>>;
+
+impl TestBlobs {
+    fn new(log: WireLog) -> Self {
+        Self {
+            caches: Arc::new(Mutex::new(BTreeMap::new())),
+            holds: Arc::new(Mutex::new(BTreeMap::new())),
+            log,
+        }
+    }
+
+    /// The next blob dial to `key` hangs until the caller's deadline drops
+    /// it — a cache that is down, whatever the mailbox beside it does.
+    pub(crate) fn hold(&self, key: &PublicKey) -> &Self {
+        *self
+            .holds
+            .lock()
+            .expect("holds lock")
+            .entry(key.0)
+            .or_default() += 1;
+        self
+    }
+
+    /// A reachable blob cache at `key`, empty until something is pushed.
+    pub(crate) fn cache(&self, key: &PublicKey) -> &Self {
+        self.caches
+            .lock()
+            .expect("caches lock")
+            .entry(key.0)
+            .or_default();
+        self
+    }
+
+    /// The hashes the cache at `key` holds, in hash order.
+    pub(crate) fn held(&self, key: &PublicKey) -> Vec<BlobHash> {
+        self.caches
+            .lock()
+            .expect("caches lock")
+            .get(&key.0)
+            .map(|held| {
+                held.lock()
+                    .expect("held lock")
+                    .keys()
+                    .map(|hash| BlobHash(*hash))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
-/// Unreachable until blob scripting exists — `dial_blobs` panics first.
-pub(crate) struct TestBlobConn;
+impl DialBlobs for TestBlobs {
+    type Conn = TestBlobConn;
+    async fn dial_blobs(&self, to: &Peer) -> Result<TestBlobConn, DialError> {
+        let holding = {
+            let mut holds = self.holds.lock().expect("holds lock");
+            match holds.get_mut(&to.key.0) {
+                Some(left) if *left > 0 => {
+                    *left -= 1;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if holding {
+            return std::future::pending().await;
+        }
+        let held = self
+            .caches
+            .lock()
+            .expect("caches lock")
+            .get(&to.key.0)
+            .cloned();
+        match held {
+            Some(held) => Ok(TestBlobConn {
+                to: to.key,
+                held,
+                log: self.log.clone(),
+            }),
+            None => panic!("unscripted blob dial to {}", hex::encode(&to.key.0)),
+        }
+    }
+}
+
+/// A connection to one scripted blob cache.
+pub(crate) struct TestBlobConn {
+    to: PublicKey,
+    held: Held,
+    log: WireLog,
+}
 
 impl PushBlob for TestBlobConn {
-    async fn push(&self, _blob: &EncryptedBlob) -> Result<(), ConnError> {
-        unreachable!("no blob dial connects yet");
+    async fn push(&self, blob: &EncryptedBlob) -> Result<(), ConnError> {
+        self.held
+            .lock()
+            .expect("held lock")
+            .insert(blob.hash.0, blob.bytes.clone());
+        self.log.record(WireEvent::Pushed {
+            to: self.to,
+            hash: blob.hash,
+        });
+        Ok(())
     }
 }
 
 impl FetchBlob for TestBlobConn {
-    async fn fetch(&self, _hash: &BlobHash) -> Result<Vec<u8>, ConnError> {
-        unreachable!("no blob dial connects yet");
+    async fn fetch(&self, hash: &BlobHash) -> Result<Vec<u8>, ConnError> {
+        self.held
+            .lock()
+            .expect("held lock")
+            .get(&hash.0)
+            .cloned()
+            .ok_or_else(|| ConnError("blob not held".to_string()))
     }
 }
 

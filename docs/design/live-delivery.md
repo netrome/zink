@@ -44,7 +44,10 @@ mailbox exists because that can't be assumed).
   Blob ciphertext is already in the local blob cache — C3a — and a retry
   unconditionally re-pushes all of the message's blobs, idempotent by hash,
   so the entry needs no per-blob "owed" bookkeeping.)
-- Deposit + blob push per relay exactly as today; on success, delete that
+- Per relay, **blob push, then deposit** (project 10 S1 — referent before
+  reference: the deposit is what makes the message deliverable there, the
+  relay nudges on it, so the blobs must already be fetchable from that
+  cache or the recipient's first fetch misses); on success, delete that
   relay's entry. A send that fully succeeds touches the outbox only twice
   (create, delete) — the common case stays cheap.
 - **Flush pass** (idempotent — deposits dedup by id, blob pushes by hash):

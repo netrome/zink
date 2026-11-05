@@ -4,7 +4,7 @@
 //! distinct relay. See `docs/design/direct-delivery.md` and
 //! `docs/design/fast-failure.md`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rand_core::OsRng;
 use zink_protocol::{
@@ -414,9 +414,31 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         } = staged;
         let (id, conversation) = (*id, *conversation);
 
+        // Referent before reference (project 10 S1): for a blob message,
+        // every relay holds the blobs before anything can reference them —
+        // the direct handoff below and the deposits after it. A recipient
+        // fetches blob bytes from its own relay's cache (C3a) the moment the
+        // envelope lands, whichever path it came by, so the pushes settle
+        // first; an instant envelope with a blank image is not a win. Text
+        // — the dominant case — skips this phase entirely. Concurrent per
+        // relay, like the deposits.
+        let pushed: BTreeMap<&String, Result<(), Error>> = if blobs.is_empty() {
+            BTreeMap::new()
+        } else {
+            n0_future::join_all(
+                relays
+                    .iter()
+                    .map(|relay| async move { (relay, self.push_blobs_to(relay, blobs).await) }),
+            )
+            .await
+            .into_iter()
+            .collect()
+        };
+        let pushed = &pushed;
+
         // Direct delivery (D5): hand the envelope to the recipients
-        // themselves first. A `Stored` ack is a durable store, so the
-        // mailbox is not needed for that device.
+        // themselves. A `Stored` ack is a durable store, so the mailbox is
+        // not needed for that device.
         let direct = self
             .deliver_direct(envelope, &envelope.core.recipients)
             .await;
@@ -473,7 +495,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // this synchronous pass, not to the concurrent one.
         let deliveries: Vec<&String> = deliveries.collect();
         let outcomes = n0_future::join_all(deliveries.into_iter().map(|relay| async move {
-            match self.deliver_to_relay(relay, envelope, blobs).await {
+            // A relay that did not take the blobs gets no deposit: the
+            // envelope would be deliverable there before its blobs are
+            // fetchable — the race again. The entry stays owed; the flush
+            // retries push-then-deposit.
+            if let Some(Err(error)) = pushed.get(relay) {
+                tracing::warn!(relay, %error, "blob push failed; deposit withheld, queued for retry");
+                return Some(error.to_string());
+            }
+            match self.deposit_to(relay, envelope).await {
                 Ok(()) => {
                     self.state.clear_outbox(id, relay);
                     None
@@ -628,14 +658,46 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         }
     }
 
-    /// One relay's full delivery: deposit (idempotent retry inside), then
-    /// every blob push. Only a fully-served relay counts as delivered.
+    /// One relay's full delivery, **referent before reference**: every blob
+    /// push, then the deposit. The deposit is what makes the message
+    /// deliverable there (the relay nudges on it), so the blobs must already
+    /// be fetchable from that relay's cache or the recipient's first fetch
+    /// misses — the project 7 live-run race. A blob arriving before its
+    /// envelope is harmless (an orphan is TTL-swept); the reverse is a blank
+    /// image. Only a fully-served relay counts as delivered, and the outbox
+    /// flush retries through here, so it inherits the order.
     pub(super) async fn deliver_to_relay(
         &self,
         relay: &str,
         envelope: &MessageEnvelope,
         encrypted_blobs: &[zink_protocol::EncryptedBlob],
     ) -> Result<(), Error> {
+        self.push_blobs_to(relay, encrypted_blobs).await?;
+        self.deposit_to(relay, envelope).await
+    }
+
+    /// Every blob of one message into one relay's cache; nothing to do for
+    /// a text message.
+    async fn push_blobs_to(
+        &self,
+        relay: &str,
+        encrypted_blobs: &[zink_protocol::EncryptedBlob],
+    ) -> Result<(), Error> {
+        if encrypted_blobs.is_empty() {
+            return Ok(());
+        }
+        blobs::push_blobs(
+            &self.transport,
+            relay,
+            encrypted_blobs,
+            self.config.connect_timeout,
+            &self.clock,
+        )
+        .await
+    }
+
+    /// The envelope into one relay's mailboxes (idempotent retry inside).
+    async fn deposit_to(&self, relay: &str, envelope: &MessageEnvelope) -> Result<(), Error> {
         net::deposit_with_retry(
             &self.transport,
             relay,
@@ -643,18 +705,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             self.config.connect_timeout,
             &self.clock,
         )
-        .await?;
-        if !encrypted_blobs.is_empty() {
-            blobs::push_blobs(
-                &self.transport,
-                relay,
-                encrypted_blobs,
-                self.config.connect_timeout,
-                &self.clock,
-            )
-            .await?;
-        }
-        Ok(())
+        .await
     }
 }
 
@@ -666,15 +717,18 @@ mod tests {
     use super::*;
     use crate::adapters::system_clock::SystemClock;
     use crate::client::test_kit::{
-        deposited_envelopes, deposited_frame, loop_client, mailbox_only, mailbox_spec, message,
-        open_homed, open_homed_with, record_with_dead_mailbox, routed_record, script_drain,
-        sealed_for, spawn_test_relay, temp_key, temp_root,
+        LoopClient, deposited_envelopes, deposited_frame, loop_client, mailbox_only, mailbox_spec,
+        message, open_homed, open_homed_with, record_with_dead_mailbox, routed_record,
+        script_drain, sealed_for, spawn_test_relay, temp_key, temp_root,
     };
     use crate::client::{ClientConfig, Received};
     use crate::ports::clock::{TestClock, TestWallClock};
-    use crate::ports::transport::{Home, Loopback, Peer, TestTransport};
+    use crate::ports::transport::{Home, Loopback, Peer, TestTransport, WireEvent};
     use crate::{hex, keystore};
-    use zink_protocol::{ContactRecord, DeviceKey, RelayEntry};
+    use zink_protocol::{
+        BlobDraft, BlobHash, BlobKind, ContactRecord, DeviceKey, MailboxOp, MailboxRequest,
+        RelayEntry, SyncOp, SyncRequest,
+    };
 
     #[tokio::test]
     async fn send_in__should_record_the_grown_participant_set() {
@@ -835,6 +889,162 @@ mod tests {
         assert!(live[0].relay.is_none(), "no relay was on the path");
 
         let _ = std::fs::remove_dir_all(temp_root("direct"));
+    }
+
+    /// A frame that would make the envelope deliverable somewhere: a
+    /// mailbox `Deposit` or a direct `Deliver`.
+    fn references_the_envelope(frame: &[u8]) -> bool {
+        let deposit = MailboxRequest::try_from_bytes(frame)
+            .is_ok_and(|request| matches!(request.op, MailboxOp::Deposit { .. }));
+        let deliver = SyncRequest::try_from_bytes(frame)
+            .is_ok_and(|request| matches!(request.op, SyncOp::Deliver { .. }));
+        deposit || deliver
+    }
+
+    /// A and B wired directly, each holding the other's record; B
+    /// mailboxed at `relay_b`.
+    async fn wired_pair(
+        test: &str,
+        wire: &Loopback,
+        relay_b: &PublicKey,
+    ) -> (LoopClient, TestTransport, TestClock, LoopClient) {
+        let (a, a_net, a_clock) = loop_client(test, "a", wire);
+        let (b, _b_net, _b_clock) = loop_client(test, "b", wire);
+        let relay_a = DeviceKey::from_seed([137; 32]).public();
+        b.add_contact(
+            &routed_record(a.public_key(), &relay_a),
+            Some("a".to_string()),
+        )
+        .expect("B adds A");
+        a.add_contact(
+            &routed_record(b.public_key(), relay_b),
+            Some("b".to_string()),
+        )
+        .expect("A adds B");
+        (a, a_net, a_clock, b)
+    }
+
+    fn an_image() -> Vec<BlobDraft> {
+        vec![
+            BlobDraft {
+                kind: BlobKind::Thumbnail,
+                plaintext: vec![1; 64],
+            },
+            BlobDraft {
+                kind: BlobKind::Full,
+                plaintext: vec![2; 4096],
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn send__should_push_every_blob_before_the_envelope_can_be_referenced() {
+        // Given: B's relay answers on both ALPNs — a blob cache and a
+        // mailbox. The project 7 live run saw the envelope land (deposit →
+        // nudge, or the direct handoff) while the push was still in flight,
+        // so B's first fetch missed the cache.
+        let wire = Loopback::new();
+        let relay_b = DeviceKey::from_seed([138; 32]).public();
+        let (a, a_net, _clock, b) = wired_pair("blobs-first", &wire, &relay_b).await;
+        a_net.blobs.cache(&relay_b);
+        a_net.dial.connect(&relay_b).reply(deposited_frame());
+
+        // When: an image — a thumbnail and a full-res blob
+        let receipt = a
+            .send(
+                &[a.resolve_contact("b").expect("resolve")],
+                b"look at this".to_vec(),
+                an_image(),
+            )
+            .await
+            .expect("send");
+
+        // Then: every path was taken — the handoff, the deposit (a blob
+        // message never discharges its relay) — and both blobs were in the
+        // relay's cache before the envelope went out on any of them
+        assert_eq!(receipt.blob_count, 2);
+        assert_eq!(receipt.direct_recipients, 1, "B took the handoff");
+        assert_eq!(receipt.pending_relays, 0, "the relay took the deposit");
+        assert_eq!(receipt.skipped_relays, 0);
+        let events = a_net.log.events();
+        let mut pushed: Vec<BlobHash> = events
+            .iter()
+            .filter_map(|event| match event {
+                WireEvent::Pushed { to, hash } if *to == relay_b => Some(*hash),
+                _ => None,
+            })
+            .collect();
+        pushed.sort_by_key(|hash| hash.0);
+        assert_eq!(
+            pushed,
+            a_net.blobs.held(&relay_b),
+            "both blobs pushed, once"
+        );
+        let last_push = events
+            .iter()
+            .rposition(|event| matches!(event, WireEvent::Pushed { to, .. } if *to == relay_b))
+            .expect("blobs were pushed");
+        let first_reference = events
+            .iter()
+            .position(|event| {
+                matches!(event, WireEvent::Request { frame, .. } if references_the_envelope(frame))
+            })
+            .expect("the envelope went out");
+        assert!(
+            last_push < first_reference,
+            "a blob was pushed after the envelope was already referenced: {events:?}"
+        );
+        // …and both references happened: the direct handoff and the deposit
+        let referenced: Vec<PublicKey> = events
+            .iter()
+            .filter_map(|event| match event {
+                WireEvent::Request { to, frame } if references_the_envelope(frame) => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(referenced, vec![b.public_key(), relay_b]);
+        assert!(a.state.outbox().is_empty(), "fully served — nothing owed");
+
+        let _ = std::fs::remove_dir_all(temp_root("blobs-first"));
+    }
+
+    #[tokio::test]
+    async fn send__should_withhold_the_deposit_from_a_relay_that_did_not_take_the_blobs() {
+        // Given: B's relay mailbox is fine but its blob cache is down. The
+        // mailbox dial is deliberately *unscripted*: a deposit attempt would
+        // panic — which is the assertion. The direct handoff still goes.
+        let wire = Loopback::new();
+        let relay_b = DeviceKey::from_seed([139; 32]).public();
+        let (a, a_net, clock, b) = wired_pair("blobs-down", &wire, &relay_b).await;
+        a_net.blobs.hold(&relay_b);
+
+        // When: the send, with the clock run past the blob-connect deadline
+        let to = [a.resolve_contact("b").expect("resolve")];
+        let (result, ()) = tokio::join!(a.send(&to, b"look at this".to_vec(), an_image()), async {
+            clock.wait_for_sleepers(1).await;
+            clock.advance(ClientConfig::default().connect_timeout);
+        });
+
+        // Then: delivered to B directly, the relay still owed in full —
+        // an envelope deposited without its blobs would be the race again
+        let receipt = result.expect("direct delivery carries the send");
+        assert_eq!(receipt.direct_recipients, 1);
+        assert_eq!(receipt.pending_relays, 1, "the relay is owed");
+        assert_eq!(
+            a.state.outbox().len(),
+            1,
+            "push-then-deposit retries on flush"
+        );
+        assert_eq!(b.history(receipt.conversation).expect("B history").len(), 1);
+        let events = a_net.log.events();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, WireEvent::Request { to, .. } if *to == relay_b)),
+            "nothing went to the relay's mailbox: {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_root("blobs-down"));
     }
 
     #[tokio::test]

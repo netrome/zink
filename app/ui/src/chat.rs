@@ -25,6 +25,56 @@ async fn blob_data_url(conversation: &str, message: &str, hash: &str) -> Result<
     Ok(image::data_url(&b64))
 }
 
+/// One thumbnail's place in the chat: fetching, ready to show, or not
+/// fetchable right now.
+#[derive(Clone, PartialEq)]
+enum Thumb {
+    Loading,
+    Ready(String),
+    Unavailable,
+}
+
+/// The pauses before each re-ask when a thumbnail's bytes are not there —
+/// short, because the sender's ordering (project 10 S1) makes a miss the
+/// exception: a relay that evicted, a sender whose push is still owed.
+const THUMB_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(6),
+];
+
+/// Fetch one thumbnail into `thumbs`. A miss is a **state, not an error**
+/// (project 10 S2): it re-asks on the backoff above, then settles as
+/// `Unavailable` — which the list renders as a tap-to-retry, and which the
+/// next messages reload re-asks on its own. Never a toast: there is nothing
+/// to substantiate beyond "not here yet".
+fn load_thumb(
+    conversation: StoredValue<String>,
+    thumbs: RwSignal<HashMap<String, Thumb>>,
+    message_id: String,
+    hash: String,
+    attempt: usize,
+) {
+    thumbs.update(|thumbs| {
+        thumbs.insert(hash.clone(), Thumb::Loading);
+    });
+    spawn_local(async move {
+        match blob_data_url(&conversation.get_value(), &message_id, &hash).await {
+            Ok(url) => thumbs.update(|thumbs| {
+                thumbs.insert(hash, Thumb::Ready(url));
+            }),
+            Err(_) => match THUMB_RETRY_DELAYS.get(attempt) {
+                Some(delay) => set_timeout(
+                    move || load_thumb(conversation, thumbs, message_id, hash, attempt + 1),
+                    *delay,
+                ),
+                None => thumbs.update(|thumbs| {
+                    thumbs.insert(hash, Thumb::Unavailable);
+                }),
+            },
+        }
+    });
+}
+
 /// One conversation: linearized messages (text + image thumbnails, tap for
 /// full-res) plus a reply box with an optional image attachment.
 #[component]
@@ -56,8 +106,8 @@ pub(crate) fn ChatView(
         });
     });
     let attachment = RwSignal::new(None::<(OutgoingImage, String)>);
-    // hash → data URL; present-but-empty marks an in-flight fetch.
-    let thumbs = RwSignal::new(HashMap::<String, String>::new());
+    // hash → thumbnail state (see `Thumb`).
+    let thumbs = RwSignal::new(HashMap::<String, Thumb>::new());
     // Full-res overlay: `Some("")` = loading, `Some(url)` = showing.
     let viewer = RwSignal::new(None::<String>);
     // Optional "show concurrency" affordance (U8): the causal-DAG cues
@@ -153,27 +203,28 @@ pub(crate) fn ChatView(
         });
     });
 
-    // Fetch (cache-backed) every visible thumbnail not yet loaded.
+    // Fetch (cache-backed) every visible thumbnail not yet loaded — and
+    // re-ask for the ones unavailable last time: a reload means something
+    // arrived, which is exactly when a late blob is likeliest to be there.
     Effect::new(move |_| {
         for message in messages.get() {
             for blob in message.blobs.iter().filter(|blob| blob.kind == "thumbnail") {
-                let known = thumbs.with_untracked(|thumbs| thumbs.contains_key(&blob.hash));
-                if known {
+                let settled = thumbs.with_untracked(|thumbs| {
+                    matches!(
+                        thumbs.get(&blob.hash),
+                        Some(Thumb::Loading | Thumb::Ready(_))
+                    )
+                });
+                if settled {
                     continue;
                 }
-                thumbs.update(|thumbs| {
-                    thumbs.insert(blob.hash.clone(), String::new());
-                });
-                let (message_id, hash) = (message.id.clone(), blob.hash.clone());
-                spawn_local(async move {
-                    let conversation = conversation.get_value();
-                    match blob_data_url(&conversation, &message_id, &hash).await {
-                        Ok(url) => thumbs.update(|thumbs| {
-                            thumbs.insert(hash, url);
-                        }),
-                        Err(e) => err(e),
-                    }
-                });
+                load_thumb(
+                    conversation,
+                    thumbs,
+                    message.id.clone(),
+                    blob.hash.clone(),
+                    0,
+                );
             }
         }
     });
@@ -185,8 +236,10 @@ pub(crate) fn ChatView(
             match blob_data_url(&conversation, &message_id, &hash).await {
                 Ok(url) => viewer.set(Some(url)),
                 Err(e) => {
+                    // An explicit tap earns a reply — an honest one: not
+                    // here *yet*, not broken.
                     viewer.set(None);
-                    err(e);
+                    err(format!("full image not available yet — {e}"));
                 }
             }
         });
@@ -578,10 +631,10 @@ pub(crate) fn ChatView(
                                     let message_id = message.id.clone();
                                     view! {
                                         {move || {
-                                            let url = thumbs.with(|thumbs| thumbs.get(&hash).cloned());
+                                            let thumb = thumbs.with(|thumbs| thumbs.get(&hash).cloned());
                                             let (target, message_id) = (target.clone(), message_id.clone());
-                                            match url.filter(|url| !url.is_empty()) {
-                                                Some(url) => view! {
+                                            match thumb {
+                                                Some(Thumb::Ready(url)) => view! {
                                                     <img
                                                         class="thumb"
                                                         src=url
@@ -592,7 +645,27 @@ pub(crate) fn ChatView(
                                                     />
                                                 }
                                                     .into_any(),
-                                                None => view! { <span class="dim">"📎 loading…"</span> }
+                                                // Honest, not alarming: the bytes are not
+                                                // here *yet* — a tap asks again now.
+                                                Some(Thumb::Unavailable) => {
+                                                    let hash = hash.clone();
+                                                    view! {
+                                                        <button
+                                                            class="secondary thumb-missing"
+                                                            on:click=move |_| load_thumb(
+                                                                conversation,
+                                                                thumbs,
+                                                                message_id.clone(),
+                                                                hash.clone(),
+                                                                0,
+                                                            )
+                                                        >
+                                                            "📎 image not available yet · tap to retry"
+                                                        </button>
+                                                    }
+                                                        .into_any()
+                                                }
+                                                _ => view! { <span class="dim">"📎 loading…"</span> }
                                                     .into_any(),
                                             }
                                         }}

@@ -425,6 +425,11 @@ visible.
 - Send **two blobs**: a small encrypted **thumbnail** (instant preview) + **full-res**.
 - Relays may **cache encrypted blobs** (TTL / size cap) so a recipient can fetch even
   after the sender goes offline.
+- **Referent before reference:** a sender SHOULD make a blob fetchable at a
+  destination (pushed to that recipient-relay's cache) *before* the referencing
+  envelope is deliverable there. A blob without its envelope is inert; an envelope
+  without its blob is a blank image. Recipients MUST still cope with a blob that is
+  not (yet) fetchable — relays evict, and senders fail mid-fan-out.
 
 ---
 

@@ -121,10 +121,14 @@ only copy in a group send; that hazard is pinned by a regression test
 its own relay's cache (C3a), so an image message needs the push regardless;
 pushing blobs while skipping the deposit would buy little (the relay sees the
 sender either way). A message **with blobs therefore takes the pre-D5 path
-exactly** — direct delivery is still attempted (so it lands instantly, and
-lands *at all* when the relay is down), but no deposit is skipped. Text — the
-dominant case — gets the full win. Closing the gap needs peer blob transfer:
-a later slice, not a protocol question.
+exactly** — direct delivery is still attempted (so it lands *at all* when the
+relay is down), but no deposit is skipped. And since project 10 S1 the
+handoff **waits for the blob pushes to every relay to settle**: a recipient
+fetches blob bytes from its own relay's cache the moment the envelope lands,
+whichever path it came by, so an instant envelope with a blank image was the
+project 7 live-run race, not a win. Text — the dominant case — gets the full
+win. Closing the gap needs peer blob transfer: project 10 phase B, not a
+protocol question.
 
 **As built — who may push.** `Deliver` is gated like history (D0c): contacts,
 recognized own devices, self. A stranger's push is declined (`NotHeld`) and
