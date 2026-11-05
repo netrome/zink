@@ -9,9 +9,11 @@ use std::sync::Mutex;
 
 use zink_protocol::{BlobHash, EncryptedBlob, PublicKey};
 
+use crate::adapters::fs_store::FsStore;
 use crate::error::Error;
 use crate::net;
 use crate::ports::clock::Clock;
+use crate::ports::store::Store;
 use crate::ports::transport::{AcceptBlobs, Admit, BlobEvent, DialBlobs, FetchBlob, PushBlob};
 use crate::state::ClientState;
 
@@ -44,16 +46,16 @@ impl Default for BlobLimits {
 /// renders from the cache the moment it arrives. Nothing here is on the
 /// wire: a declined peer sees a closed connection and falls back to the
 /// relay path.
-pub(crate) struct BlobGate {
-    state: ClientState,
+pub(crate) struct BlobGate<S = FsStore> {
+    state: ClientState<S>,
     me: PublicKey,
     limits: BlobLimits,
     /// Admitted connections open per peer.
     open: Mutex<BTreeMap<[u8; 32], usize>>,
 }
 
-impl BlobGate {
-    pub(crate) fn new(state: ClientState, me: PublicKey, limits: BlobLimits) -> Self {
+impl<S> BlobGate<S> {
+    pub(crate) fn new(state: ClientState<S>, me: PublicKey, limits: BlobLimits) -> Self {
         Self {
             state,
             me,
@@ -61,7 +63,9 @@ impl BlobGate {
             open: Mutex::new(BTreeMap::new()),
         }
     }
+}
 
+impl<S: Store> BlobGate<S> {
     pub(crate) async fn handle<A: Admit>(&self, event: BlobEvent<A>) {
         match event {
             BlobEvent::Connected { peer, admit } => admit.admit(self.admits(peer).await).await,
@@ -119,7 +123,7 @@ impl BlobGate {
 /// `AcceptBlobs` port. Sequential: admission is a map lookup and a landed
 /// blob is one cache write, and the events of one connection must stay in
 /// order. Ends when the transport closes.
-pub(crate) async fn serve_pushes<A: AcceptBlobs>(accept: A, gate: BlobGate) {
+pub(crate) async fn serve_pushes<A: AcceptBlobs, S: Store>(accept: A, gate: BlobGate<S>) {
     while let Some(event) = accept.accept_blob().await {
         gate.handle(event).await;
     }
@@ -192,6 +196,7 @@ pub(crate) async fn fetch_encrypted<B: DialBlobs>(
 mod tests {
     use super::*;
     use crate::ports::clock::TestClock;
+    use crate::ports::store::TestStore;
     use crate::ports::transport::{AcceptBlobs, TestTransport};
     use zink_protocol::{ContactRecord, DeviceKey};
 
@@ -228,17 +233,21 @@ mod tests {
         );
     }
 
-    fn fresh(test: &str, limits: BlobLimits) -> (BlobGate, ClientState, DeviceKey, TestTransport) {
-        let root = std::env::temp_dir().join(format!("zink-test-gate-{test}"));
-        let _ = std::fs::remove_dir_all(&root);
-        let key_path = root.join("me.key").to_string_lossy().to_string();
-        let state = ClientState::open(&key_path);
+    fn fresh(
+        limits: BlobLimits,
+    ) -> (
+        BlobGate<TestStore>,
+        ClientState<TestStore>,
+        DeviceKey,
+        TestTransport,
+    ) {
+        let state = ClientState::new(TestStore::new());
         let me = DeviceKey::from_seed([1; 32]);
         let gate = BlobGate::new(state.clone(), me.public(), limits);
         (gate, state, me, TestTransport::new())
     }
 
-    async fn contact(state: &ClientState, seed: u8) -> PublicKey {
+    async fn contact(state: &ClientState<TestStore>, seed: u8) -> PublicKey {
         let key = DeviceKey::from_seed([seed; 32]).public();
         state
             .save_contact(
@@ -251,7 +260,7 @@ mod tests {
     }
 
     /// `peer` knocks through the double; the gate's answer.
-    async fn knock(net: &TestTransport, gate: &BlobGate, peer: PublicKey) -> bool {
+    async fn knock(net: &TestTransport, gate: &BlobGate<TestStore>, peer: PublicKey) -> bool {
         let answer = net.blob_accept.inject_connect(peer);
         let event = net.accept_blob().await.expect("event");
         gate.handle(event).await;
@@ -260,7 +269,7 @@ mod tests {
 
     async fn push(
         net: &TestTransport,
-        gate: &BlobGate,
+        gate: &BlobGate<TestStore>,
         peer: PublicKey,
         bytes: Vec<u8>,
     ) -> BlobHash {
@@ -272,7 +281,7 @@ mod tests {
         hash
     }
 
-    async fn close(net: &TestTransport, gate: &BlobGate, peer: PublicKey) {
+    async fn close(net: &TestTransport, gate: &BlobGate<TestStore>, peer: PublicKey) {
         net.blob_accept.inject_close(peer);
         let event = net.accept_blob().await.expect("event");
         gate.handle(event).await;
@@ -281,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn gate__should_admit_contacts_and_self_and_decline_strangers() {
         // Given
-        let (gate, state, me, net) = fresh("admit", BlobLimits::default());
+        let (gate, state, me, net) = fresh(BlobLimits::default());
         let friend = contact(&state, 2).await;
         let stranger = DeviceKey::from_seed([3; 32]).public();
 
@@ -301,7 +310,7 @@ mod tests {
             max_connections_per_peer: 1,
             ..BlobLimits::default()
         };
-        let (gate, state, _me, net) = fresh("cap", limits);
+        let (gate, state, _me, net) = fresh(limits);
         let friend = contact(&state, 4).await;
 
         // When: a second knock while the first is open
@@ -323,7 +332,7 @@ mod tests {
             max_blob_bytes: 1024,
             ..BlobLimits::default()
         };
-        let (gate, state, _me, net) = fresh("size", limits);
+        let (gate, state, _me, net) = fresh(limits);
         let friend = contact(&state, 5).await;
         assert!(knock(&net, &gate, friend).await);
 
@@ -342,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn gate__should_drop_a_pushed_blob_whose_bytes_do_not_hash_as_claimed() {
         // Given: an admitted peer whose transport "verified" a lie
-        let (gate, state, _me, net) = fresh("hash", BlobLimits::default());
+        let (gate, state, _me, net) = fresh(BlobLimits::default());
         let friend = contact(&state, 6).await;
         assert!(knock(&net, &gate, friend).await);
         let claimed = BlobHash([9; 32]);

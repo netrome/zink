@@ -11,6 +11,7 @@ use zink_protocol::{ContactRecord, MessageEnvelope, MessageId, PublicKey};
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::Transport;
 
 use super::{Client, PersonId};
@@ -105,7 +106,7 @@ struct MyLabelOp {
     channel: MessageId,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// The channel this device emits into, created on first use (§3): a
     /// `Hello` genesis with no human recipients — send-to-self appends
     /// the siblings, and single-device it's a self-wrapped note that
@@ -415,26 +416,22 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::client::test_kit::{loop_client, mailbox_only, signed_record, temp_key, temp_root};
-    use crate::keystore;
+    use crate::client::test_kit::{loop_client, mailbox_only, signed_record};
+
     use crate::ports::transport::Loopback;
     use zink_protocol::DeviceKey;
 
     /// Two live clients recognizing each other as own devices — the
     /// paired-phone-and-laptop setup every S6 scenario starts from.
-    async fn paired(
-        test: &str,
-    ) -> (
+    async fn paired() -> (
         crate::client::test_kit::LoopClient,
         crate::client::test_kit::LoopClient,
     ) {
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client(test, "phone", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client(test, "laptop", &wire).await;
-        let a_device = keystore::load(&temp_key(test, "phone")).expect("phone key");
-        let b_device = keystore::load(&temp_key(test, "laptop")).expect("laptop key");
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         a.recognize_device(&signed_record(
-            &b_device,
+            &b.device,
             "laptop",
             0,
             mailbox_only("ll@203.0.113.5:5"),
@@ -442,7 +439,7 @@ mod tests {
         .await
         .expect("phone recognizes laptop");
         b.recognize_device(&signed_record(
-            &a_device,
+            &a.device,
             "phone",
             0,
             mailbox_only("pp@203.0.113.6:6"),
@@ -465,7 +462,7 @@ mod tests {
             .expect("channel exists");
         for envelope in from.state.load_envelopes(channel).await.expect("load") {
             to.state
-                .store_envelope(channel, &envelope)
+                .store_envelope(channel, &envelope, 0)
                 .await
                 .expect("seed envelope");
         }
@@ -480,7 +477,7 @@ mod tests {
     async fn adopt__should_converge_a_rename_made_while_apart() {
         // Given: both devices hold carol; the phone renames her while the
         // laptop is offline
-        let (a, b) = paired("lens-rename").await;
+        let (a, b) = paired().await;
         a.add_contact(&carol_record(), None)
             .await
             .expect("phone adds");
@@ -509,15 +506,13 @@ mod tests {
                 .all(|summary| summary.id != channel),
             "the lens channel stays out of the inbox"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("lens-rename"));
     }
 
     #[tokio::test]
     async fn adopt__should_keep_mine_and_surface_theirs_on_concurrent_renames() {
         // Given: both devices hold carol and rename her while apart —
         // neither op saw the other
-        let (a, b) = paired("lens-conflict").await;
+        let (a, b) = paired().await;
         a.add_contact(&carol_record(), None)
             .await
             .expect("phone adds");
@@ -550,14 +545,12 @@ mod tests {
             .await
             .expect("take theirs");
         assert!(b.lens_conflicts().await.is_empty());
-
-        let _ = std::fs::remove_dir_all(temp_root("lens-conflict"));
     }
 
     #[tokio::test]
     async fn adopt__should_offer_a_sibling_contact_add_and_accept_explicitly() {
         // Given: the phone adds carol; the laptop has never met her
-        let (a, b) = paired("lens-offer").await;
+        let (a, b) = paired().await;
         a.add_contact(&carol_record(), None)
             .await
             .expect("phone adds");
@@ -591,14 +584,12 @@ mod tests {
             a.lens_offers().await.expect("offers").is_empty(),
             "already held — the re-offer loop breaks"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("lens-offer"));
     }
 
     #[tokio::test]
     async fn repudiate__should_void_the_siblings_pending_offers() {
         // Given: a pending offer from the phone
-        let (a, b) = paired("lens-void").await;
+        let (a, b) = paired().await;
         a.add_contact(&carol_record(), None)
             .await
             .expect("phone adds");
@@ -615,15 +606,13 @@ mod tests {
             b.state.offers().await.is_empty(),
             "removed, not merely filtered"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("lens-void"));
     }
 
     #[tokio::test]
     async fn adopt__should_ignore_ops_from_non_siblings() {
         // Given: a stranger's conversation whose genesis is a Hello frame
         // and whose follow-up renames b's carol — hostile mimicry
-        let (_, b) = paired("lens-hostile").await;
+        let (_, b) = paired().await;
         b.add_contact(&carol_record(), None)
             .await
             .expect("laptop adds");
@@ -642,11 +631,11 @@ mod tests {
             1,
         );
         b.state
-            .store_envelope(genesis_id, &hello)
+            .store_envelope(genesis_id, &hello, 0)
             .await
             .expect("seed");
         b.state
-            .store_envelope(genesis_id, &rename)
+            .store_envelope(genesis_id, &rename, 0)
             .await
             .expect("seed");
 
@@ -658,7 +647,5 @@ mod tests {
         assert!(b.person_by_label("carol").await.is_ok());
         assert!(b.lens_conflicts().await.is_empty());
         assert!(!b.state.lens_channels().await.contains(&genesis_id));
-
-        let _ = std::fs::remove_dir_all(temp_root("lens-hostile"));
     }
 }

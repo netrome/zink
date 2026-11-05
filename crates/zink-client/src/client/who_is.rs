@@ -18,6 +18,7 @@ use crate::hex;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::{Request, Transport};
 
 use super::{Client, Received};
@@ -152,7 +153,7 @@ fn valid_endorsements(
         .collect()
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Ask the network "who is this key?" (D1b, who-is-this.md §5): dial
     /// every dialable contact — the subject itself among them, if stored —
     /// send `WhoIs`, validate answers like scanned QRs, and append them to
@@ -591,10 +592,12 @@ mod tests {
     use crate::client::test_kit::{
         befriend, deposited_envelopes, deposited_frame, dir_bytes, loop_client, mailbox_only,
         mailbox_spec, message, routed_record, script_drain, signed_record, temp_key, temp_root,
+        test_device,
     };
     use crate::client::{ClientConfig, RelaySource, ResolvedName};
-    use crate::keystore;
+
     use crate::ports::clock::{TestClock, TestWallClock};
+    use crate::ports::store::{Key, TestStore};
     use crate::ports::transport::{Loopback, TestTransport};
     use zink_protocol::{Attestation, Claim, DeviceKey, RelayEntry, SyncResponse, Versioned};
 
@@ -623,8 +626,8 @@ mod tests {
         // actual profile names a fresh one, and she serves bob (mutual).
         // A message from her arrives — the live channel.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("refresh-heal", "anna", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("refresh-heal", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -667,16 +670,14 @@ mod tests {
             b.relay_status("anna").await.expect("status").source,
             RelaySource::SubjectServed { .. }
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("refresh-heal"));
     }
 
     #[tokio::test]
     async fn auto_refresh__should_ask_once_and_only_contacts() {
         // Given: the heal setup, plus a stranger among the senders
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("refresh-gate", "anna", &wire).await;
-        let (b, b_net, _b_clock) = loop_client("refresh-gate", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, b_net, _b_clock) = loop_client(&wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -723,8 +724,6 @@ mod tests {
         // privacy line (§5) holds even for the subject-only query
         assert_eq!(b_net.dial.dialed(&a.public_key()), 1);
         assert_eq!(b_net.dial.dialed(&stranger.public()), 0);
-
-        let _ = std::fs::remove_dir_all(temp_root("refresh-gate"));
     }
 
     #[tokio::test]
@@ -733,8 +732,8 @@ mod tests {
         // a complete profile; bob holds nothing about anna — the
         // two-fresh-devices onboarding bootstrap
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("ask-subject", "anna", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("ask-subject", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -761,8 +760,6 @@ mod tests {
         assert_eq!(candidates[0].0.name, "anna");
         let petname = b.add_contact(&candidates[0].1, None).await.expect("add");
         assert_eq!(petname, "anna");
-
-        let _ = std::fs::remove_dir_all(temp_root("ask-subject"));
     }
 
     #[tokio::test]
@@ -770,8 +767,8 @@ mod tests {
         // Given: anna has a complete profile but never added bob — her
         // contacts-only gate declines, indistinguishable from not holding
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("ask-subject-gate", "anna", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("ask-subject-gate", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -794,15 +791,13 @@ mod tests {
                 .expect("candidates")
                 .is_empty()
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("ask-subject-gate"));
     }
 
     #[tokio::test]
     async fn ask_subject__should_report_unreachable_when_no_route_connects() {
         // Given: a subject whose one route (the bare dial) hangs — offline
         let wire = Loopback::new();
-        let (b, b_net, b_clock) = loop_client("ask-subject-offline", "bob", &wire).await;
+        let (b, b_net, b_clock) = loop_client(&wire).await;
         let ghost = DeviceKey::from_seed([9; 32]).public();
         b_net.dial.hold(&ghost);
 
@@ -820,16 +815,12 @@ mod tests {
                 .expect("candidates")
                 .is_empty()
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("ask-subject-offline"));
     }
 
     #[tokio::test]
     async fn ask_subject__should_drop_an_answer_that_does_not_name_them() {
         // Given: the subject answers the ask with a record naming someone
         // else — a hostile self-serve
-        let key_path = temp_key("ask-subject-hostile", "asker");
-        keystore::create(&key_path).expect("create key");
         let net = TestTransport::new();
         let subject = DeviceKey::from_seed([41; 32]).public();
         let other = DeviceKey::from_seed([42; 32]).public();
@@ -841,8 +832,8 @@ mod tests {
             .to_bytes(),
         );
         let b = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig::default(),
             TestClock::new(),
             TestWallClock::new(1_000),
@@ -861,8 +852,6 @@ mod tests {
                 .expect("candidates")
                 .is_empty()
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("ask-subject-hostile"));
     }
 
     #[tokio::test]
@@ -870,8 +859,8 @@ mod tests {
         // Given: anna sends to bob direct (mutual contacts, bob's real
         // handler stores and acks); bob's profile is fresh
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("refresh-send", "anna", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("refresh-send", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         befriend(&b.state, a.public_key()).await;
         b.state
             .save_profile(
@@ -911,8 +900,6 @@ mod tests {
             learned[0].record.relays[0].mailbox,
             "bb@203.0.113.2:2".to_string()
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("refresh-send"));
     }
 
     #[tokio::test]
@@ -921,9 +908,9 @@ mod tests {
         // bob's messages goes through her mailbox (bob's record of alice is
         // mailbox-only), so the scoped auto-query fires inside her drain.
         let wire = Loopback::new();
-        let (a, a_net, _a_clock) = loop_client("autoquery", "alice", &wire).await;
-        let (b, b_net, _b_clock) = loop_client("autoquery", "bob", &wire).await;
-        let (c, c_net, _c_clock) = loop_client("autoquery", "carol", &wire).await;
+        let (a, a_net, _a_clock) = loop_client(&wire).await;
+        let (b, b_net, _b_clock) = loop_client(&wire).await;
+        let (c, c_net, _c_clock) = loop_client(&wire).await;
         let relay_a = DeviceKey::from_seed([111; 32]).public();
         let relay_b = DeviceKey::from_seed([112; 32]).public();
         let relay_c = DeviceKey::from_seed([113; 32]).public();
@@ -1019,8 +1006,6 @@ mod tests {
                 .iter()
                 .any(|received| received.body.as_deref() == Ok(b"hello everyone".as_slice()))
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("autoquery"));
     }
 
     #[tokio::test]
@@ -1029,8 +1014,8 @@ mod tests {
         // dialable contact and is in B's contact store. Carol herself is
         // unknown to A and offline — the one-way-add shape (design §1).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("learn", "asker", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("learn", "responder", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         befriend(&b.state, a.public_key()).await; // B's gate serves A
         let carol = DeviceKey::from_seed([21; 32]);
         let carol_record = signed_record(
@@ -1103,8 +1088,8 @@ mod tests {
         // URL, outdated mailbox); Carol is online with a fresh profile and
         // serves A (the record-freshness case, design §7)
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("fresh", "asker", &wire).await;
-        let (c, _c_net, _c_clock) = loop_client("fresh", "carol", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (c, _c_net, _c_clock) = loop_client(&wire).await;
         // Carol's fresh profile — written straight to state, as `open_homed`
         // did (`build_own_record` reads it when she answers for herself).
         c.state
@@ -1266,8 +1251,8 @@ mod tests {
         // Given: B holds Carol's record and A as a contact; A holds B as
         // a dialable contact ("bob")
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("endorse", "asker", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("endorse", "responder", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         befriend(&b.state, a.public_key()).await;
         let b_record = ContactRecord::new(
             vec![b.public_key()],
@@ -1331,8 +1316,6 @@ mod tests {
                 .all(|(name, _)| name.endorsed_by.is_empty()),
             "withdrawal propagates by replacement"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("endorse"));
     }
 
     #[tokio::test]
@@ -1341,8 +1324,6 @@ mod tests {
         // (the exact field stall diagnosed at D1's close). Every deadline
         // is the TestClock's, so serial dials would park one timer at a
         // time — parking all three at once IS the concurrency assertion.
-        let key_path = temp_key("conc", "asker");
-        keystore::create(&key_path).expect("create key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         let responder = DeviceKey::from_seed([39; 32]).public();
@@ -1357,8 +1338,8 @@ mod tests {
             net.dial.hold(&DeviceKey::from_seed([40 + n; 32]).public());
         }
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig::default(),
             clock.clone(),
             SystemClock,
@@ -1400,8 +1381,6 @@ mod tests {
         let outcome = outcome.expect("who_is");
         assert_eq!(outcome.answers.len(), 1);
         assert_eq!((outcome.asked, outcome.unreachable), (4, 3));
-
-        let _ = std::fs::remove_dir_all(temp_root("conc"));
     }
 
     #[tokio::test]
@@ -1410,8 +1389,8 @@ mod tests {
         // that includes the unknown key C, and holds C's record. The drain
         // hands A the message — nothing else happens manually.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("autowho", "asker", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("autowho", "responder", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         befriend(&b.state, a.public_key()).await;
         let carol = DeviceKey::from_seed([31; 32]);
         let carol_record = signed_record(
@@ -1450,7 +1429,7 @@ mod tests {
         );
         let conversation = genesis.id();
         a.state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
         let received = [Received {
@@ -1473,10 +1452,9 @@ mod tests {
 
         // And: the rate limit holds — wipe what was learned and re-run;
         // nothing is re-asked this run
-        let learned_dir =
-            std::path::PathBuf::from(format!("{}.state", temp_key("autowho", "asker")))
-                .join("learned");
-        std::fs::remove_dir_all(&learned_dir).expect("wipe learned");
+        a.state
+            .store()
+            .remove_under(&Key::parse("learned").expect("key"));
         a.auto_who_is(&received).await;
         assert!(
             matches!(
@@ -1485,8 +1463,6 @@ mod tests {
             ),
             "a second drain must not re-broadcast the query"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("autowho"));
     }
 
     #[tokio::test]
@@ -1501,7 +1477,7 @@ mod tests {
         let genesis = message(&stranger, vec![a.public_key(), carol], None, vec![], 0, 0);
         let conversation = genesis.id();
         a.state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
 

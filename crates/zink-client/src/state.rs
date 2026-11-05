@@ -66,6 +66,13 @@ impl<S> ClientState<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
+
+    /// The store underneath — for tests that reopen a client on the same
+    /// state, or reach under the typed layer to damage it.
+    #[cfg(test)]
+    pub(crate) fn store(&self) -> &S {
+        &self.store
+    }
 }
 
 impl<S: Store> ClientState<S> {
@@ -85,11 +92,13 @@ impl<S: Store> ClientState<S> {
     }
 
     /// Persist an envelope under its conversation. Idempotent (the key is
-    /// the message id).
+    /// the message id). `now_ms` is this device's wall clock, kept as the
+    /// conversation's first-seen time if it has none yet.
     pub async fn store_envelope(
         &self,
         conversation: MessageId,
         envelope: &MessageEnvelope,
+        now_ms: u64,
     ) -> Result<(), Error> {
         let path = format!(
             "{}/{}.env",
@@ -97,7 +106,7 @@ impl<S: Store> ClientState<S> {
             hex(&envelope.id().0)
         );
         self.write(&path, &envelope.to_bytes()).await?;
-        self.note_first_seen(conversation).await;
+        self.note_first_seen(conversation, now_ms).await;
         Ok(())
     }
 
@@ -118,13 +127,12 @@ impl<S: Store> ClientState<S> {
 
     /// Write the marker if absent. Best-effort: losing it costs ordering
     /// precision in one view, never a message.
-    async fn note_first_seen(&self, conversation: MessageId) {
+    async fn note_first_seen(&self, conversation: MessageId, now_ms: u64) {
         let path = first_seen_path(conversation);
         if self.read(&path).await.is_some() {
             return;
         }
-        let now = crate::adapters::system_clock::now_ms();
-        if let Err(error) = self.write(&path, now.to_string().as_bytes()).await {
+        if let Err(error) = self.write(&path, now_ms.to_string().as_bytes()).await {
             tracing::debug!(%error, "could not record a conversation's first-seen time");
         }
     }
@@ -1675,7 +1683,10 @@ mod tests {
             .record_conversation(&participants, conversation)
             .await
             .unwrap();
-        state.store_envelope(conversation, &genesis).await.unwrap();
+        state
+            .store_envelope(conversation, &genesis, 0)
+            .await
+            .unwrap();
         state
             .set_conversation_name(conversation, Some("trip"))
             .await

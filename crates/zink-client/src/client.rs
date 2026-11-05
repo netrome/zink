@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use zink_protocol::{DeviceKey, MessageEnvelope, PublicKey};
 
+use crate::adapters::fs_store::FsStore;
 use crate::adapters::iroh::IrohTransport;
 use crate::adapters::system_clock::SystemClock;
 use crate::adapters::system_rng::SystemRng;
@@ -13,6 +14,7 @@ use crate::error::Error;
 use crate::keystore;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::Transport;
 use crate::reach::ReachLedger;
 use crate::state::ClientState;
@@ -82,12 +84,15 @@ pub struct Client<
     W: WallClock = SystemClock,
     N: Transport = IrohTransport,
     R: Draw + Mint = SystemRng,
+    S = FsStore,
 > {
     device: DeviceKey,
     /// The network, behind ports (`crate::ports::transport`,
     /// `docs/design/transport.md`). `IrohTransport` in production.
     transport: N,
-    state: ClientState,
+    /// Local state, over the storage port (`crate::ports::store`).
+    /// `FsStore` in production.
+    state: ClientState<S>,
     config: ClientConfig,
     /// Monotonic time, behind a port. `SystemClock` in production; see
     /// `crate::ports::clock`.
@@ -155,7 +160,7 @@ impl Client<SystemClock, SystemClock> {
 /// Constructors that bind the real network: they build an `IrohTransport`
 /// from the profile's home relays, fixing `N` while staying generic over the
 /// clocks (tests inject `TestClock`s and still dial real iroh).
-impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
+impl<C: Clock, W: WallClock + Clone> Client<C, W, IrohTransport> {
     async fn with_device(
         device: DeviceKey,
         key_path: &str,
@@ -192,12 +197,12 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
 /// The test constructor keeps the production rng: nothing scripts jitter
 /// yet — a draw-injecting sibling appears when a test first drives it.
 #[cfg(test)]
-impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
+impl<C: Clock, W: WallClock + Clone, N: Transport, S: Store> Client<C, W, N, SystemRng, S> {
     /// A client on injected doubles: no endpoint, no I/O — the network is
-    /// whatever the test scripts.
+    /// whatever the test scripts, the store whatever the test hands in.
     async fn with_transport(
         device: DeviceKey,
-        key_path: &str,
+        store: S,
         config: ClientConfig,
         clock: C,
         wall_clock: W,
@@ -205,7 +210,7 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     ) -> Self {
         Self::assemble(
             device,
-            ClientState::open(key_path),
+            ClientState::new(store),
             config,
             clock,
             wall_clock,
@@ -216,18 +221,21 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     }
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Wire a client around an already-built transport — shared by
     /// `with_device` (real iroh) and the test constructor (doubles).
     async fn assemble(
         device: DeviceKey,
-        state: ClientState,
+        state: ClientState<S>,
         config: ClientConfig,
         clock: C,
         wall_clock: W,
         transport: N,
         rng: R,
-    ) -> Self {
+    ) -> Self
+    where
+        W: Clone,
+    {
         // Serve peer history sync on our own transport (D0): contacts-only
         // gate (D0c); serves fresh self-records for `who-is-this` (D1a), so
         // the handler needs signing — its own key instance, rebuilt from the
@@ -243,6 +251,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             DeviceKey::from_seed(device.seed()),
             direct_sink.clone(),
             reach.clone(),
+            wall_clock.clone(),
         );
         let serve_task = n0_future::task::AbortOnDropHandle::new(n0_future::task::spawn(
             crate::sync::serve(transport.clone(), handler),
@@ -362,15 +371,19 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Persist a verified envelope and its participant→conversation mapping,
     /// so a later `send` to the same people threads into this conversation.
     async fn remember(&self, envelope: &MessageEnvelope) -> Result<(), Error> {
-        remember(&self.state, envelope).await
+        remember(&self.state, envelope, self.wall_clock.now_ms()).await
     }
 }
 
 /// `Client::remember` over bare state — the serving router (D5 `Deliver`)
 /// stores exactly what a drain stores, and holds state but no `Client`.
-pub(crate) async fn remember(state: &ClientState, envelope: &MessageEnvelope) -> Result<(), Error> {
+pub(crate) async fn remember<S: Store>(
+    state: &ClientState<S>,
+    envelope: &MessageEnvelope,
+    now_ms: u64,
+) -> Result<(), Error> {
     let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
-    state.store_envelope(conversation, envelope).await?;
+    state.store_envelope(conversation, envelope, now_ms).await?;
     let participants: BTreeSet<PublicKey> = envelope
         .core
         .recipients
@@ -422,8 +435,8 @@ mod tests {
         // same state.
         const DEADLINE: Duration = Duration::from_secs(10);
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("drill", "anna", &wire).await;
-        let (b, b_net, b_clock) = loop_client("drill", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, b_net, b_clock) = loop_client(&wire).await;
         let relay_old = DeviceKey::from_seed([120; 32]).public();
         let relay_new = DeviceKey::from_seed([121; 32]).public();
 
@@ -541,8 +554,6 @@ mod tests {
             renamed,
             "the explicit act replaced the anchor"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("drill"));
     }
 
     #[tokio::test]

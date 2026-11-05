@@ -15,6 +15,7 @@ use zink_protocol::{
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::{PushBlob, Transport};
 use crate::{blobs, net};
 
@@ -69,7 +70,7 @@ pub struct ReplyContacts {
     pub disavowed: Vec<PublicKey>,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Seal for all recipients, thread into the participant set's
     /// conversation (or start one), deposit once per distinct relay
     /// (idempotent retry), push blobs to each relay's cache.
@@ -332,7 +333,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let id = sealed.envelope.id();
         let conversation = existing.unwrap_or(id);
         self.state
-            .store_envelope(conversation, &sealed.envelope)
+            .store_envelope(conversation, &sealed.envelope, self.wall_clock.now_ms())
             .await?;
         // The participant-set index (groups.md §3): every send maps its
         // message's set -> conversation, exactly like `remember` does on
@@ -834,6 +835,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
+    use crate::ports::store::TestStore;
     use std::time::Duration;
 
     use super::*;
@@ -842,6 +844,7 @@ mod tests {
         LoopClient, deposited_envelopes, deposited_frame, loop_client, loop_client_with,
         mailbox_only, mailbox_spec, message, open_homed, open_homed_with, record_with_dead_mailbox,
         routed_record, script_drain, sealed_for, spawn_test_relay, temp_key, temp_root,
+        test_device,
     };
     use crate::client::{ClientConfig, Received};
     use crate::ports::clock::{TestClock, TestWallClock};
@@ -874,7 +877,7 @@ mod tests {
         let genesis = message(&a.device, vec![b], None, vec![], 0, 0);
         let conversation = genesis.id();
         a.state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
         a.state
@@ -919,7 +922,7 @@ mod tests {
         let genesis = message(&a.device, vec![b], None, vec![], 0, 0);
         let conversation = genesis.id();
         a.state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
         let set = BTreeSet::from([a.public_key(), b]);
@@ -961,8 +964,8 @@ mod tests {
         // deposit is discharged and the dead mailbox is never even dialed
         // (an attempt would panic as unscripted).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("direct", "a", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("direct", "b", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         let relay_a = DeviceKey::from_seed([131; 32]).public();
         let relay_b = DeviceKey::from_seed([132; 32]).public();
         // The serving gate (D0c) covers `Deliver` too: B accepts a push
@@ -1016,8 +1019,6 @@ mod tests {
         let live = live.lock().expect("live lock");
         assert_eq!(live.len(), 1, "the sink fired");
         assert!(live[0].relay.is_none(), "no relay was on the path");
-
-        let _ = std::fs::remove_dir_all(temp_root("direct"));
     }
 
     /// A frame that would make the envelope deliverable somewhere: a
@@ -1038,13 +1039,12 @@ mod tests {
     /// envelope — the one configuration where a trusted peer's relay must
     /// still carry the blobs.
     async fn wired_pair(
-        test: &str,
         wire: &Loopback,
         relay_b: &PublicKey,
         b_trusts_a: bool,
         b_takes_blobs: bool,
     ) -> (LoopClient, TestTransport, TestClock, LoopClient) {
-        let (a, a_net, a_clock) = loop_client(test, "a", wire).await;
+        let (a, a_net, a_clock) = loop_client(wire).await;
         let b_config = ClientConfig {
             blob_limits: crate::blobs::BlobLimits {
                 max_connections_per_peer: if b_takes_blobs { 2 } else { 0 },
@@ -1052,7 +1052,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let (b, _b_net, _b_clock) = loop_client_with(test, "b", wire, b_config).await;
+        let (b, _b_net, _b_clock) = loop_client_with(wire, b_config).await;
         let relay_a = DeviceKey::from_seed([137; 32]).public();
         if b_trusts_a {
             b.add_contact(
@@ -1094,7 +1094,7 @@ mod tests {
         // so B's first fetch missed the cache.
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([138; 32]).public();
-        let (a, a_net, _clock, b) = wired_pair("blobs-first", &wire, &relay_b, true, false).await;
+        let (a, a_net, _clock, b) = wired_pair(&wire, &relay_b, true, false).await;
         a_net.blobs.cache(&relay_b);
         a_net.dial.connect(&relay_b).reply(deposited_frame());
 
@@ -1156,8 +1156,6 @@ mod tests {
             a.state.outbox().await.is_empty(),
             "fully served — nothing owed"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("blobs-first"));
     }
 
     /// Pushes resolve on queueing in the double; the cache write happens
@@ -1196,7 +1194,7 @@ mod tests {
         // relay never learns this image exists.
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([140; 32]).public();
-        let (a, a_net, _clock, b) = wired_pair("blobs-direct", &wire, &relay_b, true, true).await;
+        let (a, a_net, _clock, b) = wired_pair(&wire, &relay_b, true, true).await;
 
         // When: an image
         let receipt = a
@@ -1235,8 +1233,6 @@ mod tests {
                 .expect("opens from the cache");
             assert!(plaintext == vec![1; 64] || plaintext == vec![2; 4096]);
         }
-
-        let _ = std::fs::remove_dir_all(temp_root("blobs-direct"));
     }
 
     #[tokio::test]
@@ -1246,8 +1242,7 @@ mod tests {
         // must reach B through its relay cache, and before the deposit
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([141; 32]).public();
-        let (a, a_net, _clock, b) =
-            wired_pair("blobs-declined", &wire, &relay_b, false, true).await;
+        let (a, a_net, _clock, b) = wired_pair(&wire, &relay_b, false, true).await;
         a_net.blobs.cache(&relay_b);
         a_net.dial.connect(&relay_b).reply(deposited_frame());
 
@@ -1292,8 +1287,6 @@ mod tests {
                 "B's cache stayed empty"
             );
         }
-
-        let _ = std::fs::remove_dir_all(temp_root("blobs-declined"));
     }
 
     #[tokio::test]
@@ -1303,7 +1296,7 @@ mod tests {
         // B's relay answers on both ALPNs
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([142; 32]).public();
-        let (a, a_net, clock, b) = wired_pair("blobs-stall", &wire, &relay_b, true, true).await;
+        let (a, a_net, clock, b) = wired_pair(&wire, &relay_b, true, true).await;
         a_net.blobs.stall(&b.public_key());
         a_net.blobs.cache(&relay_b);
         a_net.dial.connect(&relay_b).reply(deposited_frame());
@@ -1340,8 +1333,6 @@ mod tests {
                 "nothing landed on B"
             );
         }
-
-        let _ = std::fs::remove_dir_all(temp_root("blobs-stall"));
     }
 
     #[tokio::test]
@@ -1352,7 +1343,7 @@ mod tests {
         // would panic — which is the assertion. The direct handoff still goes.
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([139; 32]).public();
-        let (a, a_net, _clock, b) = wired_pair("blobs-down", &wire, &relay_b, true, false).await;
+        let (a, a_net, _clock, b) = wired_pair(&wire, &relay_b, true, false).await;
         a_net.blobs.refuse(&relay_b);
 
         // When
@@ -1383,8 +1374,6 @@ mod tests {
                 .any(|event| matches!(event, WireEvent::Request { to, .. } if *to == relay_b)),
             "nothing went to the relay's mailbox: {events:?}"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("blobs-down"));
     }
 
     #[tokio::test]
@@ -1393,8 +1382,8 @@ mod tests {
         // send earns a `Stored` ack from B's *own device key* — the only
         // party whose word means "delivered" (a relay's `Deposited` doesn't).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("confirm", "a", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("confirm", "b", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         let relay_a = DeviceKey::from_seed([133; 32]).public();
         let relay_b = DeviceKey::from_seed([134; 32]).public();
         b.add_contact(
@@ -1431,11 +1420,11 @@ mod tests {
         );
 
         // …and it survives a reopen: the ack is transient, the record isn't.
+        let (seed, store) = (a.device.seed(), a.state.store().clone());
         drop(a);
-        let key_path = temp_key("confirm", "a");
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            DeviceKey::from_seed(seed),
+            store,
             ClientConfig::default(),
             TestClock::new(),
             SystemClock,
@@ -1455,8 +1444,6 @@ mod tests {
             received[0].confirmed.is_empty(),
             "the recipient does not confirm to itself"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("confirm"));
     }
 
     #[tokio::test]
@@ -1640,15 +1627,15 @@ mod tests {
                 relay_url: Some("http://203.0.113.1:1".to_string()),
             }],
         );
-        let key_path = temp_key("reachcache", "a");
-        keystore::create(&key_path).expect("key");
+        const SEED: [u8; 32] = [56; 32];
+        let store = TestStore::new();
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&absent); // the peer is gone
         net.dial.connect(&relay).reply(deposited_frame()); // its mailbox is fine
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            DeviceKey::from_seed(SEED),
+            store.clone(),
             ClientConfig::default(),
             clock.clone(),
             TestWallClock::new(T0),
@@ -1681,8 +1668,8 @@ mod tests {
         let net = TestTransport::new();
         net.dial.connect(&relay).reply(deposited_frame());
         let reopened = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            DeviceKey::from_seed(SEED),
+            store,
             ClientConfig::default(),
             TestClock::new(),
             TestWallClock::new(T0 + 5_000),
@@ -1702,8 +1689,6 @@ mod tests {
             0,
             "a known-offline peer must cost a fresh process nothing"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("reachcache"));
     }
 
     #[tokio::test]
@@ -1714,15 +1699,13 @@ mod tests {
         // directly; the only network cost in this test is the two deposits.
         const DEADLINE: Duration = Duration::from_secs(10);
         let relay_key = |seed: u8| DeviceKey::from_seed([seed; 32]).public();
-        let key_path = temp_key("twodead", "a");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&relay_key(74));
         net.dial.hold(&relay_key(75));
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
@@ -1780,8 +1763,6 @@ mod tests {
             2,
             "still nowhere to deliver"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("twodead"));
     }
 
     #[tokio::test]
@@ -1790,9 +1771,9 @@ mod tests {
         // phone (two one-way recognize acts — the laptop first, so the
         // record the phone stores and serves carries the reverse vouch).
         let wire = Loopback::new();
-        let (alice, a_net, a_clock) = loop_client("multidevice", "alice", &wire).await;
-        let (phone, p_net, p_clock) = loop_client("multidevice", "phone", &wire).await;
-        let (laptop, l_net, l_clock) = loop_client("multidevice", "laptop", &wire).await;
+        let (alice, a_net, a_clock) = loop_client(&wire).await;
+        let (phone, p_net, p_clock) = loop_client(&wire).await;
+        let (laptop, l_net, l_clock) = loop_client(&wire).await;
         let relay_a = DeviceKey::from_seed([121; 32]).public();
         let relay_p = DeviceKey::from_seed([122; 32]).public();
         let relay_l = DeviceKey::from_seed([123; 32]).public();
@@ -1962,8 +1943,6 @@ mod tests {
             .collect();
         assert!(phone_bodies.contains(&b"hello both".as_slice()));
         assert!(phone_bodies.contains(&b"from the new device".as_slice()));
-
-        let _ = std::fs::remove_dir_all(temp_root("multidevice"));
     }
 
     #[tokio::test]
@@ -1974,8 +1953,8 @@ mod tests {
         // "any recipient acked" would silently lose C's copy. This is the
         // regression test for that hazard.
         let wire = Loopback::new();
-        let (a, a_net, a_clock) = loop_client("shared", "a", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("shared", "b", &wire).await;
+        let (a, a_net, a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         let relay_a = DeviceKey::from_seed([138; 32]).public();
         b.add_contact(
             &routed_record(a.public_key(), &relay_a),
@@ -2018,8 +1997,6 @@ mod tests {
         assert_eq!(receipt.skipped_relays, 0, "C's copy still needs the relay");
         assert_eq!(receipt.pending_relays, 1, "and it is owed, not forgotten");
         assert_eq!(a.state.outbox().await.len(), 1);
-
-        let _ = std::fs::remove_dir_all(temp_root("shared"));
     }
 
     #[tokio::test]
@@ -2034,8 +2011,8 @@ mod tests {
         // namespace, and a shared one means one test's cleanup deletes the
         // other's live stores mid-run (the gate reads then fail closed —
         // a served-nothing that flaked the suite).
-        let (a, _a_net, _a_clock) = loop_client("pushgate", "a", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("pushgate", "b", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         let relay_b = DeviceKey::from_seed([135; 32]).public();
         a.add_contact(
             &routed_record(b.public_key(), &relay_b),
@@ -2051,8 +2028,6 @@ mod tests {
         // Then: declined, and nothing stored
         assert!(acked.is_empty(), "a stranger's push is declined");
         assert!(b.state.find_envelope(for_b.id()).await.is_none());
-
-        let _ = std::fs::remove_dir_all(temp_root("pushgate"));
     }
 
     #[tokio::test]
@@ -2062,8 +2037,8 @@ mod tests {
         // arbitrary history into our store — not even our own relay can do
         // that (it indexes deposits per recipient key).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("addressed", "a", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("addressed", "b", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         let relay_a = DeviceKey::from_seed([136; 32]).public();
         let relay_b = DeviceKey::from_seed([137; 32]).public();
         a.add_contact(
@@ -2094,8 +2069,6 @@ mod tests {
         let acked = a.deliver_direct(&for_b, &[b.public_key()]).await;
         assert_eq!(acked.len(), 1, "a contact's push for B is stored");
         assert!(b.state.find_envelope(for_b.id()).await.is_some());
-
-        let _ = std::fs::remove_dir_all(temp_root("addressed"));
     }
 
     #[tokio::test]

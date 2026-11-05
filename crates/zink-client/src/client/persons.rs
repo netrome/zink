@@ -17,6 +17,7 @@ use zink_protocol::{ContactRecord, PublicKey};
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::Transport;
 
 use super::Client;
@@ -104,7 +105,7 @@ impl PersonEntry {
     }
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Every person this client believes in, label-sorted. Self-healing:
     /// persisted members whose contact entry is gone drop out (an emptied
     /// person hides), a stem two rows claim (a crash inside a merge)

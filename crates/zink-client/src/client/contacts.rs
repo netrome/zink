@@ -16,6 +16,7 @@ use crate::error::Error;
 use crate::hex;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::{Peer, Transport};
 use crate::state::LearnedRecord;
 
@@ -254,7 +255,7 @@ pub struct Disavowal {
     pub excludes: bool,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Store a scanned/pasted record. The petname defaults to the contact's
     /// self-claimed name; the caller may override (petnames are ours, not
     /// theirs). Returns the petname it was stored under.
@@ -1822,19 +1823,19 @@ mod tests {
         let held_by_a = chain(&DeviceKey::from_seed([42; 32]), a.public_key(), 3);
         let conv_a = held_by_a[0].id();
         for envelope in &held_by_a {
-            a.state.store_envelope(conv_a, envelope).await.unwrap();
+            a.state.store_envelope(conv_a, envelope, 0).await.unwrap();
         }
         b.state
-            .store_envelope(conv_a, held_by_a.last().unwrap())
+            .store_envelope(conv_a, held_by_a.last().unwrap(), 0)
             .await
             .unwrap();
         let held_by_b = chain(&DeviceKey::from_seed([43; 32]), b.public_key(), 3);
         let conv_b = held_by_b[0].id();
         for envelope in &held_by_b {
-            b.state.store_envelope(conv_b, envelope).await.unwrap();
+            b.state.store_envelope(conv_b, envelope, 0).await.unwrap();
         }
         a.state
-            .store_envelope(conv_b, held_by_b.last().unwrap())
+            .store_envelope(conv_b, held_by_b.last().unwrap(), 0)
             .await
             .unwrap();
 
@@ -2360,8 +2361,8 @@ mod tests {
         // owns that temp namespace, and a shared one means one test's
         // cleanup deletes the other's live stores mid-run (the S5 flake
         // class).
-        let (phone, _p_net, _p_clock) = loop_client("lostdevice", "phone", &wire).await;
-        let (alice, _a_net, _a_clock) = loop_client("lostdevice", "alice", &wire).await;
+        let (phone, _p_net, _p_clock) = loop_client(&wire).await;
+        let (alice, _a_net, _a_clock) = loop_client(&wire).await;
         // The phone's profile — `my_record` reads it (as `open_homed` wrote).
         phone
             .state
@@ -2414,7 +2415,7 @@ mod tests {
         {
             alice
                 .state
-                .store_envelope(conversation, &envelope)
+                .store_envelope(conversation, &envelope, 0)
                 .await
                 .expect("copy");
         }

@@ -13,6 +13,7 @@ use crate::error::Error;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::{AcceptUni, Request, Transport};
 
 use super::Client;
@@ -59,7 +60,7 @@ pub struct Received {
     pub body: Result<Vec<u8>, OpenError>,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// The post-arrival seam for a direct delivery (D5): the same healing
     /// `recv`/`subscribe` run after a drain — auto-sync the DAG, scoped
     /// who-is for unknown members, re-wrap for paired devices. The edge
@@ -368,10 +369,11 @@ mod tests {
     use super::*;
     use crate::adapters::system_clock::SystemClock;
     use crate::client::ClientConfig;
-    use crate::client::test_kit::{mailbox_spec, script_drain, sealed_for, temp_key, temp_root};
-    use crate::keystore;
+    use crate::client::test_kit::{mailbox_spec, script_drain, sealed_for, test_device};
+
     use crate::ports::clock::TestClock;
     use crate::ports::rng::TestDraw;
+    use crate::ports::store::TestStore;
     use crate::ports::transport::TestTransport;
     use zink_protocol::DeviceKey;
 
@@ -401,13 +403,11 @@ mod tests {
         // stayed invisible until an unrelated relay came back.
         let dead = DeviceKey::from_seed([91; 32]).public();
         let healthy = DeviceKey::from_seed([92; 32]).public();
-        let key_path = temp_key("recvpartial", "b");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         let b = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig::default(),
             clock.clone(),
             SystemClock,
@@ -447,7 +447,5 @@ mod tests {
         // Then: an error — "best-effort per relay" is not "silently
         // succeed with nothing"
         assert!(result.is_err(), "a drain reaching no relay must fail");
-
-        let _ = std::fs::remove_dir_all(temp_root("recvpartial"));
     }
 }

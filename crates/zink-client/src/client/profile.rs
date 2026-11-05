@@ -13,6 +13,7 @@ use zink_protocol::{
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::Transport;
 use crate::state::ClientState;
 use crate::{blobs, net};
@@ -30,7 +31,7 @@ pub struct AvatarReceipt {
     pub pushed_relays: usize,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Set this device's display name and home relays — what `my_record`
     /// publishes and what `recv` drains by default. Each relay is the spec
     /// `zink-relay` prints: `<endpoint-id>@<ip:port>[#<relay-url>]` — the
@@ -499,9 +500,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 /// QR/paste publishing path) and the sync handler (serving `WhoIs` about
 /// our own key, D1a), so the two can't drift. The attestation `revision`
 /// is the persisted supersession counter, bumped per rename (D1b).
-pub(crate) async fn build_own_record(
+pub(crate) async fn build_own_record<S: Store>(
     device: &DeviceKey,
-    state: &ClientState,
+    state: &ClientState<S>,
 ) -> Option<ContactRecord> {
     let name = state.profile_name().await?;
     let relays = state.home_relay_entries().await;
@@ -713,8 +714,8 @@ mod tests {
         // Given: bob holds carol with a photo he chose and shares it; bob
         // serves anna (mutual), and anna can dial him
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("share-serve", "anna", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("share-serve", "bob", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         let carol = DeviceKey::from_seed([90; 32]).public();
         let carol_record = ContactRecord::new(
             vec![carol],
@@ -774,8 +775,6 @@ mod tests {
         let photo = a.shared_avatar(carol, b.public_key()).await.expect("fetch");
         assert_eq!(photo.as_deref(), Some(b"a picture of carol".as_slice()));
         assert_eq!(a.avatar(carol).await.expect("avatar"), None);
-
-        let _ = std::fs::remove_dir_all(temp_root("share-serve"));
     }
 
     #[tokio::test]
@@ -905,7 +904,5 @@ mod tests {
         assert!(crate::client::contacts::shared_avatar_claim(&voided, subject).is_none());
         let outlived = entry(vec![avatar, signed(Claim::Negative, 0)]);
         assert!(crate::client::contacts::shared_avatar_claim(&outlived, subject).is_some());
-
-        let _ = std::fs::remove_dir_all(temp_root("share-void"));
     }
 }

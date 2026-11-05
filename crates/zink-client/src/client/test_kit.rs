@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use zink_protocol::{
     Attestation, Claim, ContactRecord, DeviceKey, KeyCommitment, MailboxOp, MailboxResult,
     MessageCore, MessageDraft, MessageEnvelope, MessageId, PublicKey, RelayEntry,
@@ -15,7 +15,9 @@ use zink_protocol::{
 };
 
 use crate::adapters::system_clock::SystemClock;
+use crate::adapters::system_rng::SystemRng;
 use crate::ports::clock::TestClock;
+use crate::ports::store::{Store, TestStore};
 use crate::ports::transport::{Loopback, ScriptedConn, TestTransport};
 use crate::state::ClientState;
 use crate::{hex, keystore};
@@ -299,7 +301,7 @@ pub(crate) async fn spawn_test_relay() -> (iroh_relay::server::Server, String) {
 /// contacts-only serving gate lets the requester's sync calls through
 /// (the minimal record — key only — via the store, skipping
 /// `add_contact`'s reachability validation, which serving doesn't need).
-pub(crate) async fn befriend(server: &ClientState, requester: PublicKey) {
+pub(crate) async fn befriend<S: Store>(server: &ClientState<S>, requester: PublicKey) {
     let record = ContactRecord::new(vec![requester], vec![], vec![]);
     server
         .save_contact("requester", &record)
@@ -357,31 +359,23 @@ pub(crate) async fn open_homed_with(
 /// wired clients — both ends run their real handlers (transport.md §7).
 /// The loopback-wired client type the kit constructs — for helpers that
 /// pass clients around.
-pub(crate) type LoopClient = Client<TestClock, SystemClock, TestTransport>;
+pub(crate) type LoopClient = Client<TestClock, SystemClock, TestTransport, SystemRng, TestStore>;
 
-pub(crate) async fn loop_client(
-    test: &str,
-    name: &str,
-    wire: &Loopback,
-) -> (LoopClient, TestTransport, TestClock) {
-    loop_client_with(test, name, wire, ClientConfig::default()).await
+pub(crate) async fn loop_client(wire: &Loopback) -> (LoopClient, TestTransport, TestClock) {
+    loop_client_with(wire, ClientConfig::default()).await
 }
 
 /// `loop_client` with edge-injected tuning (a blob gate's caps, say).
 pub(crate) async fn loop_client_with(
-    test: &str,
-    name: &str,
     wire: &Loopback,
     config: ClientConfig,
 ) -> (LoopClient, TestTransport, TestClock) {
-    let key_path = temp_key(test, name);
-    keystore::create(&key_path).expect("key");
-    let device = keystore::load(&key_path).expect("load key");
+    let device = test_device();
     let net = wire.transport(device.public());
     let clock = TestClock::new();
     let client = Client::with_transport(
         device,
-        &key_path,
+        TestStore::new(),
         config,
         clock.clone(),
         SystemClock,
@@ -389,6 +383,14 @@ pub(crate) async fn loop_client_with(
     )
     .await;
     (client, net, clock)
+}
+
+/// A fresh device key, held in memory only — doubles-wired clients need
+/// no key file.
+pub(crate) fn test_device() -> DeviceKey {
+    let mut seed = [0; 32];
+    OsRng.fill_bytes(&mut seed);
+    DeviceKey::from_seed(seed)
 }
 
 pub(crate) fn summary(id: u8, known: bool, first_seen_ms: u64) -> ConversationSummary {

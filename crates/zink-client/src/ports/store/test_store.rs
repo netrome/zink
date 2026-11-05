@@ -16,6 +16,15 @@ impl TestStore {
     pub(crate) fn new() -> Self {
         Self::default()
     }
+
+    /// Drop everything under `dir` — what a user deleting a directory by
+    /// hand does to the store.
+    pub(crate) fn remove_under(&self, dir: &Key) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|key, _| !(key.0.len() > dir.0.len() && key.0.starts_with(&dir.0)));
+    }
 }
 
 impl Get for TestStore {

@@ -15,7 +15,11 @@ use zink_protocol::{
     SyncErrorCode, SyncOp, SyncRequest, SyncResponse, SyncResult,
 };
 
+use crate::adapters::fs_store::FsStore;
+use crate::adapters::system_clock::SystemClock;
 use crate::client::Received;
+use crate::ports::clock::WallClock;
+use crate::ports::store::Store;
 use crate::ports::transport::{Accept, Inbound, Respond};
 use crate::reach::ReachLedger;
 use crate::state::ClientState;
@@ -36,8 +40,8 @@ pub(crate) type DirectSink =
 /// the discretion: a caller whose key is not in the contact store (and isn't
 /// us) gets answers indistinguishable from "don't hold it" — declining and
 /// not-having look the same on the wire. Client policy, not protocol.
-pub(crate) struct SyncHandler {
-    state: ClientState,
+pub(crate) struct SyncHandler<S = FsStore, W = SystemClock> {
+    state: ClientState<S>,
     /// This device's key: identifies "us" for the gate's self-allowance
     /// (self-dial is trivially "us"; D3 own-device sync rides the same
     /// allowance) and signs the fresh self-record served for a `WhoIs`
@@ -47,27 +51,32 @@ pub(crate) struct SyncHandler {
     sink: DirectSink,
     /// Peers that reached us are reachable (D5) — the send side reads this.
     reach: ReachLedger,
+    /// The client's wall clock: stamps reach evidence and first-seen
+    /// markers, never read ambiently (ADR 0004).
+    wall_clock: W,
 }
 
-impl SyncHandler {
+impl<S, W> SyncHandler<S, W> {
     pub(crate) fn new(
-        state: ClientState,
+        state: ClientState<S>,
         device: DeviceKey,
         sink: DirectSink,
         reach: ReachLedger,
+        wall_clock: W,
     ) -> Self {
         Self {
             state,
             device,
             sink,
             reach,
+            wall_clock,
         }
     }
 }
 
 /// Hand-written because `DeviceKey` is secret material — deliberately
 /// neither `Clone` nor `Debug`; it must never reach log output.
-impl std::fmt::Debug for SyncHandler {
+impl<S: std::fmt::Debug, W> std::fmt::Debug for SyncHandler<S, W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncHandler")
             .field("state", &self.state)
@@ -75,7 +84,7 @@ impl std::fmt::Debug for SyncHandler {
     }
 }
 
-impl SyncHandler {
+impl<S: Store, W: WallClock> SyncHandler<S, W> {
     /// Contacts-only gate, resolved once per connection (the caller's key IS
     /// the authenticated connection key). A peer added as a contact
     /// mid-connection is served on its next connection. The self-allowance
@@ -188,7 +197,9 @@ impl SyncHandler {
         }
         // Idempotent: a re-delivery of something already held rewrites the
         // same bytes and acks again, exactly like a repeated deposit.
-        if let Err(error) = crate::client::remember(&self.state, &envelope).await {
+        if let Err(error) =
+            crate::client::remember(&self.state, &envelope, self.wall_clock.now_ms()).await
+        {
             tracing::warn!(%error, "direct delivery failed to store; declining");
             return SyncResult::NotHeld;
         }
@@ -206,7 +217,7 @@ impl SyncHandler {
     }
 }
 
-impl SyncHandler {
+impl<S: Store, W: WallClock> SyncHandler<S, W> {
     /// Answer one inbound request. The caller's key is authenticated by the
     /// transport (`Inbound::peer`); the contacts-only gate resolves against
     /// it per request, so a peer added as a contact is served immediately.
@@ -219,8 +230,7 @@ impl SyncHandler {
             // A peer that reached us can be reached (D5): our next send to it
             // is worth a real dial budget rather than a token probe. Only for
             // peers we serve — a stranger's connection is not our business.
-            self.reach
-                .note_seen(&caller, crate::adapters::system_clock::now_ms());
+            self.reach.note_seen(&caller, self.wall_clock.now_ms());
         }
         let request = SyncRequest::try_from_bytes(&inbound.frame).ok();
         let result = match request.map(|r| r.op) {
@@ -285,7 +295,11 @@ impl SyncHandler {
 /// The serving gate (D0c), shared with the blob side (project 10): us, a
 /// recognized own device's vouched key, or any key of a user-added contact.
 /// A contact-store read error fails closed.
-pub(crate) async fn serves(state: &ClientState, me: PublicKey, caller: PublicKey) -> bool {
+pub(crate) async fn serves<S: Store>(
+    state: &ClientState<S>,
+    me: PublicKey,
+    caller: PublicKey,
+) -> bool {
     caller == me
         || state
             .recognized_devices()
@@ -305,7 +319,10 @@ pub(crate) async fn serves(state: &ClientState, me: PublicKey, caller: PublicKey
 /// connections must not serialize behind one slow store write, which is the
 /// concurrency the router gave the pre-port handler. Ends when the
 /// transport closes (`accept` yields `None`).
-pub(crate) async fn serve<A: Accept>(accept: A, handler: SyncHandler) {
+pub(crate) async fn serve<A: Accept, S: Store, W: WallClock>(
+    accept: A,
+    handler: SyncHandler<S, W>,
+) {
     let handler = std::sync::Arc::new(handler);
     while let Some(inbound) = accept.accept().await {
         let handler = handler.clone();

@@ -14,11 +14,12 @@ use crate::error::Error;
 use crate::net;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::{Peer, Request, Transport};
 
 use super::{Client, Received};
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Sync a partially-known conversation with a peer (SPEC §5.2): walk
     /// `parents` **backward** to the genesis (what lets a device added
     /// mid-conversation build the DAG and reply — without the genesis,
@@ -330,7 +331,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     }
                     if self
                         .state
-                        .store_envelope(conversation, &updated)
+                        .store_envelope(conversation, &updated, self.wall_clock.now_ms())
                         .await
                         .is_err()
                     {
@@ -391,8 +392,8 @@ mod tests {
         // mid-conversation — holds only the latest message, so it can't even
         // build the DAG (no genesis on disk) and thus can't reply.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("walk", "server", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("walk", "client", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         befriend(&a.state, b.public_key()).await; // the D0c gate serves contacts only
 
         let author = DeviceKey::from_seed([9; 32]);
@@ -400,12 +401,15 @@ mod tests {
         let conversation = msgs[0].id();
         for envelope in &msgs {
             a.state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .unwrap();
         }
         let latest = msgs.last().unwrap();
-        b.state.store_envelope(conversation, latest).await.unwrap();
+        b.state
+            .store_envelope(conversation, latest, 0)
+            .await
+            .unwrap();
         assert!(
             b.state.load_dag(conversation).await.is_err(),
             "B lacks the genesis before backfill"
@@ -436,8 +440,6 @@ mod tests {
             .expect("DAG builds after backfill");
         assert_eq!(dag.heads(), vec![latest.id()]);
         assert_eq!(dag.next_logical(), 3);
-
-        let _ = std::fs::remove_dir_all(temp_root("walk"));
     }
 
     #[tokio::test]
@@ -458,12 +460,12 @@ mod tests {
         let conversation = msgs[0].id();
         for envelope in &msgs {
             a.state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .unwrap();
         }
         b.state
-            .store_envelope(conversation, msgs.last().unwrap())
+            .store_envelope(conversation, msgs.last().unwrap(), 0)
             .await
             .unwrap();
         let record = ContactRecord::new(
@@ -510,12 +512,12 @@ mod tests {
         let conversation = msgs[0].id();
         for envelope in &msgs {
             a.state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .unwrap();
         }
         b.state
-            .store_envelope(conversation, msgs.last().unwrap())
+            .store_envelope(conversation, msgs.last().unwrap(), 0)
             .await
             .unwrap();
 
@@ -583,12 +585,12 @@ mod tests {
         let conversation = msgs[0].id();
         for envelope in &msgs {
             a.state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .unwrap();
         }
         b.state
-            .store_envelope(conversation, &msgs[2])
+            .store_envelope(conversation, &msgs[2], 0)
             .await
             .unwrap();
 
@@ -614,20 +616,23 @@ mod tests {
         // the latest message, as a mid-conversation joiner would. B holds
         // A's record (key + relay URL), as any messageable contact does.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("autosync", "server", &wire).await;
-        let (b, _b_net, _b_clock) = loop_client("autosync", "client", &wire).await;
+        let (a, _a_net, _a_clock) = loop_client(&wire).await;
+        let (b, _b_net, _b_clock) = loop_client(&wire).await;
         befriend(&a.state, b.public_key()).await;
 
         let msgs = chain(&a.device, b.public_key(), 3);
         let conversation = msgs[0].id();
         for envelope in &msgs {
             a.state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .unwrap();
         }
         let latest = msgs.last().unwrap();
-        b.state.store_envelope(conversation, latest).await.unwrap();
+        b.state
+            .store_envelope(conversation, latest, 0)
+            .await
+            .unwrap();
         let record = ContactRecord::new(
             vec![a.public_key()],
             vec![],
@@ -657,8 +662,6 @@ mod tests {
         // Then: the conversation is whole with zero explicit action
         assert_eq!(healed, 2, "genesis + the middle message");
         assert!(b.state.load_dag(conversation).await.is_ok());
-
-        let _ = std::fs::remove_dir_all(temp_root("autosync"));
     }
 
     #[tokio::test]
@@ -666,8 +669,8 @@ mod tests {
         // Given: the phone holds a fully-sealed conversation from before
         // the laptop's key existed; both home to a relay for dial-by-key
         let wire = Loopback::new();
-        let (phone, _p_net, _p_clock) = loop_client("rewrap", "phone", &wire).await;
-        let (laptop, _l_net, _l_clock) = loop_client("rewrap", "laptop", &wire).await;
+        let (phone, _p_net, _p_clock) = loop_client(&wire).await;
+        let (laptop, _l_net, _l_clock) = loop_client(&wire).await;
         let author = DeviceKey::from_seed([60; 32]);
         let msgs = sealed_chain(&author, phone.public_key(), &[b"one", b"two", b"three"]);
         let conversation = msgs[0].id();
@@ -675,7 +678,7 @@ mod tests {
         for envelope in &msgs {
             phone
                 .state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .unwrap();
         }
@@ -706,7 +709,7 @@ mod tests {
         // backfills the skeleton by key, then pulls re-wraps
         laptop
             .state
-            .store_envelope(conversation, msgs.last().unwrap())
+            .store_envelope(conversation, msgs.last().unwrap(), 0)
             .await
             .unwrap();
         let fetched = laptop
@@ -740,8 +743,6 @@ mod tests {
             ids,
             "wraps appended outside the hashed core — ids unchanged"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("rewrap"));
     }
 
     #[tokio::test]
@@ -760,7 +761,7 @@ mod tests {
         let author = DeviceKey::from_seed([61; 32]);
         let msgs = sealed_chain(&author, phone.public_key(), &[b"secret"]);
         let id = msgs[0].id();
-        phone.state.store_envelope(id, &msgs[0]).await.unwrap();
+        phone.state.store_envelope(id, &msgs[0], 0).await.unwrap();
         befriend(&phone.state, alice.public_key()).await;
 
         // When: the contact asks for re-wraps
@@ -857,7 +858,7 @@ mod tests {
         let msgs = chain(&author, b.public_key(), 3);
         let conversation = msgs[0].id();
         b.state
-            .store_envelope(conversation, msgs.last().unwrap())
+            .store_envelope(conversation, msgs.last().unwrap(), 0)
             .await
             .unwrap();
 

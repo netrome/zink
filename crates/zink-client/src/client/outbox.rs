@@ -21,6 +21,7 @@ use crate::error::Error;
 use crate::hex;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::Transport;
 
 use super::Client;
@@ -52,7 +53,7 @@ pub struct FlushReport {
     pub released: usize,
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Retry every outstanding delivery (idempotent: deposits dedup by id,
     /// blob pushes by hash). Entries older than the give-up window are left
     /// in place unretried — the relay's retention has expired, the message
@@ -254,15 +255,16 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
+    use crate::ports::store::TestStore;
     use std::time::Duration;
 
     use super::*;
     use crate::client::ClientConfig;
     use crate::client::Contact;
     use crate::client::test_kit::{
-        chain, deposited_frame, mailbox_only, mailbox_spec, temp_key, temp_root,
+        chain, deposited_frame, mailbox_only, mailbox_spec, test_device,
     };
-    use crate::keystore;
+
     use crate::ports::clock::{TestClock, TestWallClock};
     use crate::ports::transport::TestTransport;
     use zink_protocol::{
@@ -279,14 +281,12 @@ mod tests {
         const DEADLINE: Duration = Duration::from_secs(10);
         const T0: u64 = 1_000_000;
         let relay = DeviceKey::from_seed([81; 32]).public();
-        let key_path = temp_key("recover", "a");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&relay);
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
@@ -330,8 +330,6 @@ mod tests {
         // Then: recovered, nothing owed — and no real time passed anywhere
         assert_eq!(report.delivered, 1);
         assert!(a.state.outbox().await.is_empty(), "the debt is settled");
-
-        let _ = std::fs::remove_dir_all(temp_root("recover"));
     }
 
     #[tokio::test]
@@ -344,14 +342,12 @@ mod tests {
         const T0: u64 = 1_000_000;
         let relay_a = DeviceKey::from_seed([82; 32]).public();
         let relay_b = DeviceKey::from_seed([83; 32]).public();
-        let key_path = temp_key("retarget", "a");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&relay_a);
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
@@ -401,8 +397,6 @@ mod tests {
         assert!(a.state.outbox().await.is_empty(), "the debt is settled");
         assert_eq!(net.dial.dialed(&relay_a), 1, "only the original send");
         assert_eq!(net.dial.dialed(&relay_b), 1);
-
-        let _ = std::fs::remove_dir_all(temp_root("retarget"));
     }
 
     #[tokio::test]
@@ -412,14 +406,12 @@ mod tests {
         const DEADLINE: Duration = Duration::from_secs(10);
         const T0: u64 = 1_000_000;
         let relay = DeviceKey::from_seed([85; 32]).public();
-        let key_path = temp_key("ack-release", "a");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&relay);
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
@@ -467,8 +459,6 @@ mod tests {
         assert_eq!(report.delivered, 0);
         assert!(a.state.outbox().await.is_empty(), "the debt is settled");
         assert_eq!(net.dial.dialed(&relay), 1, "only the original send");
-
-        let _ = std::fs::remove_dir_all(temp_root("ack-release"));
     }
 
     #[tokio::test]
@@ -479,14 +469,12 @@ mod tests {
         const DEADLINE: Duration = Duration::from_secs(10);
         const T0: u64 = 1_000_000;
         let relay = DeviceKey::from_seed([87; 32]).public();
-        let key_path = temp_key("blob-guard", "a");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&relay);
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
@@ -526,7 +514,10 @@ mod tests {
         };
         let envelope = MessageEnvelope::new(core, &a.device);
         let id = envelope.id();
-        a.state.store_envelope(id, &envelope).await.expect("store");
+        a.state
+            .store_envelope(id, &envelope, 0)
+            .await
+            .expect("store");
         a.state
             .add_outbox(id, &mailbox_spec(&relay), id, T0)
             .await
@@ -547,8 +538,6 @@ mod tests {
         assert_eq!(report.released, 0);
         assert_eq!(report.pending, 1);
         assert_eq!(a.state.outbox().await.len(), 1, "still owed for the blob");
-
-        let _ = std::fs::remove_dir_all(temp_root("blob-guard"));
     }
 
     #[tokio::test]
@@ -559,14 +548,12 @@ mod tests {
         const DEADLINE: Duration = Duration::from_secs(10);
         const T0: u64 = 1_000_000;
         let relay = DeviceKey::from_seed([89; 32]).public();
-        let key_path = temp_key("raw-spec", "a");
-        keystore::create(&key_path).expect("key");
         let clock = TestClock::new();
         let net = TestTransport::new();
         net.dial.hold(&relay);
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig {
                 connect_timeout: DEADLINE,
                 ..Default::default()
@@ -602,8 +589,6 @@ mod tests {
         assert_eq!(report.pending, 1);
         assert_eq!(a.state.outbox().await.len(), 1);
         assert_eq!(net.dial.dialed(&relay), 2, "send, then the retry");
-
-        let _ = std::fs::remove_dir_all(temp_root("raw-spec"));
     }
 
     #[tokio::test]
@@ -615,13 +600,11 @@ mod tests {
         const PAST_GIVE_UP: u64 = T0 + 31 * 24 * 60 * 60 * 1000;
         let relay_a = DeviceKey::from_seed([91; 32]).public();
         let relay_b = DeviceKey::from_seed([92; 32]).public();
-        let key_path = temp_key("inherit-age", "a");
-        keystore::create(&key_path).expect("key");
         let net = TestTransport::new();
         let wall = TestWallClock::new(PAST_GIVE_UP);
         let a = Client::with_transport(
-            keystore::load(&key_path).expect("load key"),
-            &key_path,
+            test_device(),
+            TestStore::new(),
             ClientConfig::default(),
             TestClock::new(),
             wall,
@@ -631,7 +614,10 @@ mod tests {
         let ghost = DeviceKey::from_seed([93; 32]);
         let envelope = chain(&a.device, ghost.public(), 1).remove(0);
         let id = envelope.id();
-        a.state.store_envelope(id, &envelope).await.expect("store");
+        a.state
+            .store_envelope(id, &envelope, 0)
+            .await
+            .expect("store");
         a.state
             .add_outbox(id, &mailbox_spec(&relay_a), id, T0)
             .await
@@ -661,7 +647,5 @@ mod tests {
         assert_eq!(outbox[0].created_ms, T0, "age inherited, not reset");
         assert_eq!(net.dial.dialed(&relay_a), 0);
         assert_eq!(net.dial.dialed(&relay_b), 0);
-
-        let _ = std::fs::remove_dir_all(temp_root("inherit-age"));
     }
 }

@@ -87,10 +87,18 @@ across it — the edits are mechanical.
   stored errors (was: errors only when the directory is missing);
   `save_relay_override` writes atomically and creates its parent (was a
   bare `std::fs::write`); storage error messages now name op + key.
-- **S2b · The test kit onto the double.** `Client` gains the fifth
-  parameter (`S = FsStore`, bound on the impls); the client test kit and
-  `BlobGate`/sync tests move from temp dirs onto `TestStore`, leaving the
-  temp-dir tier to the fs adapter's own suite and the golden test.
+- **S2b · The test kit onto the double — done (2026-11-05).** `Client`
+  gained its fifth parameter (`S = FsStore`, bound on the impls), as did
+  `SyncHandler` and `BlobGate`. The loopback kit (`loop_client`,
+  `with_transport`) runs on `TestStore` with an in-memory device key — no
+  temp dir, no key file — and so do the blob-gate tests; reopen tests
+  share the store handle and the device seed explicitly
+  (`ClientState::store()` is a test-only accessor; `TestStore::remove_under`
+  stands in for a hand-deleted directory). First-seen is time-as-data:
+  `store_envelope` takes `now_ms` from the caller's `WallClock`, and the
+  sync server holds a clone of the client's, which also stamps its reach
+  evidence — `system_clock::now_ms()`, the last ambient wall-clock read in
+  the core, is gone.
 - **S3 · Crash-ordering tests.** Fault controls on the double (fail the
   n-th put, stop persisting after a point) and the tests the comments
   promise: `replace_contact`'s write-then-drop, contact-add + person row,
@@ -102,7 +110,8 @@ across it — the edits are mechanical.
 
 ## Follow-ups
 
-- `note_first_seen` reads the real clock inside `state.rs`
-  (`system_clock::now_ms()`) — an ADR 0004 audit-line violation, still
-  open after S2a; fix in S2b by passing wall time in from `Client`'s
-  `WallClock` (the sync server's `note_seen` stamp has the same shape).
+- The production-constructor tier (`Client::open_or_create` /
+  `open_homed` — real iroh endpoint, real key file, ~90 call sites) still
+  runs on temp dirs. Moving it onto the double means moving it onto
+  `TestTransport` too, where an unscripted dial panics — a transport
+  migration, not a storage one; schedule separately if wanted.

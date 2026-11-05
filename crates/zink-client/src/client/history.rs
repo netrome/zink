@@ -10,6 +10,7 @@ use zink_protocol::{BlobHash, BlobRef, MessageEnvelope, MessageId, OpenError, Pu
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
+use crate::ports::store::Store;
 use crate::ports::transport::Transport;
 use crate::{blobs, hex};
 
@@ -187,7 +188,7 @@ fn membership_delta(
     )
 }
 
-impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
+impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W, N, R, S> {
     /// Fetch + verify + decrypt one blob referenced by a received message:
     /// the local cache first, then the relay it arrived through (caching
     /// the ciphertext for the next time). A **direct** arrival (D5) has no
@@ -474,12 +475,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use crate::ports::store::TestStore;
     use std::time::Duration;
 
     use crate::adapters::system_clock::SystemClock;
     use crate::client::test_kit::{
-        deposited_envelopes, deposited_frame, loop_client, mailbox_only, mailbox_spec, message,
-        routed_record, script_drain, signed_record, summary, temp_key, temp_root,
+        LoopClient, deposited_envelopes, deposited_frame, loop_client, mailbox_only, mailbox_spec,
+        message, routed_record, script_drain, signed_record, summary, temp_key, temp_root,
+        test_device,
     };
     use crate::client::{ClientConfig, Contact};
     use crate::keystore;
@@ -516,7 +519,7 @@ mod tests {
         for envelope in [&genesis, &newer] {
             client
                 .state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .expect("store");
         }
@@ -553,7 +556,7 @@ mod tests {
         for envelope in [&genesis, &reply] {
             client
                 .state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .expect("store");
         }
@@ -579,7 +582,7 @@ mod tests {
         );
         client
             .state
-            .store_envelope(conversation, &more)
+            .store_envelope(conversation, &more, 0)
             .await
             .expect("store");
         assert_eq!(client.conversations().await.expect("list")[0].unread, 1);
@@ -598,7 +601,7 @@ mod tests {
         let conversation = genesis.id();
         client
             .state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
 
@@ -649,7 +652,7 @@ mod tests {
         for envelope in [&genesis, &add, &drop_c] {
             client
                 .state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .expect("store");
         }
@@ -665,7 +668,7 @@ mod tests {
         let fork = message(&b, vec![pa, pc], Some(conversation), vec![add.id()], 0, 2);
         client
             .state
-            .store_envelope(conversation, &fork)
+            .store_envelope(conversation, &fork, 0)
             .await
             .expect("store fork");
 
@@ -701,7 +704,7 @@ mod tests {
         for envelope in [&genesis, &add, &drop_c] {
             client
                 .state
-                .store_envelope(conversation, envelope)
+                .store_envelope(conversation, envelope, 0)
                 .await
                 .expect("store");
         }
@@ -784,7 +787,7 @@ mod tests {
         let conversation = genesis.id();
         client
             .state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
 
@@ -890,7 +893,7 @@ mod tests {
         let conversation = genesis.id();
         client
             .state
-            .store_envelope(conversation, &genesis)
+            .store_envelope(conversation, &genesis, 0)
             .await
             .expect("store");
         client
@@ -933,9 +936,9 @@ mod tests {
         // only way in, and the test shuttles it visibly). All three run real
         // handlers over the loopback.
         let wire = Loopback::new();
-        let (a, a_net, _a_clock) = loop_client("groups", "alice", &wire).await;
-        let (b, b_net, _b_clock) = loop_client("groups", "bob", &wire).await;
-        let (c, c_net, _c_clock) = loop_client("groups", "carol", &wire).await;
+        let (a, a_net, _a_clock) = loop_client(&wire).await;
+        let (b, b_net, _b_clock) = loop_client(&wire).await;
+        let (c, c_net, _c_clock) = loop_client(&wire).await;
         let relay_b = DeviceKey::from_seed([101; 32]).public();
         let relay_c = DeviceKey::from_seed([102; 32]).public();
         let relay_a = DeviceKey::from_seed([103; 32]).public();
@@ -1109,8 +1112,6 @@ mod tests {
             .collect();
         assert!(bob_bodies.contains(&b"just us".to_vec()));
         assert!(bob_bodies.contains(&b"current members only".to_vec()));
-
-        let _ = std::fs::remove_dir_all(temp_root("groups"));
     }
 
     #[tokio::test]
@@ -1222,8 +1223,8 @@ mod tests {
             keystore::create(&key).expect("key");
             let net = TestTransport::new();
             let client = Client::with_transport(
-                keystore::load(&key).expect("load key"),
-                &key,
+                test_device(),
+                TestStore::new(),
                 ClientConfig::default(),
                 TestClock::new(),
                 SystemClock,
@@ -1255,11 +1256,10 @@ mod tests {
             .await
             .expect("send");
         let conversation = alice.state.conversations().await[0];
-        type LoopClient = Client<TestClock, SystemClock, TestTransport>;
         let copy = async |from: &LoopClient, to: &LoopClient| {
             for envelope in from.state.load_envelopes(conversation).await.expect("load") {
                 to.state
-                    .store_envelope(conversation, &envelope)
+                    .store_envelope(conversation, &envelope, 0)
                     .await
                     .expect("copy");
             }

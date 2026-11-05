@@ -154,6 +154,8 @@ impl fmt::Display for StoreOp {
 pub(crate) mod contract;
 #[cfg(test)]
 mod test_store;
+#[cfg(test)]
+pub(crate) use test_store::TestStore;
 
 #[cfg(test)]
 #[allow(non_snake_case)]
