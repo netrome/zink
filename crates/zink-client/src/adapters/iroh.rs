@@ -15,16 +15,24 @@ use iroh::tls::CaTlsConfig;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
+use iroh_blobs::BlobsProtocol;
 use iroh_blobs::Hash;
 use iroh_blobs::protocol::{ChunkRanges, ChunkRangesSeq, ObserveRequest, PushRequest};
+use iroh_blobs::provider::events::{
+    AbortReason, ConnectMode, EventMask, EventSender, ObserveMode, ProviderMessage, RequestMode,
+    RequestUpdate, ThrottleMode,
+};
+use iroh_blobs::store::GcConfig;
+use iroh_blobs::store::ProtectOutcome;
 use iroh_blobs::store::mem::MemStore;
 use n0_future::StreamExt;
-use zink_protocol::{DeviceKey, EncryptedBlob, PublicKey, SYNC_ALPN};
+use zink_protocol::{BlobHash, DeviceKey, EncryptedBlob, PublicKey, SYNC_ALPN};
 
 use crate::error::Error;
 use crate::ports::transport::{
-    Accept, AcceptUni, Close, ConnError, Dial, DialBlobs, DialError, FetchBlob, Home, Inbound,
-    InsertRelay, InvalidRelayUrl, Peer, PushBlob, RemoveRelay, Request, Respond,
+    Accept, AcceptBlobs, AcceptUni, Admit, BlobEvent, Close, ConnError, Dial, DialBlobs, DialError,
+    FetchBlob, Home, Inbound, InsertRelay, InvalidRelayUrl, Peer, PushBlob, RemoveRelay, Request,
+    Respond,
 };
 
 /// One iroh endpoint wearing every port: dialing, blobs, inbound sync
@@ -37,7 +45,16 @@ pub struct IrohTransport {
     /// its lifetime; shut down in `close`.
     router: Arc<Router>,
     inbound: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Inbound<IrohReply>>>>,
+    /// What the blob protocol reports about peers pushing to us, forwarded
+    /// by the event task — `AcceptBlobs`' pull surface.
+    blob_events: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<BlobEvent<IrohAdmit>>>>,
 }
+
+/// How often the inbound blob store drops what it no longer needs to hold.
+/// iroh-blobs 0.103 exposes no public delete, so a pushed blob leaves memory
+/// by garbage collection once nothing protects it (see `PushLedger`) — the
+/// store's own timer, like the relay cache's, not a domain wait.
+const INBOUND_BLOB_GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl IrohTransport {
     /// The endpoint key IS the device key: mailbox auth is the connection.
@@ -75,13 +92,31 @@ impl IrohTransport {
             .await
             .map_err(|e| Error::Transport(format!("bind endpoint: {e}")))?;
         let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let (blob_tx, blob_rx) = tokio::sync::mpsc::channel(16);
+        let ledger = PushLedger::default();
+        let protect = ledger.clone();
+        let store = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
+            gc_config: Some(GcConfig {
+                interval: INBOUND_BLOB_GC_INTERVAL,
+                add_protected: Some(Arc::new(move |protected| {
+                    let protect = protect.clone();
+                    Box::pin(async move {
+                        protect.protect_into(protected);
+                        ProtectOutcome::Continue
+                    })
+                })),
+            }),
+        });
+        let events = inbound_blob_events((*store).clone(), blob_tx, ledger);
         let router = Router::builder(endpoint.clone())
             .accept(SYNC_ALPN, ForwardHandler { tx, max_inbound })
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
             .spawn();
         Ok(Self {
             endpoint,
             router: Arc::new(router),
             inbound: Arc::new(tokio::sync::Mutex::new(rx)),
+            blob_events: Arc::new(tokio::sync::Mutex::new(blob_rx)),
         })
     }
 
@@ -342,6 +377,205 @@ impl ProtocolHandler for ForwardHandler {
         }
         Ok(())
     }
+}
+
+impl AcceptBlobs for IrohTransport {
+    type Admit = IrohAdmit;
+
+    async fn accept_blob(&self) -> Option<BlobEvent<IrohAdmit>> {
+        self.blob_events.lock().await.recv().await
+    }
+}
+
+/// The admission answer for one inbound blob connection: the event task
+/// relays it to the provider, which lets the connection proceed or closes
+/// it with a permission code. Dropped unanswered, the connection is closed.
+pub struct IrohAdmit {
+    tx: tokio::sync::oneshot::Sender<bool>,
+}
+
+impl Admit for IrohAdmit {
+    async fn admit(self, admitted: bool) {
+        let _ = self.tx.send(admitted);
+    }
+}
+
+/// What the inbound blob store must keep: the blobs of every open admitted
+/// connection (a push in flight has no bytes to lose yet, but the sender
+/// confirms completion with an `Observe` on the same connection, which
+/// must still see the blob), plus any blob whose bytes are being read out
+/// for the domain. Everything else is collectable.
+#[derive(Clone, Default)]
+struct PushLedger(Arc<std::sync::Mutex<PushLedgerInner>>);
+
+#[derive(Default)]
+struct PushLedgerInner {
+    /// connection id → (peer, hashes pushed on it)
+    open: std::collections::BTreeMap<u64, (PublicKey, std::collections::BTreeSet<Hash>)>,
+    /// Hashes between "landed" and "handed to the domain".
+    reading: std::collections::BTreeSet<Hash>,
+}
+
+impl PushLedger {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PushLedgerInner> {
+        self.0.lock().expect("push ledger lock")
+    }
+
+    fn opened(&self, connection_id: u64, peer: PublicKey) {
+        self.lock()
+            .open
+            .insert(connection_id, (peer, Default::default()));
+    }
+
+    /// Note a push on `connection_id`; the peer it came from, if the
+    /// connection is one we admitted.
+    fn pushing(&self, connection_id: u64, hash: Hash) -> Option<PublicKey> {
+        let mut inner = self.lock();
+        let (peer, hashes) = inner.open.get_mut(&connection_id)?;
+        hashes.insert(hash);
+        Some(*peer)
+    }
+
+    fn closed(&self, connection_id: u64) -> Option<PublicKey> {
+        self.lock()
+            .open
+            .remove(&connection_id)
+            .map(|(peer, _)| peer)
+    }
+
+    fn protect_into(&self, protected: &mut std::collections::HashSet<Hash>) {
+        let inner = self.lock();
+        for (_, hashes) in inner.open.values() {
+            protected.extend(hashes.iter().copied());
+        }
+        protected.extend(inner.reading.iter().copied());
+    }
+}
+
+/// The event task behind the inbound blob protocol: admission questions go
+/// up as `Connected` (answered through `IrohAdmit`), completed pushes go
+/// up as `Pushed` with their bytes, closes as `Closed`. A client is not a
+/// blob server: `get` requests are refused outright; `observe` is served,
+/// since it is how a pusher confirms its transfer landed.
+///
+/// iroh-blobs 0.103 dispatches *every* request kind on the mask's `get`
+/// entry (upstream quirk, as the relay notes), so `get` carries the
+/// intercept-and-log mode that pushes need and the handler sorts the
+/// request kinds apart itself; the other entries are set to what they would
+/// need once upstream dispatches on them.
+fn inbound_blob_events(
+    store: iroh_blobs::api::Store,
+    up: tokio::sync::mpsc::Sender<BlobEvent<IrohAdmit>>,
+    ledger: PushLedger,
+) -> EventSender {
+    let mask = EventMask {
+        connected: ConnectMode::Intercept,
+        get: RequestMode::InterceptLog,
+        get_many: RequestMode::InterceptLog,
+        push: RequestMode::InterceptLog,
+        observe: ObserveMode::Intercept,
+        throttle: ThrottleMode::None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            match message {
+                ProviderMessage::ClientConnected(msg) => {
+                    let connection_id = msg.inner.connection_id;
+                    let Some(id) = msg.inner.endpoint_id else {
+                        msg.tx.send(Err(AbortReason::Permission)).await.ok();
+                        continue;
+                    };
+                    let peer = PublicKey(*id.as_bytes());
+                    let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+                    ledger.opened(connection_id, peer);
+                    if up
+                        .send(BlobEvent::Connected {
+                            peer,
+                            admit: IrohAdmit { tx: answer_tx },
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break; // the client is gone; stop serving
+                    }
+                    // Answered on its own task so one slow decision never
+                    // blocks another connection's events. A declined
+                    // connection gets no close event from the provider, so
+                    // its ledger entry goes here.
+                    let ledger = ledger.clone();
+                    tokio::spawn(async move {
+                        let admitted = answer_rx.await.unwrap_or(false);
+                        if !admitted {
+                            ledger.closed(connection_id);
+                        }
+                        msg.tx
+                            .send(if admitted {
+                                Ok(())
+                            } else {
+                                Err(AbortReason::Permission)
+                            })
+                            .await
+                            .ok();
+                    });
+                }
+                ProviderMessage::ConnectionClosed(msg) => {
+                    if let Some(peer) = ledger.closed(msg.inner.connection_id)
+                        && up.send(BlobEvent::Closed { peer }).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                ProviderMessage::PushRequestReceived(msg) => {
+                    let hash = msg.inner.request.hash;
+                    let Some(peer) = ledger.pushing(msg.inner.connection_id, hash) else {
+                        msg.tx.send(Err(AbortReason::Permission)).await.ok();
+                        continue;
+                    };
+                    msg.tx.send(Ok(())).await.ok();
+                    // Completion is the transfer's own report: the store
+                    // verified every chunk against `hash` on the way in.
+                    let (store, up, ledger, mut updates) =
+                        (store.clone(), up.clone(), ledger.clone(), msg.rx);
+                    tokio::spawn(async move {
+                        while let Ok(Some(update)) = updates.recv().await {
+                            if !matches!(update, RequestUpdate::Completed(_)) {
+                                continue;
+                            }
+                            ledger.lock().reading.insert(hash);
+                            match store.get_bytes(hash).await {
+                                Ok(bytes) => {
+                                    let blob = EncryptedBlob {
+                                        hash: BlobHash(*hash.as_bytes()),
+                                        bytes: bytes.to_vec(),
+                                    };
+                                    let _ = up.send(BlobEvent::Pushed { peer, blob }).await;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%hash, %error, "pushed blob not readable")
+                                }
+                            }
+                            ledger.lock().reading.remove(&hash);
+                        }
+                    });
+                }
+                ProviderMessage::ObserveRequestReceived(msg) => {
+                    msg.tx.send(Ok(())).await.ok();
+                }
+                ProviderMessage::GetRequestReceived(msg) => {
+                    msg.tx.send(Err(AbortReason::Permission)).await.ok();
+                }
+                ProviderMessage::GetManyRequestReceived(msg) => {
+                    msg.tx.send(Err(AbortReason::Permission)).await.ok();
+                }
+                ProviderMessage::Throttle(msg) => {
+                    msg.tx.send(Ok(())).await.ok();
+                }
+                _ => {}
+            }
+        }
+    });
+    EventSender::new(tx, mask)
 }
 
 impl Home for IrohTransport {

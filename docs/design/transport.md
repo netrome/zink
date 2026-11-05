@@ -56,8 +56,8 @@ signature. Async methods are RPITIT (`impl Future + Send`), as in
 /// Blanket-implemented — nothing implements it by name; helpers take the
 /// narrowest verb they exercise.
 pub trait Transport:
-    Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone {}
-impl<T: Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone>
+    Dial + DialBlobs + Accept + AcceptBlobs + Home + InsertRelay + RemoveRelay + Close + Clone {}
+impl<T: Dial + DialBlobs + Accept + AcceptBlobs + Home + InsertRelay + RemoveRelay + Close + Clone>
     Transport for T {}
 
 pub trait Dial: Send + Sync + 'static {
@@ -107,6 +107,25 @@ pub trait Accept: Send + Sync + 'static {
 pub trait Respond: Send + 'static {
     fn respond(self, frame: &[u8])
         -> impl Future<Output = Result<(), ConnError>> + Send;
+}
+
+/// Inbound blob pushes — the recipient half of peer blob delivery (project 10).
+/// A pull surface like `Accept`: the adapter runs the blob protocol and reports;
+/// the domain answers the one policy question (who may push) and takes what lands.
+pub trait AcceptBlobs: Send + Sync + 'static {
+    type Admit: Admit;
+    fn accept_blob(&self) -> impl Future<Output = Option<BlobEvent<Self::Admit>>> + Send;
+}
+pub trait Admit: Send + 'static {
+    fn admit(self, admitted: bool) -> impl Future<Output = ()> + Send;
+}
+pub enum BlobEvent<A> {
+    /// Nothing flows until `admit` answers; declining closes the connection
+    /// (on the wire, a full cache) and reports no `Closed`.
+    Connected { peer: PublicKey, admit: A },
+    /// Landed whole; the transport verified the bytes hash to `blob.hash`.
+    Pushed { peer: PublicKey, blob: EncryptedBlob },
+    Closed { peer: PublicKey },
 }
 
 /// To home — attach to a home relay, the transition that makes this endpoint
@@ -327,8 +346,11 @@ The kit: `ScriptedDial` (per-key connect/hold queues, plus a `dialed` counter
 `ScriptedConn` (exact-frame replies, a sent-request recorder),
 `Loopback`/`LoopConn` (the wiring), `ChannelAccept` (inject an inbound
 request, await the served response), `TestHome` (pends — the online smoke
-stays real-network), `ScriptedDialBlobs` (panics until the first blob
-migration). The archetype (tracker §4), landed as
+stays real-network), `TestBlobs` (per-key blob caches that hold pushes and
+serve fetches, or hold a dial; wired keys route to the peer's real gate),
+`ChannelBlobs` (inject a knock / a landed blob / a close), and a `WireLog`
+every double appends to — the one ordered record that makes "the blobs
+landed before the deposit" an assertion. The archetype (tracker §4), landed as
 `delivery__should_recover_when_a_dead_relay_returns`, 7 ms:
 
 ```rust

@@ -15,7 +15,7 @@ use zink_protocol::{
 use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
-use crate::ports::transport::Transport;
+use crate::ports::transport::{PushBlob, Transport};
 use crate::{blobs, net};
 
 use super::history::participants_of;
@@ -414,26 +414,45 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         } = staged;
         let (id, conversation) = (*id, *conversation);
 
-        // Referent before reference (project 10 S1): for a blob message,
-        // every relay holds the blobs before anything can reference them —
-        // the direct handoff below and the deposits after it. A recipient
-        // fetches blob bytes from its own relay's cache (C3a) the moment the
-        // envelope lands, whichever path it came by, so the pushes settle
-        // first; an instant envelope with a blank image is not a win. Text
-        // — the dominant case — skips this phase entirely. Concurrent per
-        // relay, like the deposits.
-        let pushed: BTreeMap<&String, Result<(), Error>> = if blobs.is_empty() {
-            BTreeMap::new()
-        } else {
-            n0_future::join_all(
-                relays
-                    .iter()
-                    .map(|relay| async move { (relay, self.push_blobs_to(relay, blobs).await) }),
-            )
-            .await
-            .into_iter()
-            .collect()
+        // Referent before reference (project 10): a message is never
+        // deliverable anywhere before its blobs are fetchable there. Text —
+        // the dominant case — skips both blob phases entirely.
+        //
+        // Phase B first: the blobs straight to each recipient device. A
+        // device that took every blob renders the image from its own cache
+        // the moment the envelope lands, and needs no relay cache for this
+        // message at all.
+        let took_blobs = self
+            .push_blobs_direct(&envelope.core.recipients, blobs)
+            .await;
+        let took_blobs = &took_blobs;
+        let hosted_by = |relay: &String| -> Vec<&PublicKey> {
+            hosted
+                .iter()
+                .filter(|(_, relays)| relays.contains(relay))
+                .map(|(key, _)| key)
+                .collect()
         };
+        // Then S1: every relay hosting a recipient that did *not* take the
+        // blobs gets them before anything can reference them — the direct
+        // handoff below and the deposits after it — since that recipient
+        // fetches blob bytes from its relay's cache (C3a) whichever path the
+        // envelope came by. An instant envelope with a blank image is not a
+        // win. Concurrent per relay, like the deposits.
+        let needs_relay_blobs = |relay: &String| {
+            let here = hosted_by(relay);
+            !blobs.is_empty()
+                && (here.is_empty() || here.iter().any(|key| !took_blobs.contains(*key)))
+        };
+        let pushed: BTreeMap<&String, Result<(), Error>> = n0_future::join_all(
+            relays
+                .iter()
+                .filter(|relay| needs_relay_blobs(relay))
+                .map(|relay| async move { (relay, self.push_blobs_to(relay, blobs).await) }),
+        )
+        .await
+        .into_iter()
+        .collect();
         let pushed = &pushed;
 
         // Direct delivery (D5): hand the envelope to the recipients
@@ -453,25 +472,20 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         }
 
         // Which relays direct delivery discharges entirely (direct-delivery
-        // .md §3): every recipient the relay hosts acked. The outbox ledger
-        // is per (message, relay), and one relay can host several recipients
-        // — a deposit fans out to all of them — so this must be *all*, not
-        // *any*, or a group send silently loses the un-acked members.
-        //
-        // Blobs keep their relays on the path regardless: a recipient fetches
-        // blob bytes from its own relay's cache (C3a), so an image message
-        // still needs the push, and pushing while skipping the deposit buys
-        // little (the relay sees the sender either way). Peer blob transfer
-        // would close that gap — a later slice.
+        // .md §3): every recipient the relay hosts acked the envelope *and*
+        // took the blobs (project 10 phase B — before it, any blob kept
+        // every relay on the path). The outbox ledger is per (message,
+        // relay), and one relay can host several recipients — a deposit
+        // fans out to all of them — so this must be *all*, not *any*, or a
+        // group send silently loses the un-acked members.
         let discharged = |relay: &String| {
-            let here: Vec<&PublicKey> = hosted
-                .iter()
-                .filter(|(_, relays)| relays.contains(relay))
-                .map(|(key, _)| key)
-                .collect();
+            let here = hosted_by(relay);
             // A relay hosting no recipient at all is never "discharged" —
             // `all` over nothing is vacuously true, which would be wrong.
-            blobs.is_empty() && !here.is_empty() && here.iter().all(|key| direct.contains(*key))
+            !here.is_empty()
+                && here.iter().all(|key| {
+                    direct.contains(*key) && (blobs.is_empty() || took_blobs.contains(*key))
+                })
         };
 
         // Concurrent per relay (De6d): relays are independent, and serially
@@ -495,13 +509,25 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // this synchronous pass, not to the concurrent one.
         let deliveries: Vec<&String> = deliveries.collect();
         let outcomes = n0_future::join_all(deliveries.into_iter().map(|relay| async move {
-            // A relay that did not take the blobs gets no deposit: the
-            // envelope would be deliverable there before its blobs are
-            // fetchable — the race again. The entry stays owed; the flush
-            // retries push-then-deposit.
-            if let Some(Err(error)) = pushed.get(relay) {
-                tracing::warn!(relay, %error, "blob push failed; deposit withheld, queued for retry");
-                return Some(error.to_string());
+            match pushed.get(relay) {
+                // A relay that did not take the blobs gets no deposit: the
+                // envelope would be deliverable there before its blobs are
+                // fetchable — the race again. The entry stays owed; the
+                // flush retries push-then-deposit.
+                Some(Err(error)) => {
+                    tracing::warn!(relay, %error, "blob push failed; deposit withheld, queued for retry");
+                    return Some(error.to_string());
+                }
+                Some(Ok(())) => {}
+                // Every recipient here took the blobs directly, yet one did
+                // not ack the handoff: its mailbox copy needs the relay
+                // cache after all — push, then deposit.
+                None => {
+                    if let Err(error) = self.push_blobs_to(relay, blobs).await {
+                        tracing::warn!(relay, %error, "blob push failed; deposit withheld, queued for retry");
+                        return Some(error.to_string());
+                    }
+                }
             }
             match self.deposit_to(relay, envelope).await {
                 Ok(()) => {
@@ -538,6 +564,82 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             direct_recipients: direct.len(),
             skipped_relays,
         })
+    }
+
+    /// Hand a message's blobs straight to each recipient device (project 10
+    /// phase B): dial by key on the blobs ALPN and push every blob, counting
+    /// only a recipient that took them all — `PushBlob::push` resolves on
+    /// confirmed receipt, so its cache holds the bytes before the envelope
+    /// that references them goes anywhere. Returns those keys; every other
+    /// recipient gets the blobs through its relay cache (S1).
+    ///
+    /// Same discipline as `deliver_direct`: concurrent, budgeted per
+    /// recipient by the reach ledger, routeless recipients skipped without
+    /// a dial. A dial that gets nowhere is reach evidence; a peer that
+    /// answered and declined (a non-contact's gate) is reachable, so no
+    /// cooldown — exactly as a declined `Deliver` is treated.
+    async fn push_blobs_direct(
+        &self,
+        recipients: &[PublicKey],
+        blobs: &[zink_protocol::EncryptedBlob],
+    ) -> BTreeSet<PublicKey> {
+        if blobs.is_empty() {
+            return BTreeSet::new();
+        }
+        let now = self.wall_clock.now_ms();
+        let mut targets = Vec::new();
+        for key in recipients.iter().copied() {
+            let Some(budget) = self
+                .reach
+                .dial_budget(&key, now, self.config.connect_timeout)
+            else {
+                tracing::debug!("blobs direct: recently unreachable; relay cache only");
+                continue;
+            };
+            let stored = self.trusted_record_for(&key);
+            match self.peer_addr_for(key, stored.as_ref()) {
+                Ok(addr) => targets.push((key, addr, budget)),
+                Err(_) => tracing::debug!("blobs direct: no dialable route; relay cache only"),
+            }
+        }
+        let dialed = !targets.is_empty();
+        let pushes = targets.into_iter().map(|(key, addr, timeout)| async move {
+            let connection = match self
+                .clock
+                .timeout(timeout, self.transport.dial_blobs(&addr))
+                .await
+            {
+                Ok(Ok(connection)) => connection,
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "blobs direct: recipient unreachable");
+                    self.reach.note_failed(&key, now);
+                    return None;
+                }
+                Err(_) => {
+                    tracing::debug!("blobs direct: dial timed out");
+                    self.reach.note_failed(&key, now);
+                    return None;
+                }
+            };
+            for blob in blobs {
+                if let Err(error) = connection.push(blob).await {
+                    tracing::debug!(%error, "blobs direct: recipient did not take the blobs");
+                    self.reach.note_seen(&key, now);
+                    return None;
+                }
+            }
+            self.reach.note_seen(&key, now);
+            Some(key)
+        });
+        let took: BTreeSet<PublicKey> = n0_future::join_all(pushes)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        if dialed {
+            self.persist_unreachable(now);
+        }
+        took
     }
 
     /// Try to hand `envelope` straight to each recipient device (D5,
@@ -717,9 +819,9 @@ mod tests {
     use super::*;
     use crate::adapters::system_clock::SystemClock;
     use crate::client::test_kit::{
-        LoopClient, deposited_envelopes, deposited_frame, loop_client, mailbox_only, mailbox_spec,
-        message, open_homed, open_homed_with, record_with_dead_mailbox, routed_record,
-        script_drain, sealed_for, spawn_test_relay, temp_key, temp_root,
+        LoopClient, deposited_envelopes, deposited_frame, loop_client, loop_client_with,
+        mailbox_only, mailbox_spec, message, open_homed, open_homed_with, record_with_dead_mailbox,
+        routed_record, script_drain, sealed_for, spawn_test_relay, temp_key, temp_root,
     };
     use crate::client::{ClientConfig, Received};
     use crate::ports::clock::{TestClock, TestWallClock};
@@ -901,21 +1003,37 @@ mod tests {
         deposit || deliver
     }
 
-    /// A and B wired directly, each holding the other's record; B
-    /// mailboxed at `relay_b`.
+    /// A and B wired directly, A holding B's record (B mailboxed at
+    /// `relay_b`) and — when `b_trusts_a` — B holding A's, which is what
+    /// opens B's serving gate to A's `Deliver` and blob pushes alike.
+    /// `b_takes_blobs` false puts B's blob gate at a zero connection cap:
+    /// B declines pushes (reachable, no cooldown) while still taking the
+    /// envelope — the one configuration where a trusted peer's relay must
+    /// still carry the blobs.
     async fn wired_pair(
         test: &str,
         wire: &Loopback,
         relay_b: &PublicKey,
+        b_trusts_a: bool,
+        b_takes_blobs: bool,
     ) -> (LoopClient, TestTransport, TestClock, LoopClient) {
         let (a, a_net, a_clock) = loop_client(test, "a", wire);
-        let (b, _b_net, _b_clock) = loop_client(test, "b", wire);
+        let b_config = ClientConfig {
+            blob_limits: crate::blobs::BlobLimits {
+                max_connections_per_peer: if b_takes_blobs { 2 } else { 0 },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (b, _b_net, _b_clock) = loop_client_with(test, "b", wire, b_config);
         let relay_a = DeviceKey::from_seed([137; 32]).public();
-        b.add_contact(
-            &routed_record(a.public_key(), &relay_a),
-            Some("a".to_string()),
-        )
-        .expect("B adds A");
+        if b_trusts_a {
+            b.add_contact(
+                &routed_record(a.public_key(), &relay_a),
+                Some("a".to_string()),
+            )
+            .expect("B adds A");
+        }
         a.add_contact(
             &routed_record(b.public_key(), relay_b),
             Some("b".to_string()),
@@ -940,12 +1058,14 @@ mod tests {
     #[tokio::test]
     async fn send__should_push_every_blob_before_the_envelope_can_be_referenced() {
         // Given: B's relay answers on both ALPNs — a blob cache and a
-        // mailbox. The project 7 live run saw the envelope land (deposit →
+        // mailbox — and B takes the envelope directly but not the blobs
+        // (phase B: at its cap), so the relay cache is where B will fetch
+        // from. The project 7 live run saw the envelope land (deposit →
         // nudge, or the direct handoff) while the push was still in flight,
         // so B's first fetch missed the cache.
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([138; 32]).public();
-        let (a, a_net, _clock, b) = wired_pair("blobs-first", &wire, &relay_b).await;
+        let (a, a_net, _clock, b) = wired_pair("blobs-first", &wire, &relay_b, true, false).await;
         a_net.blobs.cache(&relay_b);
         a_net.dial.connect(&relay_b).reply(deposited_frame());
 
@@ -1008,22 +1128,153 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_root("blobs-first"));
     }
 
+    /// Pushes resolve on queueing in the double; the cache write happens
+    /// on the recipient's blob task. Yield until it has.
+    async fn landed(client: &LoopClient, hash: &BlobHash) -> bool {
+        for _ in 0..200 {
+            if client.state.load_blob(hash).is_some() {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+        false
+    }
+
+    fn pushed_to(events: &[WireEvent], to: PublicKey) -> Vec<BlobHash> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                WireEvent::Pushed { to: target, hash } if *target == to => Some(*hash),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn first_reference_to(events: &[WireEvent], to: PublicKey) -> Option<usize> {
+        events.iter().position(|event| {
+            matches!(event, WireEvent::Request { to: target, frame } if *target == to && references_the_envelope(frame))
+        })
+    }
+
+    #[tokio::test]
+    async fn send__should_hand_blobs_to_the_recipient_and_skip_the_relay_entirely() {
+        // Given: B trusts A, so B's gate admits A's blob pushes and its
+        // `Deliver`. B's relay is deliberately *unscripted*: any dial to it
+        // — cache or mailbox — would panic, which is the assertion that the
+        // relay never learns this image exists.
+        let wire = Loopback::new();
+        let relay_b = DeviceKey::from_seed([140; 32]).public();
+        let (a, a_net, _clock, b) = wired_pair("blobs-direct", &wire, &relay_b, true, true).await;
+
+        // When: an image
+        let receipt = a
+            .send(
+                &[a.resolve_contact("b").expect("resolve")],
+                b"look at this".to_vec(),
+                an_image(),
+            )
+            .await
+            .expect("send");
+
+        // Then: delivered whole, peer-to-peer — envelope and both blobs —
+        // and the relay discharged without a single dial
+        assert_eq!(receipt.direct_recipients, 1);
+        assert_eq!(receipt.skipped_relays, 1, "the relay never heard of it");
+        assert_eq!(receipt.pending_relays, 0);
+        assert!(a.state.outbox().is_empty(), "nothing owed");
+        let events = a_net.log.events();
+        let pushed = pushed_to(&events, b.public_key());
+        assert_eq!(pushed.len(), 2, "both blobs went to B: {events:?}");
+        let handoff = first_reference_to(&events, b.public_key()).expect("the handoff");
+        let last_push = events
+            .iter()
+            .rposition(
+                |event| matches!(event, WireEvent::Pushed { to, .. } if *to == b.public_key()),
+            )
+            .expect("pushes");
+        assert!(last_push < handoff, "blobs before the envelope: {events:?}");
+        // …and B renders the image from its own cache: both blobs open
+        // against the envelope it holds, no relay on the path
+        for hash in &pushed {
+            assert!(landed(&b, hash).await, "B's cache holds the pushed blob");
+            let plaintext = b
+                .fetch_stored_blob(receipt.conversation, receipt.id, hash)
+                .await
+                .expect("opens from the cache");
+            assert!(plaintext == vec![1; 64] || plaintext == vec![2; 4096]);
+        }
+
+        let _ = std::fs::remove_dir_all(temp_root("blobs-direct"));
+    }
+
+    #[tokio::test]
+    async fn send__should_fall_back_to_the_relay_cache_when_the_recipient_declines_the_blobs() {
+        // Given: B does not know A — a stranger's blob connection is
+        // declined at B's gate (as its `Deliver` will be), so the blobs
+        // must reach B through its relay cache, and before the deposit
+        let wire = Loopback::new();
+        let relay_b = DeviceKey::from_seed([141; 32]).public();
+        let (a, a_net, _clock, b) =
+            wired_pair("blobs-declined", &wire, &relay_b, false, true).await;
+        a_net.blobs.cache(&relay_b);
+        a_net.dial.connect(&relay_b).reply(deposited_frame());
+
+        // When
+        let receipt = a
+            .send(
+                &[a.resolve_contact("b").expect("resolve")],
+                b"look at this".to_vec(),
+                an_image(),
+            )
+            .await
+            .expect("send");
+
+        // Then: the pre-phase-B path exactly — relay cache, then deposit —
+        // with nothing landing on B directly and no reach cooldown for a
+        // peer that answered
+        assert_eq!(receipt.direct_recipients, 0);
+        assert_eq!(receipt.skipped_relays, 0);
+        assert_eq!(receipt.pending_relays, 0, "the relay took it");
+        let events = a_net.log.events();
+        assert!(
+            pushed_to(&events, b.public_key()).is_empty(),
+            "B took nothing: {events:?}"
+        );
+        assert_eq!(
+            a_net.blobs.held(&relay_b).len(),
+            2,
+            "the relay cache has both"
+        );
+        let last_relay_push = events
+            .iter()
+            .rposition(|event| matches!(event, WireEvent::Pushed { to, .. } if *to == relay_b))
+            .expect("relay pushes");
+        let deposit = first_reference_to(&events, relay_b).expect("the deposit");
+        assert!(
+            last_relay_push < deposit,
+            "cache before deposit: {events:?}"
+        );
+        for hash in a_net.blobs.held(&relay_b) {
+            assert!(b.state.load_blob(&hash).is_none(), "B's cache stayed empty");
+        }
+
+        let _ = std::fs::remove_dir_all(temp_root("blobs-declined"));
+    }
+
     #[tokio::test]
     async fn send__should_withhold_the_deposit_from_a_relay_that_did_not_take_the_blobs() {
-        // Given: B's relay mailbox is fine but its blob cache is down. The
-        // mailbox dial is deliberately *unscripted*: a deposit attempt would
-        // panic — which is the assertion. The direct handoff still goes.
+        // Given: B's relay mailbox is fine but its blob cache takes nothing
+        // (full, say) — and B itself takes the envelope but not the blobs.
+        // The mailbox dial is deliberately *unscripted*: a deposit attempt
+        // would panic — which is the assertion. The direct handoff still goes.
         let wire = Loopback::new();
         let relay_b = DeviceKey::from_seed([139; 32]).public();
-        let (a, a_net, clock, b) = wired_pair("blobs-down", &wire, &relay_b).await;
-        a_net.blobs.hold(&relay_b);
+        let (a, a_net, _clock, b) = wired_pair("blobs-down", &wire, &relay_b, true, false).await;
+        a_net.blobs.refuse(&relay_b);
 
-        // When: the send, with the clock run past the blob-connect deadline
+        // When
         let to = [a.resolve_contact("b").expect("resolve")];
-        let (result, ()) = tokio::join!(a.send(&to, b"look at this".to_vec(), an_image()), async {
-            clock.wait_for_sleepers(1).await;
-            clock.advance(ClientConfig::default().connect_timeout);
-        });
+        let result = a.send(&to, b"look at this".to_vec(), an_image()).await;
 
         // Then: delivered to B directly, the relay still owed in full —
         // an envelope deposited without its blobs would be the race again

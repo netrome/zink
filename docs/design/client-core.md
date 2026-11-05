@@ -38,9 +38,10 @@ Client::open_with(key_path, ClientConfig)     // …with edge-injected tuning (e
                                               // ZINK_CONNECT_TIMEOUT_MS onto it so the
                                               // e2e suite's down-relay tests run fast)
 Client::open_or_create(key_path)              // app: silent first-run key creation
-client.send(&[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt  // seal → push blobs to
-                                              // every distinct relay → direct → deposit
-                                              // (retry): referent before reference
+client.send(&[Contact], Vec<u8>, Vec<BlobDraft>) -> SendReceipt  // seal → blobs to each
+                                              // recipient device → blobs to the relays
+                                              // still needed → direct → deposit (retry):
+                                              // referent before reference, every hop
 client.recv(&[relay]) -> RecvReport           // register → page-fetch → dedup by id →
                                               // open → remember → ack each page.
                                               // Best-effort PER RELAY (De6a): a relay

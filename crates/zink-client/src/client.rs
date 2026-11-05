@@ -62,6 +62,9 @@ pub struct ClientConfig {
     /// only an edge that prefers speed to a clean log (the e2e harness)
     /// shortens it.
     pub close_deadline: Duration,
+    /// What this device accepts from peers pushing blobs to it directly
+    /// (project 10 phase B); see `blobs::BlobLimits`.
+    pub blob_limits: crate::blobs::BlobLimits,
 }
 
 impl Default for ClientConfig {
@@ -69,6 +72,7 @@ impl Default for ClientConfig {
         Self {
             connect_timeout: Duration::from_secs(10),
             close_deadline: Duration::from_secs(5),
+            blob_limits: crate::blobs::BlobLimits::default(),
         }
     }
 }
@@ -104,6 +108,9 @@ pub struct Client<
     /// (peer history sync, D0; direct delivery, D5) off the transport for as
     /// long as the client lives. Aborted on drop.
     _serve_task: n0_future::task::AbortOnDropHandle<()>,
+    /// The blob side of serving (project 10 phase B): pulls what peers push
+    /// off the transport, gated as `_serve_task` gates `Deliver`.
+    _blob_task: n0_future::task::AbortOnDropHandle<()>,
     /// The edge's sink for directly-delivered messages (D5), shared with the
     /// router's handler. Registered after open via `on_direct_delivery`.
     direct_sink: crate::sync::DirectSink,
@@ -237,6 +244,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let serve_task = n0_future::task::AbortOnDropHandle::new(n0_future::task::spawn(
             crate::sync::serve(transport.clone(), handler),
         ));
+        let gate = crate::blobs::BlobGate::new(state.clone(), device.public(), config.blob_limits);
+        let blob_task = n0_future::task::AbortOnDropHandle::new(n0_future::task::spawn(
+            crate::blobs::serve_pushes(transport.clone(), gate),
+        ));
         let client = Self {
             device,
             transport,
@@ -245,6 +256,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             asked: who_is::AskedOnce::default(),
             refreshed: who_is::RefreshLedger::default(),
             _serve_task: serve_task,
+            _blob_task: blob_task,
             direct_sink,
             reach,
             clock,
@@ -545,6 +557,83 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("qad"));
+    }
+
+    #[tokio::test]
+    async fn image__should_travel_peer_to_peer_over_real_iroh_blobs() {
+        // REAL-NETWORK SMOKE (P7, transport.md §8): the inbound blob protocol end to end.
+        // Given: B homed and serving, trusting A; A holds B's record with
+        // the relay URL (dialable by key) and a mailbox nobody will ever
+        // dial. A sends an image.
+        use zink_protocol::{BlobDraft, BlobKind};
+        let (_relay, url) = spawn_test_relay().await;
+        let b = open_homed("blobs-p2p", "responder", &url).await;
+        let a = Client::open_or_create(&temp_key("blobs-p2p", "sender"))
+            .await
+            .expect("open A");
+        befriend(&b.state, a.public_key());
+        a.add_contact(
+            &ContactRecord::new(
+                vec![b.public_key()],
+                vec![],
+                vec![RelayEntry {
+                    mailbox: "unused@203.0.113.1:1".to_string(),
+                    relay_url: Some(url.clone()),
+                }],
+            ),
+            Some("bob".to_string()),
+        )
+        .expect("add bob");
+        b.transport.online().await;
+
+        // When
+        let receipt = a
+            .send(
+                &[a.resolve_contact("bob").expect("resolve")],
+                b"a photo".to_vec(),
+                vec![
+                    BlobDraft {
+                        kind: BlobKind::Thumbnail,
+                        plaintext: vec![3; 2_000],
+                    },
+                    BlobDraft {
+                        kind: BlobKind::Full,
+                        plaintext: vec![4; 100_000],
+                    },
+                ],
+            )
+            .await
+            .expect("send");
+
+        // Then: blobs over iroh-blobs and the envelope over the sync ALPN,
+        // both peer-to-peer — the relay (unreachable by design) was never
+        // needed, and B opens both blobs from its own cache
+        assert_eq!(receipt.direct_recipients, 1, "B took the envelope");
+        assert_eq!(receipt.skipped_relays, 1, "and the blobs, so no relay");
+        let envelope = a
+            .state
+            .load_envelope(receipt.conversation, receipt.id)
+            .expect("stored");
+        assert_eq!(envelope.core.blob_refs.len(), 2);
+        for blob_ref in &envelope.core.blob_refs {
+            // The push confirmed B's store holds it; B's cache write
+            // follows on B's own task, a few polls behind at most.
+            let started = std::time::Instant::now();
+            while b.state.load_blob(&blob_ref.hash).is_none() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "B's cache never took the pushed blob"
+                );
+                n0_future::time::sleep(Duration::from_millis(20)).await;
+            }
+            let plaintext = b
+                .fetch_stored_blob(receipt.conversation, receipt.id, &blob_ref.hash)
+                .await
+                .expect("opens from the cache");
+            assert!(plaintext == vec![3; 2_000] || plaintext == vec![4; 100_000]);
+        }
+
+        let _ = std::fs::remove_dir_all(temp_root("blobs-p2p"));
     }
 
     #[tokio::test]

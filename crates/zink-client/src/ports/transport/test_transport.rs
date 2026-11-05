@@ -19,8 +19,9 @@ use std::sync::{Arc, Mutex};
 use zink_protocol::{BlobHash, EncryptedBlob, PublicKey};
 
 use super::{
-    Accept, AcceptUni, Close, ConnError, Dial, DialBlobs, DialError, FetchBlob, Home, Inbound,
-    InsertRelay, InvalidRelayUrl, Peer, PushBlob, RemoveRelay, Request, Respond,
+    Accept, AcceptBlobs, AcceptUni, Admit, BlobEvent, Close, ConnError, Dial, DialBlobs, DialError,
+    FetchBlob, Home, Inbound, InsertRelay, InvalidRelayUrl, Peer, PushBlob, RemoveRelay, Request,
+    Respond,
 };
 use crate::hex;
 
@@ -31,6 +32,9 @@ pub(crate) struct TestTransport {
     pub dial: ScriptedDial,
     pub blobs: TestBlobs,
     pub accept: ChannelAccept,
+    /// Inbound blob events — what a wired peer's blob dial lands in, or
+    /// what a test injects directly.
+    pub blob_accept: ChannelBlobs,
     pub home: TestHome,
     /// Every domain-initiated wire act, in the order it happened, across
     /// scripted dials, wired peers and blob caches alike — the one place
@@ -52,6 +56,7 @@ impl TestTransport {
             dial: ScriptedDial::default(),
             blobs: TestBlobs::new(log.clone()),
             accept: ChannelAccept::new(),
+            blob_accept: ChannelBlobs::new(),
             home: TestHome,
             log,
             relays: Arc::new(Mutex::new(Vec::new())),
@@ -76,7 +81,7 @@ impl Dial for TestTransport {
                 .map(|conn| logged(Link::Scripted(conn)));
         }
         if let Some((me, loopback)) = &self.wiring
-            && let Some(target) = loopback.target(&to.key)
+            && let Some((target, _)) = loopback.target(&to.key)
         {
             return Ok(logged(Link::Routed(LoopConn {
                 caller: *me,
@@ -89,8 +94,32 @@ impl Dial for TestTransport {
 
 impl DialBlobs for TestTransport {
     type Conn = TestBlobConn;
+    /// Scripted caches first (a relay the test stood up), then wiring (a
+    /// peer client whose real gate answers), then the loud default.
     async fn dial_blobs(&self, to: &Peer) -> Result<TestBlobConn, DialError> {
-        self.blobs.dial_blobs(to).await
+        if self.blobs.scripted(&to.key) {
+            return self.blobs.dial_blobs(to).await;
+        }
+        if let Some((me, loopback)) = &self.wiring
+            && let Some((_, target)) = loopback.target(&to.key)
+        {
+            let admitted = target.inject_connect(*me).await.unwrap_or(false);
+            return Ok(TestBlobConn::Routed(LoopBlobConn {
+                caller: *me,
+                to: to.key,
+                target,
+                admitted,
+                log: self.log.clone(),
+            }));
+        }
+        panic!("unscripted blob dial to {}", hex::encode(&to.key.0));
+    }
+}
+
+impl AcceptBlobs for TestTransport {
+    type Admit = TestAdmit;
+    async fn accept_blob(&self) -> Option<BlobEvent<TestAdmit>> {
+        self.blob_accept.accept_blob().await
     }
 }
 
@@ -303,7 +332,10 @@ impl WireLog {
 /// requests land in that client's accept queue — both ends run their real
 /// domain logic. Unregistered keys still need scripts.
 #[derive(Clone, Default)]
-pub(crate) struct Loopback(Arc<Mutex<BTreeMap<[u8; 32], ChannelAccept>>>);
+pub(crate) struct Loopback(Arc<Mutex<BTreeMap<[u8; 32], Wired>>>);
+
+/// One wired client's two inbound queues: sync requests and blob events.
+type Wired = (ChannelAccept, ChannelBlobs);
 
 impl Loopback {
     pub(crate) fn new() -> Self {
@@ -314,17 +346,17 @@ impl Loopback {
     /// built on it can be dialed as, and dials others through.
     pub(crate) fn transport(&self, key: PublicKey) -> TestTransport {
         let transport = TestTransport::new();
-        self.0
-            .lock()
-            .expect("loopback lock")
-            .insert(key.0, transport.accept.clone());
+        self.0.lock().expect("loopback lock").insert(
+            key.0,
+            (transport.accept.clone(), transport.blob_accept.clone()),
+        );
         TestTransport {
             wiring: Some((key, self.clone())),
             ..transport
         }
     }
 
-    fn target(&self, key: &PublicKey) -> Option<ChannelAccept> {
+    fn target(&self, key: &PublicKey) -> Option<Wired> {
         self.0.lock().expect("loopback lock").get(&key.0).cloned()
     }
 }
@@ -411,14 +443,15 @@ impl AcceptUni for ScriptedConn {
 
 /// Blob caches, one per scripted key: `cache(&key)` says a cache answers
 /// at `key` from now on — pushes are held (and logged) and fetches serve
-/// what is held, exactly the relay contract. A blob dial to a key no test
-/// scripted is unscripted — loudly, like a dial.
+/// what is held, exactly the relay contract; `refuse(&key)` one that
+/// connects but takes nothing. A blob dial to a key no test scripted and
+/// no loopback wires is unscripted — loudly, like a dial.
 #[derive(Clone)]
 pub(crate) struct TestBlobs {
     caches: Arc<Mutex<BTreeMap<[u8; 32], Held>>>,
-    /// Keys whose next blob dial hangs until the caller's deadline drops
-    /// it — consumed one per attempt, like `ScriptedDial::hold`.
-    holds: Arc<Mutex<BTreeMap<[u8; 32], usize>>>,
+    /// Caches that connect but take nothing — full, or declining us; on
+    /// the wire the two look the same.
+    refusing: Arc<Mutex<std::collections::BTreeSet<[u8; 32]>>>,
     log: WireLog,
 }
 
@@ -428,20 +461,16 @@ impl TestBlobs {
     fn new(log: WireLog) -> Self {
         Self {
             caches: Arc::new(Mutex::new(BTreeMap::new())),
-            holds: Arc::new(Mutex::new(BTreeMap::new())),
+            refusing: Arc::new(Mutex::new(Default::default())),
             log,
         }
     }
 
-    /// The next blob dial to `key` hangs until the caller's deadline drops
-    /// it — a cache that is down, whatever the mailbox beside it does.
-    pub(crate) fn hold(&self, key: &PublicKey) -> &Self {
-        *self
-            .holds
-            .lock()
-            .expect("holds lock")
-            .entry(key.0)
-            .or_default() += 1;
+    /// A reachable blob cache at `key` that refuses every push — a full
+    /// cache, with no deadline in the way.
+    pub(crate) fn refuse(&self, key: &PublicKey) -> &Self {
+        self.cache(key);
+        self.refusing.lock().expect("refusing lock").insert(key.0);
         self
     }
 
@@ -453,6 +482,14 @@ impl TestBlobs {
             .entry(key.0)
             .or_default();
         self
+    }
+
+    /// Whether a test scripted a cache at `key`.
+    fn scripted(&self, key: &PublicKey) -> bool {
+        self.caches
+            .lock()
+            .expect("caches lock")
+            .contains_key(&key.0)
     }
 
     /// The hashes the cache at `key` holds, in hash order.
@@ -475,45 +512,67 @@ impl TestBlobs {
 impl DialBlobs for TestBlobs {
     type Conn = TestBlobConn;
     async fn dial_blobs(&self, to: &Peer) -> Result<TestBlobConn, DialError> {
-        let holding = {
-            let mut holds = self.holds.lock().expect("holds lock");
-            match holds.get_mut(&to.key.0) {
-                Some(left) if *left > 0 => {
-                    *left -= 1;
-                    true
-                }
-                _ => false,
-            }
-        };
-        if holding {
-            return std::future::pending().await;
-        }
         let held = self
             .caches
             .lock()
             .expect("caches lock")
             .get(&to.key.0)
             .cloned();
+        let refusing = self
+            .refusing
+            .lock()
+            .expect("refusing lock")
+            .contains(&to.key.0);
         match held {
-            Some(held) => Ok(TestBlobConn {
+            Some(held) => Ok(TestBlobConn::Cache(CacheConn {
                 to: to.key,
                 held,
+                refusing,
                 log: self.log.clone(),
-            }),
+            })),
             None => panic!("unscripted blob dial to {}", hex::encode(&to.key.0)),
         }
     }
 }
 
-/// A connection to one scripted blob cache.
-pub(crate) struct TestBlobConn {
-    to: PublicKey,
-    held: Held,
-    log: WireLog,
+/// A blob connection a `TestTransport` produced: to a scripted cache, or
+/// routed to a wired peer whose real gate admitted (or declined) us.
+pub(crate) enum TestBlobConn {
+    Cache(CacheConn),
+    Routed(LoopBlobConn),
 }
 
 impl PushBlob for TestBlobConn {
     async fn push(&self, blob: &EncryptedBlob) -> Result<(), ConnError> {
+        match self {
+            TestBlobConn::Cache(conn) => conn.push(blob).await,
+            TestBlobConn::Routed(conn) => conn.push(blob).await,
+        }
+    }
+}
+
+impl FetchBlob for TestBlobConn {
+    async fn fetch(&self, hash: &BlobHash) -> Result<Vec<u8>, ConnError> {
+        match self {
+            TestBlobConn::Cache(conn) => conn.fetch(hash).await,
+            TestBlobConn::Routed(_) => Err(ConnError("peers serve no blobs".to_string())),
+        }
+    }
+}
+
+/// A connection to one scripted blob cache.
+pub(crate) struct CacheConn {
+    to: PublicKey,
+    held: Held,
+    refusing: bool,
+    log: WireLog,
+}
+
+impl PushBlob for CacheConn {
+    async fn push(&self, blob: &EncryptedBlob) -> Result<(), ConnError> {
+        if self.refusing {
+            return Err(ConnError("cache refused the push".to_string()));
+        }
         self.held
             .lock()
             .expect("held lock")
@@ -526,7 +585,7 @@ impl PushBlob for TestBlobConn {
     }
 }
 
-impl FetchBlob for TestBlobConn {
+impl FetchBlob for CacheConn {
     async fn fetch(&self, hash: &BlobHash) -> Result<Vec<u8>, ConnError> {
         self.held
             .lock()
@@ -534,6 +593,100 @@ impl FetchBlob for TestBlobConn {
             .get(&hash.0)
             .cloned()
             .ok_or_else(|| ConnError("blob not held".to_string()))
+    }
+}
+
+/// A wired blob connection to another client: its gate answered the
+/// admission at dial time; each push lands in its blob queue as `Pushed`
+/// (the real adapter reports a push the same way, after the transfer), and
+/// dropping the connection reports `Closed` — exactly as the provider does
+/// for an admitted connection, and not at all for a declined one.
+pub(crate) struct LoopBlobConn {
+    caller: PublicKey,
+    to: PublicKey,
+    target: ChannelBlobs,
+    admitted: bool,
+    log: WireLog,
+}
+
+impl PushBlob for LoopBlobConn {
+    async fn push(&self, blob: &EncryptedBlob) -> Result<(), ConnError> {
+        if !self.admitted {
+            return Err(ConnError("peer declined the blob connection".to_string()));
+        }
+        self.target.inject_push(self.caller, blob.clone());
+        self.log.record(WireEvent::Pushed {
+            to: self.to,
+            hash: blob.hash,
+        });
+        Ok(())
+    }
+}
+
+impl Drop for LoopBlobConn {
+    fn drop(&mut self) {
+        if self.admitted {
+            self.target.inject_close(self.caller);
+        }
+    }
+}
+
+/// Inbound blob events as a queue the test (or a `LoopBlobConn`) feeds;
+/// the blob serve loop pulls exactly as it does from the router.
+#[derive(Clone)]
+pub(crate) struct ChannelBlobs {
+    tx: tokio::sync::mpsc::UnboundedSender<BlobEvent<TestAdmit>>,
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<BlobEvent<TestAdmit>>>>,
+}
+
+impl ChannelBlobs {
+    fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            tx,
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+        }
+    }
+
+    /// `peer` knocks; the returned receiver carries the gate's answer.
+    pub(crate) fn inject_connect(&self, peer: PublicKey) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(BlobEvent::Connected {
+            peer,
+            admit: TestAdmit { tx },
+        });
+        rx
+    }
+
+    /// A blob from `peer` landed whole.
+    pub(crate) fn inject_push(&self, peer: PublicKey, blob: EncryptedBlob) {
+        let _ = self.tx.send(BlobEvent::Pushed { peer, blob });
+    }
+
+    /// `peer`'s admitted connection closed.
+    pub(crate) fn inject_close(&self, peer: PublicKey) {
+        let _ = self.tx.send(BlobEvent::Closed { peer });
+    }
+}
+
+impl AcceptBlobs for ChannelBlobs {
+    type Admit = TestAdmit;
+
+    async fn accept_blob(&self) -> Option<BlobEvent<TestAdmit>> {
+        // The sender half lives in this struct, so an unfed queue pends —
+        // a quiet network, not a closed endpoint.
+        self.rx.lock().await.recv().await
+    }
+}
+
+/// The gate's answer to one injected `Connected`.
+pub(crate) struct TestAdmit {
+    tx: tokio::sync::oneshot::Sender<bool>,
+}
+
+impl Admit for TestAdmit {
+    async fn admit(self, admitted: bool) {
+        let _ = self.tx.send(admitted);
     }
 }
 

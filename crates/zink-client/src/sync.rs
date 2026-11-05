@@ -83,18 +83,7 @@ impl SyncHandler {
     /// only to the *vouched* key of each: extra keys a device record lists
     /// never widen the gate. Local state only; nothing wire-borne.
     fn serves(&self, caller: PublicKey) -> bool {
-        caller == self.device.public()
-            || self
-                .state
-                .recognized_devices()
-                .iter()
-                .any(|(key, _)| *key == caller)
-            || self
-                .state
-                .contacts()
-                .unwrap_or_default()
-                .iter()
-                .any(|(_, record)| record.keys.contains(&caller))
+        serves(&self.state, self.device.public(), caller)
     }
 
     /// The record served for `WhoIs { subject }` (who-is-this.md §4): the
@@ -275,6 +264,22 @@ impl SyncHandler {
             tracing::debug!(%error, "sync response failed to send");
         }
     }
+}
+
+/// The serving gate (D0c), shared with the blob side (project 10): us, a
+/// recognized own device's vouched key, or any key of a user-added contact.
+/// A contact-store read error fails closed.
+pub(crate) fn serves(state: &ClientState, me: PublicKey, caller: PublicKey) -> bool {
+    caller == me
+        || state
+            .recognized_devices()
+            .iter()
+            .any(|(key, _)| *key == caller)
+        || state
+            .contacts()
+            .unwrap_or_default()
+            .iter()
+            .any(|(_, record)| record.keys.contains(&caller))
 }
 
 /// The client's serving side, as a loop over the `Accept` port: pull each

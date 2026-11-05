@@ -1,7 +1,8 @@
 # Direct blob delivery: referent before reference, then blobs peer-to-peer
 
 > **Status: 🚧 in progress — scoped 2026-10-17; phase A (S1–S3) landed
-> 2026-10-17, phase B to schedule.** Trigger: the project 7
+> 2026-10-17, phase B (S4–S7) landed 2026-11-05 with the two-device live
+> run still owed.** Trigger: the project 7
 > live run (2026-08-23) saw an image message arrive before the sender's
 > blob push finished, so the receiver's first fetch missed the relay
 > cache and the thumbnail stayed blank for the session. Phase A (S1–S3)
@@ -39,8 +40,8 @@ its blobs are fetchable there.**
 | A missing blob is a state, not an error | Client policy, in the app layer: a `BlobUnavailable` thumbnail drops out of the in-flight map (so the next messages reload refetches it), renders a quiet "not available yet, tap to retry" placeholder, and gets a short bounded backoff through the app's clock. Never an error toast for a transient. |
 | Push, not pull, for direct blobs | Pull-after (recipient fetches from the sender after `Deliver`) has no spam surface but costs a second dial per image, loses the instant render, and cannot discharge the relay because full-res is fetched lazily. Push-first mirrors the relay flow, reuses `push_blobs` (`DialBlobs::dial_blobs` already takes a `Peer`), and lets `discharged` drop its blobs-empty guard. |
 | Accept side lives in the core | The adapter mounts iroh-blobs' `BlobsProtocol` and hands the core an inbound push with the authenticated peer key; the core decides. Admission mirrors `Deliver` (D0c): contacts, recognized own devices, self. No policy in the adapter. |
-| Store meeting point | The client blob cache stays plain ciphertext files (`state/blobs/<hash>`, re-verified on read). Pushes land in a memory store and drain into the cache on completion — the on-disk layout does not change, and project 9's storage port is not pre-empted. ⚠️ Confirm iroh-blobs exposes a completion hook that makes the drain clean; else a small custom push handler over the blobs ALPN. |
-| Unreferenced-blob bound | A contact can push bytes no envelope references. Phase B ships the cheap half — per-blob size cap, per-sender in-flight cap — and a sweep of cache entries no stored envelope references is a follow-up unless scoping finds it trivial. Contacts can already fill your mailbox; this is the same trust, not a new one. |
+| Store meeting point | The client blob cache stays plain ciphertext files (`state/blobs/<hash>`, re-verified on read). Pushes land in a memory store and drain into the cache on completion — the on-disk layout does not change, and project 9's storage port is not pre-empted. *(Resolved 2026-11-05: iroh-blobs 0.103's provider events give per-push `Completed`; the adapter reads the bytes out and reports `Pushed`. There is no public delete, so the memory store runs GC every 30 s with a protect callback: a blob stays until its connection closes and the domain has its bytes — the sender confirms a push with an `Observe` on the same connection, which must still see it.)* |
+| Unreferenced-blob bound | A contact can push bytes no envelope references. Phase B ships the cheap half — per-blob size cap (32 MiB), per-peer open-connection cap (2), both `ClientConfig::blob_limits` — and a sweep of cache entries no stored envelope references is a follow-up unless scoping finds it trivial. Contacts can already fill your mailbox; this is the same trust, not a new one. |
 | Not a protocol change | SPEC §5.1 already says fan-out delivers "a message/blob"; only the as-built sentence ("Blob bytes still go to the recipient's relay cache") and direct-delivery.md §3 change. Same wire (iroh-blobs push), no new frames, no new dependency. |
 
 ## Constraints fixed by canon
@@ -92,20 +93,61 @@ its blobs are fetchable there.**
 
 ### Phase B — direct blobs
 
-- **S4 · Inbound blob port + adapter.** A verb-named accept port for
-  pushed blobs (`Inbound`-shaped: peer key, hash, bytes), the iroh
-  adapter mounting `BlobsProtocol` beside `SYNC_ALPN`, the memory-store
-  staging and drain. Test double alongside.
-- **S5 · Admission + caps (core).** Accept from contacts / recognized own
-  devices / self; per-blob size cap; per-sender in-flight cap. Declined
-  pushes are indistinguishable on the wire from a full cache.
-- **S6 · Send orchestration + discharge.** Per recipient: push blobs,
-  then `Deliver`; `discharged` requires every hosted recipient to have
-  acked *and* taken the blobs; undischarged relays get S1's push → deposit.
-- **S7 · Docs + live run.** direct-delivery.md §3 as-built replaced; SPEC
-  §5.1 as-built sentence; client-core.md flow lines; two devices + relay
-  live run of an image both ways, relay logs confirming no blob touched
-  it when both peers were online.
+- **S4 · Inbound blob port + adapter — done (2026-11-05).** `AcceptBlobs`
+  (a pull surface like `Accept`: `Connected { peer, admit }` answered
+  through `Admit`, `Pushed { peer, blob }`, `Closed { peer }`), joined to
+  the `Transport` bound. The iroh adapter mounts `BlobsProtocol` beside
+  `SYNC_ALPN` over a GC'd `MemStore`; its event task intercepts
+  connections (admission goes up, the answer comes back on a oneshot),
+  reads a completed push's bytes out and reports them, refuses `get`
+  (a client is not a blob server) and serves `observe` (the pusher's
+  confirmation). Upstream quirk honored: 0.103 dispatches every request
+  kind on the mask's `get` entry. Doubles: `ChannelBlobs` (inject a
+  knock / a landed blob / a close) and loopback wiring — a wired blob
+  dial reaches the peer's *real* gate, so both ends run domain logic.
+- **S5 · Admission + caps (core) — done (2026-11-05).** `BlobGate` in
+  `blobs.rs`, served by a second client task beside the sync loop: the
+  serving gate shared with `Deliver` (`sync::serves`, now a free
+  function), the per-peer open-connection cap, the per-blob size cap,
+  and a BLAKE3 check before the cache takes anything (verify before
+  trusting — the adapter already verified, the domain does not rely on
+  it). Four gate tests. Declined pushes are indistinguishable on the wire
+  from a full cache.
+- **S6 · Send orchestration + discharge — done (2026-11-05).**
+  `push_blobs_direct` runs first (same discipline as `deliver_direct`:
+  concurrent, reach-budgeted, routeless recipients skipped; a dial that
+  got nowhere is a cooldown, a peer that answered and declined is not),
+  then S1's relay pushes for relays hosting anyone who did not take the
+  blobs, then the handoff, then deposits. `discharged` now requires every
+  hosted recipient to have acked *and* taken the blobs — an image acked
+  by everyone never touches a relay. A relay whose every recipient took
+  the blobs but one of whom did not ack still gets push → deposit.
+  Tests: the all-direct image (relay unscripted — any dial would panic),
+  the stranger whose gate declines (relay cache, then deposit), and the
+  phase-A pair re-pinned to a peer at its connection cap (takes the
+  envelope, not the blobs — the one trusted-peer case where the relay
+  must still carry them).
+- **S7 · Docs + live run — docs done (2026-11-05), live run owed.**
+  direct-delivery.md §3 as-built replaced; SPEC §5.1 as-built sentence;
+  client-core.md flow line; transport.md §2 port listing and §7 double
+  kit. A real-iroh smoke (`image__should_travel_peer_to_peer_over_real_
+  iroh_blobs`) proves the adapter end to end: two blobs over iroh-blobs
+  to a client's gate, envelope over the sync ALPN, relay skipped, both
+  blobs opened from the recipient's cache. **Still owed:** two devices +
+  relay live run of an image both ways, relay logs confirming no blob
+  touched it when both peers were online; and the desktop/Android shells
+  rebuilt (no app-layer change in phase B, but `ClientConfig` grew).
+
+## Follow-ups
+
+- The unreferenced-blob sweep (above).
+- `PushBlob::push` runs under no clock deadline — on the relay path since
+  C3, now on the peer path too. A peer that admits and then stalls holds
+  the send. The connect is bounded; the transfer is not. Worth a
+  domain-side `clock.timeout` sized to the blob, in a small slice.
+- The inbound store's GC interval is iroh-blobs' own timer inside the
+  adapter (as the relay cache's is) — the one timer ADR 0004 tolerates,
+  but note it.
 
 ## Open questions
 

@@ -15,11 +15,11 @@ use zink_protocol::{BlobHash, EncryptedBlob, PublicKey};
 /// Blanket-implemented — nothing implements it by name; helpers take the
 /// narrowest verb they exercise.
 pub trait Transport:
-    Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone
+    Dial + DialBlobs + Accept + AcceptBlobs + Home + InsertRelay + RemoveRelay + Close + Clone
 {
 }
-impl<T: Dial + DialBlobs + Accept + Home + InsertRelay + RemoveRelay + Close + Clone> Transport
-    for T
+impl<T: Dial + DialBlobs + Accept + AcceptBlobs + Home + InsertRelay + RemoveRelay + Close + Clone>
+    Transport for T
 {
 }
 
@@ -67,6 +67,38 @@ pub trait Accept: Send + Sync + 'static {
     type Reply: Respond;
     /// Next inbound request from any peer; None once the endpoint closes.
     fn accept(&self) -> impl Future<Output = Option<Inbound<Self::Reply>>> + Send;
+}
+
+/// Inbound blob pushes — the recipient half of peer blob delivery (project
+/// 10 phase B). A pull surface like `Accept`: the adapter runs the blob
+/// protocol and reports what happens; the domain answers the one question
+/// that is policy — who may push — and takes what lands.
+pub trait AcceptBlobs: Send + Sync + 'static {
+    type Admit: Admit;
+    /// Next inbound blob event from any peer; None once the endpoint closes.
+    fn accept_blob(&self) -> impl Future<Output = Option<BlobEvent<Self::Admit>>> + Send;
+}
+
+/// The answer to a `BlobEvent::Connected`: let this peer push, or not.
+pub trait Admit: Send + 'static {
+    fn admit(self, admitted: bool) -> impl Future<Output = ()> + Send;
+}
+
+/// What the blob protocol reports about peers pushing to us. `peer` is the
+/// key the transport handshake authenticated, in every variant.
+pub enum BlobEvent<A> {
+    /// `peer` opened a blob connection; nothing flows until `admit` answers.
+    /// Declining closes the connection — on the wire indistinguishable from
+    /// a cache that is full. A declined connection reports no `Closed`.
+    Connected { peer: PublicKey, admit: A },
+    /// A blob `peer` pushed has landed whole: the transport verified that
+    /// `blob.bytes` hash to `blob.hash` before reporting it.
+    Pushed {
+        peer: PublicKey,
+        blob: EncryptedBlob,
+    },
+    /// An admitted blob connection from `peer` closed.
+    Closed { peer: PublicKey },
 }
 
 pub trait Respond: Send + 'static {

@@ -311,8 +311,10 @@ and always relay-routed for browsers — in two shapes:
   envelope peer-to-peer and skips that device's mailbox entirely once the
   recipient acks a durable store, so an online conversation leaves the relay
   nothing to see; any failure falls back to the deposit (D5,
-  `docs/design/direct-delivery.md`). Blob bytes still go to the recipient's
-  relay cache. Reachability *is* the presence signal — no presence protocol.
+  `docs/design/direct-delivery.md`). Blob bytes go the same way — pushed to the
+  recipient device before the envelope that references them, with the
+  recipient's relay cache as the fallback when the device does not take them
+  (§7). Reachability *is* the presence signal — no presence protocol.
 - **Request/response (pull):** content-addressed `get` / `get-successors` for history
   and blobs, and the `who-is-this` identity query (§3.5) — each served at the
   answering peer's discretion.

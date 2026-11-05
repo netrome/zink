@@ -117,18 +117,27 @@ is: skip a relay's deposit iff **every** recipient it hosts acked directly —
 only copy in a group send; that hazard is pinned by a regression test
 (`send__should_not_skip_a_relay_hosting_a_recipient_that_did_not_ack`).
 
-**As built — blobs still ride the relay.** A recipient fetches blob bytes from
-its own relay's cache (C3a), so an image message needs the push regardless;
-pushing blobs while skipping the deposit would buy little (the relay sees the
-sender either way). A message **with blobs therefore takes the pre-D5 path
-exactly** — direct delivery is still attempted (so it lands *at all* when the
-relay is down), but no deposit is skipped. And since project 10 S1 the
-handoff **waits for the blob pushes to every relay to settle**: a recipient
-fetches blob bytes from its own relay's cache the moment the envelope lands,
-whichever path it came by, so an instant envelope with a blank image was the
-project 7 live-run race, not a win. Text — the dominant case — gets the full
-win. Closing the gap needs peer blob transfer: project 10 phase B, not a
-protocol question.
+**As built — blobs go peer-to-peer too (project 10 phase B).** Before the
+handoff, the sender pushes a message's blobs straight to each recipient device
+over the iroh-blobs ALPN — the same push a relay cache takes, confirmed the
+same way — so the device renders the image from its own cache the moment the
+envelope lands. A device that took every blob *and* acked the envelope
+discharges its relay in full: for an image acked by everyone, the relay never
+learns the message existed. Every other recipient (unreachable, or one whose
+gate declined us) gets the blobs through its relay cache first — **referent
+before reference**, project 10 S1: the relay push settles before the handoff
+and before the deposit, because that recipient fetches blob bytes from its
+relay's cache the moment the envelope lands, whichever path it came by. An
+instant envelope with a blank image was the project 7 live-run race, not a
+win.
+
+The recipient side is the client's own blob protocol handler (`AcceptBlobs`,
+transport.md §2): admission is the serving gate (D0c — contacts, recognized
+own devices, self), plus a per-peer open-connection cap and a per-blob size
+cap; the bytes are re-hashed before the cache takes them. A declined peer
+sees a closed connection — on the wire the same as a full cache — and falls
+back to the relay path. iroh-blobs 0.103 cannot refuse a push mid-stream, so
+the size cap bounds the cache, not the transfer; the gate bounds who may try.
 
 **As built — who may push.** `Deliver` is gated like history (D0c): contacts,
 recognized own devices, self. A stranger's push is declined (`NotHeld`) and

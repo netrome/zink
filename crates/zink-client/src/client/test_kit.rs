@@ -362,6 +362,16 @@ pub(crate) fn loop_client(
     name: &str,
     wire: &Loopback,
 ) -> (LoopClient, TestTransport, TestClock) {
+    loop_client_with(test, name, wire, ClientConfig::default())
+}
+
+/// `loop_client` with edge-injected tuning (a blob gate's caps, say).
+pub(crate) fn loop_client_with(
+    test: &str,
+    name: &str,
+    wire: &Loopback,
+    config: ClientConfig,
+) -> (LoopClient, TestTransport, TestClock) {
     let key_path = temp_key(test, name);
     keystore::create(&key_path).expect("key");
     let device = keystore::load(&key_path).expect("load key");
@@ -370,7 +380,7 @@ pub(crate) fn loop_client(
     let client = Client::with_transport(
         device,
         &key_path,
-        ClientConfig::default(),
+        config,
         clock.clone(),
         SystemClock,
         net.clone(),
