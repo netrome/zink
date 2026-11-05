@@ -59,9 +59,10 @@ async fn client(
             let sink_client = client.clone();
             client.on_direct_delivery(move |messages| {
                 let _ = sink_app.emit("new-messages", messages.len());
-                notify_arrivals(&sink_app, &sink_client, &sink_notified, &messages);
                 let (app, client) = (sink_app.clone(), sink_client.clone());
+                let notified = sink_notified.clone();
                 tauri::async_runtime::spawn(async move {
+                    notify_arrivals(&app, &client, &notified, &messages).await;
                     client.after_direct(&messages).await;
                     let _ = app.emit("new-messages", messages.len());
                 });
@@ -91,7 +92,7 @@ async fn client(
         })
         .await?
         .clone();
-    spawn_subscriptions(app, managed, &client);
+    spawn_subscriptions(app, managed, &client).await;
     Ok(client)
 }
 
@@ -101,8 +102,12 @@ async fn client(
 /// local notifications (C4c). Called on every command — the `subscribed`
 /// set makes it spawn-once, and relays added later (set_profile) get
 /// picked up on the next call.
-fn spawn_subscriptions(app: &AppHandle, managed: &State<'_, ManagedClient>, client: &Arc<Client>) {
-    for relay in client.home_relays() {
+async fn spawn_subscriptions(
+    app: &AppHandle,
+    managed: &State<'_, ManagedClient>,
+    client: &Arc<Client>,
+) {
+    for relay in client.home_relays().await {
         let mut subscribed = managed.subscribed.lock().expect("subscribed lock");
         if !subscribed.insert(relay.clone()) {
             continue;
@@ -115,7 +120,13 @@ fn spawn_subscriptions(app: &AppHandle, managed: &State<'_, ManagedClient>, clie
             client
                 .subscribe(&relay, move |messages| {
                     let _ = app.emit("new-messages", messages.len());
-                    notify_arrivals(&app, &on_new_client, &notified, &messages);
+                    // Notifying reads the store (async since project 9), so
+                    // it runs on its own task; `notified` dedupes.
+                    let (app, client) = (app.clone(), on_new_client.clone());
+                    let notified = notified.clone();
+                    tauri::async_runtime::spawn(async move {
+                        notify_arrivals(&app, &client, &notified, &messages).await;
+                    });
                 })
                 .await;
         });
@@ -127,7 +138,7 @@ fn spawn_subscriptions(app: &AppHandle, managed: &State<'_, ManagedClient>, clie
 /// there is no third party anywhere in this path). Skipped while the
 /// window is focused (the live view is already updating); deduped by
 /// message id.
-fn notify_arrivals(
+async fn notify_arrivals(
     app: &AppHandle,
     client: &Client,
     notified: &Mutex<HashSet<[u8; 32]>>,
@@ -141,7 +152,7 @@ fn notify_arrivals(
     if focused {
         return;
     }
-    let contacts = client.contacts().unwrap_or_default();
+    let contacts = client.contacts().await.unwrap_or_default();
     // Own devices don't notify (De8 sweep): send-to-self (D3c) deposits every
     // message to your other devices, so typing on the laptop used to buzz the
     // phone — labelled as raw hex, since `label` doesn't read the devices
@@ -154,7 +165,7 @@ fn notify_arrivals(
     // nothing anyway (tenet 3). A *silent-send* feature, where the sender
     // genuinely knows something we don't, is a different question and belongs
     // in the encrypted body as an advisory convention.
-    let own = client.own_keys();
+    let own = client.own_keys().await;
     for message in messages {
         let Ok(body) = &message.body else {
             continue; // nothing readable to preview
@@ -188,7 +199,7 @@ fn notify_arrivals(
             .core
             .conversation
             .unwrap_or_else(|| message.envelope.id());
-        let title = match client.conversation_name(conversation) {
+        let title = match client.conversation_name(conversation).await {
             Some(name) => format!("{name} — {sender}"),
             None => sender,
         };
@@ -204,32 +215,36 @@ fn notify_arrivals(
 #[tauri::command]
 async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<AppState, String> {
     let client = client(&app, &managed).await?;
-    let record = match client.my_record() {
+    let record = match client.my_record().await {
         Ok(record) => Some(qr_payload(&record)?),
         Err(_) => None, // no profile yet — the UI shows the setup form
     };
     Ok(AppState {
         my_key: key_dto(&client.public_key()),
-        name: client.profile_name(),
-        device_label: client.device_label(),
+        name: client.profile_name().await,
+        device_label: client.device_label().await,
         // The full specs (`dial[#relay-url]`): these round-trip through the
         // profile form back into set_profile — a bare dial string would
         // silently drop the relay URL on a re-save (D0b). All of them now
         // (U5 multi-relay), not just the first.
-        relays: client.home_relay_specs(),
+        relays: client.home_relay_specs().await,
         // One row per PERSON (S2/S3, cluster-first): the people list and
         // the picker render the lens, never the per-device entries.
         contacts: {
             let mut rows = Vec::new();
-            for person in client.persons()? {
+            for person in client.persons().await? {
                 let keys: Vec<PublicKey> = person.keys().into_iter().collect();
                 let first = person
                     .members
                     .first()
                     .and_then(|(_, record)| record.keys.first().copied());
+                let mut vouched = false;
+                for key in &keys {
+                    vouched |= client.vouches(key).await;
+                }
                 let mut disavowals = Vec::new();
                 for &key in &keys {
-                    disavowals.extend(disavowal_lines(&client, key)?);
+                    disavowals.extend(disavowal_lines(&client, key).await?);
                 }
                 rows.push(ContactRow {
                     id: person.id.to_string(),
@@ -242,7 +257,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
                     key: first.map(|key| key_dto(&key)).unwrap_or_default(),
                     keys: keys.iter().map(key_dto).collect(),
                     members: person.members.len(),
-                    vouched: keys.iter().any(|key| client.vouches(key)),
+                    vouched,
                     disavowals,
                 });
             }
@@ -251,6 +266,7 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
         record,
         devices: client
             .recognized_devices()
+            .await
             .into_iter()
             .map(|(key, record)| DeviceRow {
                 name: record
@@ -265,9 +281,10 @@ async fn app_state(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<
 
 /// Render-ready disavowal warnings for a key (D4c): every valid negative
 /// says WHO; only same-person ones exclude from replies.
-fn disavowal_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String> {
+async fn disavowal_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String> {
     Ok(client
-        .disavowals(key)?
+        .disavowals(key)
+        .await?
         .into_iter()
         .map(|disavowal| {
             if disavowal.excludes {
@@ -294,7 +311,7 @@ async fn vouch(
     petname: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.vouch(&petname)?;
+    client.vouch(&petname).await?;
     Ok(())
 }
 
@@ -306,7 +323,7 @@ async fn unvouch(
     petname: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.unvouch(&petname)?;
+    client.unvouch(&petname).await?;
     Ok(())
 }
 
@@ -320,7 +337,7 @@ async fn repudiate_key(
     key: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.repudiate(PublicKey(hex::parse32(&key)?))?;
+    client.repudiate(PublicKey(hex::parse32(&key)?)).await?;
     Ok(())
 }
 
@@ -333,7 +350,9 @@ async fn unrecognize_device(
     key: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.unrecognize_device(&PublicKey(hex::parse32(&key)?));
+    client
+        .unrecognize_device(&PublicKey(hex::parse32(&key)?))
+        .await;
     Ok(())
 }
 
@@ -365,7 +384,7 @@ async fn recognize_device(
 ) -> Result<String, String> {
     let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
     let client = client(&app, &managed).await?;
-    client.recognize_device(&record)?;
+    client.recognize_device(&record).await?;
     let name = record
         .self_claimed_name()
         .unwrap_or("your device")
@@ -391,11 +410,11 @@ async fn introduce_devices(
     conversation: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    if client.recognized_devices().is_empty() {
+    if client.recognized_devices().await.is_empty() {
         return Err("no recognized devices — pair one first".into());
     }
     let conversation = parse_id(&conversation)?;
-    let resolved = client.reply_contacts(conversation)?;
+    let resolved = client.reply_contacts(conversation).await?;
     if resolved
         .contacts
         .iter()
@@ -427,7 +446,7 @@ async fn set_profile(
     let client = client(&app, &managed).await?;
     client.set_profile(&name, &relays).await?;
     if let Some(label) = device_label.filter(|label| !label.trim().is_empty()) {
-        client.set_device_label(&label)?;
+        client.set_device_label(&label).await?;
     }
     // Best-effort (R4, 5-relay-lifecycle §8): the profile is saved and the
     // QR must render even when the relay is unreachable — that QR is the
@@ -437,8 +456,8 @@ async fn set_profile(
         tracing::warn!(%error, "relay registration failed; profile saved anyway");
     }
     // The relay may be new — give it its live-delivery task right away.
-    spawn_subscriptions(&app, &managed, &client);
-    qr_payload(&client.my_record()?)
+    spawn_subscriptions(&app, &managed, &client).await;
+    qr_payload(&client.my_record().await?)
 }
 
 /// Add a contact from a scanned or pasted `ZINK:` payload.
@@ -451,7 +470,9 @@ async fn add_contact(
 ) -> Result<String, String> {
     let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
     let client = client(&app, &managed).await?;
-    Ok(client.add_contact(&record, petname.filter(|name| !name.trim().is_empty()))?)
+    Ok(client
+        .add_contact(&record, petname.filter(|name| !name.trim().is_empty()))
+        .await?)
 }
 
 /// Triage a scanned/pasted payload before storing (R1): the UI routes on
@@ -466,7 +487,7 @@ async fn preview_contact(
 ) -> Result<AddPreview, String> {
     let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
     let client = client(&app, &managed).await?;
-    match client.preview_contact(&record)? {
+    match client.preview_contact(&record).await? {
         RecordMatch::New { suggested_petname } => Ok(AddPreview {
             updates: None,
             changes: vec![],
@@ -522,7 +543,7 @@ async fn update_contact(
 ) -> Result<String, String> {
     let record = ContactRecord::from_qr_string(&payload).map_err(|e| format!("record: {e}"))?;
     let client = client(&app, &managed).await?;
-    Ok(client.update_contact(&record)?)
+    Ok(client.update_contact(&record).await?)
 }
 
 /// Rename a contact — set my petname for them (my lens, U4). Local only;
@@ -535,7 +556,7 @@ async fn rename_contact(
     new: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.rename(&current, &new)?;
+    client.rename(&current, &new).await?;
     Ok(())
 }
 
@@ -571,7 +592,9 @@ async fn clear_local_avatar(
     key: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.clear_local_avatar(PublicKey(hex::parse32(&key)?));
+    client
+        .clear_local_avatar(PublicKey(hex::parse32(&key)?))
+        .await;
     Ok(())
 }
 
@@ -598,7 +621,7 @@ async fn unshare_avatar(
     key: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.unshare_avatar(PublicKey(hex::parse32(&key)?));
+    client.unshare_avatar(PublicKey(hex::parse32(&key)?)).await;
     Ok(())
 }
 
@@ -634,8 +657,8 @@ async fn person_page(
     id: String,
 ) -> Result<PersonPage, String> {
     let client = client(&app, &managed).await?;
-    let person = client.person_by_id(id.parse()?)?;
-    person_page_dto(&client, person)
+    let person = client.person_by_id(id.parse()?).await?;
+    person_page_dto(&client, person).await
 }
 
 /// The page for a bare key (S3): a key belonging to a person lands on that
@@ -649,28 +672,28 @@ async fn key_page(
 ) -> Result<PersonPage, String> {
     let client = client(&app, &managed).await?;
     let subject = PublicKey(hex::parse32(&key)?);
-    if client.own_keys().contains(&subject) {
+    if client.own_keys().await.contains(&subject) {
         return Err("this key is you — it lives in the Me view".into());
     }
-    if let Some(person) = client.persons()?.into_iter().find(|person| {
+    if let Some(person) = client.persons().await?.into_iter().find(|person| {
         person
             .members
             .iter()
             .any(|(_, record)| record.keys.contains(&subject))
     }) {
-        return person_page_dto(&client, person);
+        return person_page_dto(&client, person).await;
     }
-    stranger_page_dto(&client, subject)
+    stranger_page_dto(&client, subject).await
 }
 
-fn person_page_dto(
+async fn person_page_dto(
     client: &Client,
     person: zink_client::PersonEntry,
 ) -> Result<PersonPage, String> {
     let can_split = person.members.len() > 1;
     let mut devices = Vec::new();
     for (petname, record) in &person.members {
-        devices.push(device_card(client, petname, record, can_split)?);
+        devices.push(device_card(client, petname, record, can_split).await?);
     }
     let first = person
         .members
@@ -680,10 +703,27 @@ fn person_page_dto(
     // friend, whatever they've told us about any of the person's devices.
     let mut friends = BTreeMap::new();
     for key in person.keys() {
-        merge_friend_views(client, key, &mut friends)?;
+        merge_friend_views(client, key, &mut friends).await?;
+    }
+    // Sibling rename conflicts for this person (S6): provenance
+    // rendered; "use theirs" is just a rename.
+    let mut conflicts = Vec::new();
+    for conflict in client.lens_conflicts().await {
+        if conflict.person != person.id {
+            continue;
+        }
+        conflicts.push(LabelConflict {
+            theirs: conflict.theirs,
+            from: client
+                .participant_labels(&[conflict.author])
+                .await?
+                .pop()
+                .unwrap_or_else(|| "another device".to_string()),
+        });
     }
     let merge_candidates = client
-        .persons()?
+        .persons()
+        .await?
         .into_iter()
         .filter(|other| other.id != person.id)
         .map(|other| PersonRef {
@@ -699,35 +739,24 @@ fn person_page_dto(
         }),
         stranger: None,
         avatar_key: first.map(|key| key_dto(&key)).unwrap_or_default(),
-        has_local_avatar: first
-            .map(|key| client.has_local_avatar(&key))
-            .unwrap_or(false),
-        shares_my_avatar: first.map(|key| client.shares_avatar(&key)).unwrap_or(false),
+        has_local_avatar: match first {
+            Some(key) => client.has_local_avatar(&key).await,
+            None => false,
+        },
+        shares_my_avatar: match first {
+            Some(key) => client.shares_avatar(&key).await,
+            None => false,
+        },
         devices,
         friends: friends.into_values().collect(),
-        // Sibling rename conflicts for this person (S6): provenance
-        // rendered; "use theirs" is just a rename.
-        conflicts: client
-            .lens_conflicts()
-            .into_iter()
-            .filter(|conflict| conflict.person == person.id)
-            .map(|conflict| {
-                Ok(LabelConflict {
-                    theirs: conflict.theirs,
-                    from: client
-                        .participant_labels(&[conflict.author])?
-                        .pop()
-                        .unwrap_or_else(|| "another device".to_string()),
-                })
-            })
-            .collect::<Result<_, String>>()?,
+        conflicts,
     })
 }
 
 /// The stranger variant: a one-card degenerate cluster from the learned
 /// store — candidates, evidence, claims, route, and the pair-back offer.
-fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, String> {
-    let learned = client.learned_candidates(subject)?;
+async fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, String> {
+    let learned = client.learned_candidates(subject).await?;
     let best_record = learned.first().map(|(_, record)| record.clone());
     let label = learned
         .first()
@@ -739,7 +768,7 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
         .collect();
     // Route + provenance, per the same read-time resolution sends use;
     // strangers get no debt lines (nothing is owed to an unadded key).
-    let (relay_source, relays, relay_override) = match client.relay_resolution(subject) {
+    let (relay_source, relays, relay_override) = match client.relay_resolution(subject).await {
         Some(resolution) => (
             relay_source_line(&resolution.source),
             resolution
@@ -759,20 +788,21 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
         ),
     };
     let mut friends = BTreeMap::new();
-    merge_friend_views(client, subject, &mut friends)?;
+    merge_friend_views(client, subject, &mut friends).await?;
     Ok(PersonPage {
         label,
         person: None,
         stranger: Some(StrangerInfo {
             key: key_dto(&subject),
             candidates,
-            dismissed: client.dismissed().contains(&subject),
+            dismissed: client.dismissed().await.contains(&subject),
             pair_back: client
                 .claims_to_be_my_device(subject)
+                .await
                 .map(|record| record.to_qr_string()),
         }),
         avatar_key: key_dto(&subject),
-        has_local_avatar: client.has_local_avatar(&subject),
+        has_local_avatar: client.has_local_avatar(&subject).await,
         // Shares are contacts-only; a stranger page never offers the toggle.
         shares_my_avatar: false,
         devices: vec![DeviceCard {
@@ -786,8 +816,8 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
                 .and_then(|record| record.self_claimed_name())
                 .map(str::to_string),
             key: key_dto(&subject),
-            link: evidence_lines(client, subject)?,
-            disavowals: disavowal_lines(client, subject)?,
+            link: evidence_lines(client, subject).await?,
+            disavowals: disavowal_lines(client, subject).await?,
             relay_source,
             relays,
             relay_override,
@@ -802,7 +832,7 @@ fn stranger_page_dto(client: &Client, subject: PublicKey) -> Result<PersonPage, 
 /// One member device, my belief per key: labels, claims, evidence,
 /// warnings, and **that device's** relays (they bind to the publishing
 /// device — SPEC §3.6).
-fn device_card(
+async fn device_card(
     client: &Client,
     petname: &str,
     record: &ContactRecord,
@@ -813,27 +843,28 @@ fn device_card(
         .first()
         .copied()
         .ok_or("stored record has no keys")?;
-    let status = client.relay_status(petname)?;
+    let status = client.relay_status(petname).await?;
     Ok(DeviceCard {
         petname: petname.to_string(),
         device_label: record.self_device_label().map(str::to_string),
         self_name: record.self_claimed_name().map(str::to_string),
         key: key_dto(&key),
-        link: evidence_lines(client, key)?,
-        disavowals: disavowal_lines(client, key)?,
+        link: evidence_lines(client, key).await?,
+        disavowals: disavowal_lines(client, key).await?,
         relay_source: relay_source_line(&status.source),
         relay_override: status.source == RelaySource::Override,
         relays: relay_rows(status.relays),
-        vouched: client.vouches(&key),
+        vouched: client.vouches(&key).await,
         can_split,
     })
 }
 
 /// Verified link evidence, render-ready (D3c): WHO claims, tiered — the
 /// one-way tier is a claim, the mutual one is consent-proof.
-fn evidence_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String> {
+async fn evidence_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String> {
     Ok(client
-        .device_evidence(key)?
+        .device_evidence(key)
+        .await?
         .into_iter()
         .map(|evidence| match evidence.tier {
             zink_protocol::LinkTier::MutuallyConfirmed => format!(
@@ -849,12 +880,12 @@ fn evidence_lines(client: &Client, key: PublicKey) -> Result<Vec<String>, String
 }
 
 /// Fold one subject's friend views into the page's per-friend lens rows.
-fn merge_friend_views(
+async fn merge_friend_views(
     client: &Client,
     subject: PublicKey,
     into: &mut BTreeMap<String, FriendLens>,
 ) -> Result<(), String> {
-    for view in client.friend_views(subject)? {
+    for view in client.friend_views(subject).await? {
         let lens = into
             .entry(view.petname.clone())
             .or_insert_with(|| FriendLens {
@@ -948,7 +979,8 @@ async fn ask_friend(
 ) -> Result<WhoIsReport, String> {
     let client = client(&app, &managed).await?;
     let responder = client
-        .contacts()?
+        .contacts()
+        .await?
         .into_iter()
         .find(|(petname, _)| *petname == friend)
         .and_then(|(_, record)| record.keys.first().copied())
@@ -980,7 +1012,7 @@ async fn rename_person(
     new: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    Ok(client.rename_person(id.parse()?, &new)?)
+    Ok(client.rename_person(id.parse()?, &new).await?)
 }
 
 /// Merge one person into another — the explicit clustering act (S2):
@@ -994,7 +1026,7 @@ async fn merge_persons(
     from: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.merge_persons(into.parse()?, from.parse()?)?;
+    client.merge_persons(into.parse()?, from.parse()?).await?;
     Ok(())
 }
 
@@ -1007,7 +1039,7 @@ async fn split_person(
     member: String,
 ) -> Result<String, String> {
     let client = client(&app, &managed).await?;
-    Ok(client.split_person(&member)?.label)
+    Ok(client.split_person(&member).await?.label)
 }
 
 /// Relative wall time for provenance lines ("2 h ago") — presentation at
@@ -1038,7 +1070,7 @@ async fn set_relay_override(
     relays: Vec<String>,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    Ok(client.set_relay_override(&petname, &relays)?)
+    Ok(client.set_relay_override(&petname, &relays).await?)
 }
 
 /// The conversation list, rendered from the stored DAG (not from a recv).
@@ -1047,15 +1079,15 @@ async fn conversations(app: AppHandle, managed: State<'_, ManagedClient>) -> Res
     let client = client(&app, &managed).await?;
     // The whole own cluster is "me" (D3c): a conversation is never
     // "with mårten laptop".
-    let own = client.own_keys();
+    let own = client.own_keys().await;
     // Unknown senders are quarantined into a bounded requests queue by the
     // client core (groups.md §6), so CLI and app cannot drift on the rule.
-    let inbox = zink_client::triage(client.conversations()?);
+    let inbox = zink_client::triage(client.conversations().await?);
     let dropped = inbox.dropped;
     let mut conversations = Vec::new();
     let mut requests = Vec::new();
     for summary in inbox.conversations.iter().chain(inbox.requests.iter()) {
-        let row = conversation_row(&client, &own, summary)?;
+        let row = conversation_row(&client, &own, summary).await?;
         if row.request {
             requests.push(row);
         } else {
@@ -1081,7 +1113,7 @@ fn conversation_label(others: &[String]) -> String {
 
 /// Display labels for the participants outside the own cluster, deduped per
 /// person (multi-device.md §7): a two-device contact labels once.
-fn other_labels(
+async fn other_labels(
     client: &Client,
     own: &std::collections::BTreeSet<PublicKey>,
     participants: &[PublicKey],
@@ -1091,17 +1123,17 @@ fn other_labels(
         .copied()
         .filter(|key| !own.contains(key))
         .collect();
-    Ok(client.participant_labels(&other_keys)?)
+    Ok(client.participant_labels(&other_keys).await?)
 }
 
 /// One dto row from a summary: participants labelled minus the own cluster,
 /// "only me" when alone.
-fn conversation_row(
+async fn conversation_row(
     client: &Client,
     own: &std::collections::BTreeSet<PublicKey>,
     summary: &zink_client::ConversationSummary,
 ) -> Result<Conversation, String> {
-    let others = other_labels(client, own, &summary.participants)?;
+    let others = other_labels(client, own, &summary.participants).await?;
     // Label precedence (S6): my local name, else the participant default —
     // one conversation with a name of its own is what tells three same-set
     // chats apart.
@@ -1138,7 +1170,8 @@ fn conversation_row(
             } else if others.len() > 1 {
                 // A group names the speaker; a 1:1's label already does.
                 let who = client
-                    .participant_labels(&[last.sender])?
+                    .participant_labels(&[last.sender])
+                    .await?
                     .pop()
                     .unwrap_or_default();
                 format!("{who}: {what}")
@@ -1150,9 +1183,12 @@ fn conversation_row(
     // A request row's preview handle (S3): the unknown sender's key —
     // the newest message's sender when unknown, else the first unknown
     // participant. Opens the person page without opening the chat.
+    let contacts = match summary.known {
+        true => Vec::new(),
+        false => client.contacts().await.unwrap_or_default(),
+    };
     let stranger_key = (!summary.known)
         .then(|| {
-            let contacts = client.contacts().unwrap_or_default();
             let unknown = |key: &PublicKey| {
                 !own.contains(key) && !contacts.iter().any(|(_, record)| record.keys.contains(key))
             };
@@ -1195,8 +1231,8 @@ async fn conversation_members(
 ) -> Result<ConversationMembers, String> {
     let client = client(&app, &managed).await?;
     let id = parse_id(&conversation)?;
-    let membership: Vec<PublicKey> = client.membership(id)?.into_iter().collect();
-    let own = client.own_keys();
+    let membership: Vec<PublicKey> = client.membership(id).await?.into_iter().collect();
+    let own = client.own_keys().await;
     let other_keys: Vec<PublicKey> = membership
         .iter()
         .copied()
@@ -1210,7 +1246,8 @@ async fn conversation_members(
     }];
     members.extend(
         client
-            .participant_rows(&other_keys)?
+            .participant_rows(&other_keys)
+            .await?
             .into_iter()
             .map(|(key, label)| MemberRow {
                 label,
@@ -1220,7 +1257,8 @@ async fn conversation_members(
     // Person labels (S2/S3): the add-picker rows are persons, so the
     // exclusion list must speak the same names.
     let petnames = client
-        .persons()?
+        .persons()
+        .await?
         .into_iter()
         .filter(|person| person.keys().iter().any(|key| membership.contains(key)))
         .map(|person| person.label)
@@ -1228,7 +1266,7 @@ async fn conversation_members(
     // Label precedence (S6): my local name outranks the participant
     // default, here exactly as in the rows — one rule, or headers and
     // lists would disagree.
-    let local_name = client.conversation_name(id);
+    let local_name = client.conversation_name(id).await;
     let others: Vec<String> = members
         .iter()
         .filter(|row| row.key.is_some())
@@ -1256,7 +1294,9 @@ async fn name_conversation(
     let client = client(&app, &managed).await?;
     let id = parse_id(&conversation)?;
     let name = name.trim();
-    client.set_conversation_name(id, (!name.is_empty()).then_some(name))?;
+    client
+        .set_conversation_name(id, (!name.is_empty()).then_some(name))
+        .await?;
     Ok(())
 }
 
@@ -1269,17 +1309,18 @@ async fn person_conversations(
     id: String,
 ) -> Result<Vec<Conversation>, String> {
     let client = client(&app, &managed).await?;
-    let own = client.own_keys();
+    let own = client.own_keys().await;
     // The whole person (S2): any member device's key counts.
     let keys: Vec<PublicKey> = client
-        .person_by_id(id.parse()?)?
+        .person_by_id(id.parse()?)
+        .await?
         .keys()
         .into_iter()
         .collect();
     let mut rows = Vec::new();
-    for summary in client.conversations()? {
+    for summary in client.conversations().await? {
         if summary.participants.iter().any(|key| keys.contains(key)) {
-            rows.push(conversation_row(&client, &own, &summary)?);
+            rows.push(conversation_row(&client, &own, &summary).await?);
         }
     }
     Ok(rows)
@@ -1301,10 +1342,10 @@ async fn conversations_with(
     if picked.is_empty() {
         return Ok(vec![]);
     }
-    let own = client.own_keys();
+    let own = client.own_keys().await;
     let mut allowed = own.clone();
     let mut clusters = Vec::new();
-    for (petname, record) in client.contacts()? {
+    for (petname, record) in client.contacts().await? {
         if picked.contains(&petname) {
             allowed.extend(record.keys.iter().copied());
             clusters.push(record.keys.clone());
@@ -1314,13 +1355,13 @@ async fn conversations_with(
         return Ok(vec![]); // a name that resolves to no contact matches nothing
     }
     let mut rows = Vec::new();
-    for summary in client.conversations()? {
+    for summary in client.conversations().await? {
         let every_member_picked = summary.participants.iter().all(|key| allowed.contains(key));
         let every_pick_member = clusters
             .iter()
             .all(|keys| keys.iter().any(|key| summary.participants.contains(key)));
         if every_member_picked && every_pick_member {
-            rows.push(conversation_row(&client, &own, &summary)?);
+            rows.push(conversation_row(&client, &own, &summary).await?);
         }
     }
     Ok(rows)
@@ -1350,12 +1391,12 @@ async fn messages(
     // marker's truth. The side effect is this layer's policy — the client
     // API stays an explicit `mark_conversation_read`. Best-effort: a
     // failed marker never blocks the render.
-    let _ = client.mark_conversation_read(conversation);
-    let contacts = client.contacts()?;
+    let _ = client.mark_conversation_read(conversation).await;
+    let contacts = client.contacts().await?;
     let me = client.public_key();
     // Own sibling devices (D3c): label by their self-claimed name, and
     // never flag them as unknown senders — they are this person.
-    let devices = client.recognized_devices();
+    let devices = client.recognized_devices().await;
     let device_name = |key: &PublicKey| {
         devices.iter().find(|(k, _)| k == key).map(|(_, record)| {
             record
@@ -1365,7 +1406,8 @@ async fn messages(
         })
     };
     Ok(client
-        .history(conversation)?
+        .history(conversation)
+        .await?
         .into_iter()
         // Op frames render as nothing in the chat (lens-sync.md §2) —
         // whatever the author; effects are gated elsewhere.
@@ -1492,34 +1534,38 @@ async fn send_message(
     let staged = match (conversation, to) {
         (Some(conversation), _) => {
             let conversation = parse_id(&conversation)?;
-            let resolved = client.reply_contacts(conversation)?;
+            let resolved = client.reply_contacts(conversation).await?;
             // --add grows the recipient set (groups.md §2): the signed
             // recipients list is the membership announcement.
             let mut contacts = resolved.contacts;
             // A person label adds the whole cluster, one Contact per member
             // device (S2/S3); an entry petname adds that device alone.
             for name in &adding {
-                contacts.extend(client.resolve_person(name)?);
+                contacts.extend(client.resolve_person(name).await?);
             }
             // Unroutable members stay recipients (groups.md §2 — membership
             // is not deliverability); only an all-unroutable set is an error.
             if contacts.iter().all(|contact| contact.relays.is_empty()) {
                 return Err("no routable participants — add their contacts first".into());
             }
-            client.stage_send_in(conversation, &contacts, text.into_bytes(), blobs)?
+            client
+                .stage_send_in(conversation, &contacts, text.into_bytes(), blobs)
+                .await?
         }
         (None, Some(names)) if !names.is_empty() => {
             // Person labels: "message Alice", never "message Alice's phone"
             // — every member device rides its own entry's relays (S2/S3).
             let mut contacts: Vec<zink_client::Contact> = Vec::new();
             for name in &names {
-                contacts.extend(client.resolve_person(name)?);
+                contacts.extend(client.resolve_person(name).await?);
             }
             // The app's "new chat" is always a fresh genesis (project 6 §7):
             // conversations are genesis-identified, several per participant
             // set is a feature — the draft view already offered the existing
             // ones. Replies go through the `conversation` arm above.
-            client.stage_send_new(&contacts, text.into_bytes(), blobs)?
+            client
+                .stage_send_new(&contacts, text.into_bytes(), blobs)
+                .await?
         }
         _ => return Err("no conversation or contact given".into()),
     };
@@ -1638,11 +1684,11 @@ async fn unknown_members(
     let client = client(&app, &managed).await?;
     let conversation = parse_id(&conversation)?;
     // Own sibling devices are never "unknown members" (D3c).
-    let own = client.own_keys();
-    let contacts = client.contacts()?;
-    let dismissed = client.dismissed();
+    let own = client.own_keys().await;
+    let contacts = client.contacts().await?;
+    let dismissed = client.dismissed().await;
     let mut members = Vec::new();
-    for key in client.membership(conversation)? {
+    for key in client.membership(conversation).await? {
         if own.contains(&key)
             || contacts
                 .iter()
@@ -1667,7 +1713,7 @@ async fn dismiss(
     subject: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    Ok(client.dismiss(PublicKey(hex::parse32(&subject)?))?)
+    Ok(client.dismiss(PublicKey(hex::parse32(&subject)?)).await?)
 }
 
 /// JPEG / PNG / WebP magic bytes — the formats the webview canvas emits.
@@ -1692,7 +1738,7 @@ async fn who_is(
     let key = PublicKey(hex::parse32(&subject)?);
     let outcome = client.who_is(key).await?;
     let answers = outcome.answers;
-    let (contact, candidates) = match client.resolve_name(key)? {
+    let (contact, candidates) = match client.resolve_name(key).await? {
         ResolvedName::Petname(petname) => (Some(petname), vec![]),
         ResolvedName::Learned(names) => {
             let candidates = names
@@ -1720,7 +1766,7 @@ async fn who_is(
         unreachable: outcome.unreachable,
         contact,
         candidates,
-        disavowals: disavowal_lines(&client, key)?,
+        disavowals: disavowal_lines(&client, key).await?,
     })
 }
 
@@ -1754,12 +1800,13 @@ async fn lens_offers(
 ) -> Result<Vec<SiblingOffer>, String> {
     let client = client(&app, &managed).await?;
     let mut rows = Vec::new();
-    for offer in client.lens_offers()? {
+    for offer in client.lens_offers().await? {
         rows.push(SiblingOffer {
             subject: key_dto(&offer.subject),
             petname: offer.petname,
             from: client
-                .participant_labels(&[offer.author])?
+                .participant_labels(&[offer.author])
+                .await?
                 .pop()
                 .unwrap_or_else(|| "another device".to_string()),
         });
@@ -1776,7 +1823,9 @@ async fn accept_offer(
     subject: String,
 ) -> Result<String, String> {
     let client = client(&app, &managed).await?;
-    Ok(client.accept_offer(&PublicKey(hex::parse32(&subject)?))?)
+    Ok(client
+        .accept_offer(&PublicKey(hex::parse32(&subject)?))
+        .await?)
 }
 
 /// Decline an offer — dropped, never a stance.
@@ -1787,7 +1836,9 @@ async fn decline_offer(
     subject: String,
 ) -> Result<(), String> {
     let client = client(&app, &managed).await?;
-    client.decline_offer(&PublicKey(hex::parse32(&subject)?));
+    client
+        .decline_offer(&PublicKey(hex::parse32(&subject)?))
+        .await;
     Ok(())
 }
 
@@ -1796,7 +1847,7 @@ async fn decline_offer(
 #[tauri::command]
 async fn refresh(app: AppHandle, managed: State<'_, ManagedClient>) -> Result<usize, String> {
     let client = client(&app, &managed).await?;
-    let relays = client.home_relays();
+    let relays = client.home_relays().await;
     if relays.is_empty() {
         return Err("set up your profile first".into());
     }

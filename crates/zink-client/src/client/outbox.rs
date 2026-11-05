@@ -62,7 +62,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let now = self.wall_clock.now_ms();
         // Reconcile before retrying (R2): the ledger owes recipients, and
         // records move — follow them, and settle what acks already proved.
-        let owed = self.reconcile_outbox(&mut report)?;
+        let owed = self.reconcile_outbox(&mut report).await?;
         // Cheap triage next: an aged-out entry never touches the network.
         let owed: Vec<crate::state::OutboxEntry> = owed
             .into_iter()
@@ -84,7 +84,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         for chunk in owed.chunks(FLUSH_CONCURRENCY) {
             let mut ready = Vec::with_capacity(chunk.len());
             for entry in chunk {
-                match self.reload_owed(entry)? {
+                match self.reload_owed(entry).await? {
                     Some(loaded) => ready.push((entry, loaded)),
                     // No stored envelope — nothing a retry could ever send.
                     None => continue,
@@ -97,7 +97,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                         .await
                     {
                         Ok(()) => {
-                            self.state.clear_outbox(entry.message, &entry.relay);
+                            self.state.clear_outbox(entry.message, &entry.relay).await;
                             true
                         }
                         Err(error) => {
@@ -135,12 +135,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Membership is never re-litigated: the recipients were sealed at
     /// send time, and a later disavowal changes future addressing, not
     /// deliveries already owed.
-    fn reconcile_outbox(
+    async fn reconcile_outbox(
         &self,
         report: &mut FlushReport,
     ) -> Result<Vec<crate::state::OutboxEntry>, Error> {
         let mut groups: BTreeMap<MessageId, Vec<crate::state::OutboxEntry>> = BTreeMap::new();
-        for entry in self.state.outbox() {
+        for entry in self.state.outbox().await {
             groups.entry(entry.message).or_default().push(entry);
         }
         let mut owed = Vec::new();
@@ -151,14 +151,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 .map(|entry| entry.created_ms)
                 .min()
                 .unwrap_or_default();
-            let envelope = match self.state.load_envelope(conversation, message) {
+            let envelope = match self.state.load_envelope(conversation, message).await {
                 Ok(envelope) => envelope,
                 Err(error) => {
                     // No stored envelope — nothing a retry could ever send
                     // (same stance as `reload_owed`).
                     tracing::warn!(%error, "dropping unfulfillable outbox entries");
                     for entry in &entries {
-                        self.state.clear_outbox(message, &entry.relay);
+                        self.state.clear_outbox(message, &entry.relay).await;
                     }
                     continue;
                 }
@@ -167,6 +167,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             let acked: BTreeSet<PublicKey> = self
                 .state
                 .acks_in(conversation)
+                .await
                 .remove(&message)
                 .unwrap_or_default()
                 .into_iter()
@@ -177,8 +178,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 if !has_blobs && acked.contains(key) {
                     continue; // durably held — nothing owed for this device
                 }
-                let stored = self.trusted_record_for(key);
-                let relays = self.effective_relays(*key, stored.as_ref());
+                let stored = self.trusted_record_for(key).await;
+                let relays = self.effective_relays(*key, stored.as_ref()).await;
                 if relays.is_empty() {
                     keep_staged = true;
                 } else {
@@ -192,7 +193,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     owed.push(entry);
                 } else {
                     tracing::info!(relay = %entry.relay, "releasing an outbox entry no longer owed");
-                    self.state.clear_outbox(message, &entry.relay);
+                    self.state.clear_outbox(message, &entry.relay).await;
                     report.released += 1;
                 }
             }
@@ -201,7 +202,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     continue;
                 }
                 self.state
-                    .add_outbox(message, &relay, conversation, created_ms)?;
+                    .add_outbox(message, &relay, conversation, created_ms)
+                    .await?;
                 owed.push(crate::state::OutboxEntry {
                     message,
                     relay,
@@ -218,33 +220,33 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// is gone, so no retry could ever fulfil this entry and it is dropped
     /// from the ledger.
     #[allow(clippy::type_complexity)]
-    fn reload_owed(
+    async fn reload_owed(
         &self,
         entry: &crate::state::OutboxEntry,
     ) -> Result<Option<(MessageEnvelope, Vec<zink_protocol::EncryptedBlob>)>, Error> {
-        let envelope = match self.state.load_envelope(entry.conversation, entry.message) {
+        let envelope = match self
+            .state
+            .load_envelope(entry.conversation, entry.message)
+            .await
+        {
             Ok(envelope) => envelope,
             Err(error) => {
                 tracing::warn!(%error, "dropping unfulfillable outbox entry");
-                self.state.clear_outbox(entry.message, &entry.relay);
+                self.state.clear_outbox(entry.message, &entry.relay).await;
                 return Ok(None);
             }
         };
-        let encrypted: Vec<zink_protocol::EncryptedBlob> = envelope
-            .core
-            .blob_refs
-            .iter()
-            .filter_map(|blob_ref| {
-                let bytes = self.state.load_blob(&blob_ref.hash);
-                if bytes.is_none() {
-                    tracing::warn!(blob = %hex::encode(&blob_ref.hash.0), "blob missing from cache; delivering without it");
-                }
-                Some(zink_protocol::EncryptedBlob {
-                    hash: blob_ref.hash,
-                    bytes: bytes?,
-                })
-            })
-            .collect();
+        let mut encrypted: Vec<zink_protocol::EncryptedBlob> = Vec::new();
+        for blob_ref in &envelope.core.blob_refs {
+            let Some(bytes) = self.state.load_blob(&blob_ref.hash).await else {
+                tracing::warn!(blob = %hex::encode(&blob_ref.hash.0), "blob missing from cache; delivering without it");
+                continue;
+            };
+            encrypted.push(zink_protocol::EncryptedBlob {
+                hash: blob_ref.hash,
+                bytes,
+            });
+        }
         Ok(Some((envelope, encrypted)))
     }
 }
@@ -292,7 +294,8 @@ mod tests {
             clock.clone(),
             TestWallClock::new(T0),
             net.clone(),
-        );
+        )
+        .await;
         a.add_contact(
             &ContactRecord::new(
                 vec![DeviceKey::from_seed([80; 32]).public()],
@@ -304,8 +307,9 @@ mod tests {
             ),
             Some("ghost".to_string()),
         )
+        .await
         .expect("add the contact");
-        let recipients = [a.resolve_contact("ghost").expect("resolve")];
+        let recipients = [a.resolve_contact("ghost").await.expect("resolve")];
 
         // When: the send times out and is queued…
         let (result, ()) = tokio::join!(
@@ -316,7 +320,7 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(Error::AllRelaysPending(_))));
-        assert_eq!(a.state.outbox().len(), 1, "owed to the silent relay");
+        assert_eq!(a.state.outbox().await.len(), 1, "owed to the silent relay");
 
         // …and the relay comes back: the next dial connects, the deposit
         // is taken
@@ -325,7 +329,7 @@ mod tests {
 
         // Then: recovered, nothing owed — and no real time passed anywhere
         assert_eq!(report.delivered, 1);
-        assert!(a.state.outbox().is_empty(), "the debt is settled");
+        assert!(a.state.outbox().await.is_empty(), "the debt is settled");
 
         let _ = std::fs::remove_dir_all(temp_root("recover"));
     }
@@ -355,7 +359,8 @@ mod tests {
             clock.clone(),
             TestWallClock::new(T0),
             net.clone(),
-        );
+        )
+        .await;
         let ghost = DeviceKey::from_seed([84; 32]);
         a.add_contact(
             &ContactRecord::new(
@@ -365,8 +370,9 @@ mod tests {
             ),
             Some("ghost".to_string()),
         )
+        .await
         .expect("add");
-        let recipients = [a.resolve_contact("ghost").expect("resolve")];
+        let recipients = [a.resolve_contact("ghost").await.expect("resolve")];
         let (result, ()) = tokio::join!(
             a.send(&recipients, b"see you on the new relay".to_vec(), vec![]),
             async {
@@ -383,6 +389,7 @@ mod tests {
             vec![],
             mailbox_only(&mailbox_spec(&relay_b)),
         ))
+        .await
         .expect("update");
         net.dial.connect(&relay_b).reply(deposited_frame());
         let report = a.flush_outbox().await.expect("flush");
@@ -391,7 +398,7 @@ mod tests {
         // without another dial
         assert_eq!(report.delivered, 1);
         assert_eq!(report.released, 1);
-        assert!(a.state.outbox().is_empty(), "the debt is settled");
+        assert!(a.state.outbox().await.is_empty(), "the debt is settled");
         assert_eq!(net.dial.dialed(&relay_a), 1, "only the original send");
         assert_eq!(net.dial.dialed(&relay_b), 1);
 
@@ -420,7 +427,8 @@ mod tests {
             clock.clone(),
             TestWallClock::new(T0),
             net.clone(),
-        );
+        )
+        .await;
         let ghost = DeviceKey::from_seed([86; 32]);
         a.add_contact(
             &ContactRecord::new(
@@ -430,8 +438,9 @@ mod tests {
             ),
             Some("ghost".to_string()),
         )
+        .await
         .expect("add");
-        let recipients = [a.resolve_contact("ghost").expect("resolve")];
+        let recipients = [a.resolve_contact("ghost").await.expect("resolve")];
         let (result, ()) = tokio::join!(
             a.send(&recipients, b"did you get this?".to_vec(), vec![]),
             async {
@@ -440,13 +449,14 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(Error::AllRelaysPending(_))));
-        let entry = &a.state.outbox()[0];
+        let entry = &a.state.outbox().await[0];
         a.state
             .add_acks(
                 entry.conversation,
                 entry.message,
                 &BTreeSet::from([ghost.public()]),
             )
+            .await
             .expect("persist the ack");
 
         // When
@@ -455,7 +465,7 @@ mod tests {
         // Then: settled without a deposit — the recipient already holds it
         assert_eq!(report.released, 1);
         assert_eq!(report.delivered, 0);
-        assert!(a.state.outbox().is_empty(), "the debt is settled");
+        assert!(a.state.outbox().await.is_empty(), "the debt is settled");
         assert_eq!(net.dial.dialed(&relay), 1, "only the original send");
 
         let _ = std::fs::remove_dir_all(temp_root("ack-release"));
@@ -484,7 +494,8 @@ mod tests {
             clock.clone(),
             TestWallClock::new(T0),
             net.clone(),
-        );
+        )
+        .await;
         let ghost = DeviceKey::from_seed([88; 32]);
         a.add_contact(
             &ContactRecord::new(
@@ -494,6 +505,7 @@ mod tests {
             ),
             Some("ghost".to_string()),
         )
+        .await
         .expect("add");
         let core = MessageCore {
             version: MessageCore::CURRENT,
@@ -514,12 +526,14 @@ mod tests {
         };
         let envelope = MessageEnvelope::new(core, &a.device);
         let id = envelope.id();
-        a.state.store_envelope(id, &envelope).expect("store");
+        a.state.store_envelope(id, &envelope).await.expect("store");
         a.state
             .add_outbox(id, &mailbox_spec(&relay), id, T0)
+            .await
             .expect("owe");
         a.state
             .add_acks(id, id, &BTreeSet::from([ghost.public()]))
+            .await
             .expect("persist the ack");
 
         // When: the relay stays silent through the flush
@@ -532,7 +546,7 @@ mod tests {
         let report = report.expect("flush");
         assert_eq!(report.released, 0);
         assert_eq!(report.pending, 1);
-        assert_eq!(a.state.outbox().len(), 1, "still owed for the blob");
+        assert_eq!(a.state.outbox().await.len(), 1, "still owed for the blob");
 
         let _ = std::fs::remove_dir_all(temp_root("blob-guard"));
     }
@@ -560,7 +574,8 @@ mod tests {
             clock.clone(),
             TestWallClock::new(T0),
             net.clone(),
-        );
+        )
+        .await;
         let stranger = DeviceKey::from_seed([90; 32]).public();
         let spec = format!("{}@{}", hex::encode(&stranger.0), mailbox_spec(&relay));
         let recipients = [Contact::parse(&spec).expect("parse")];
@@ -585,7 +600,7 @@ mod tests {
         let report = report.expect("flush");
         assert_eq!(report.released, 0);
         assert_eq!(report.pending, 1);
-        assert_eq!(a.state.outbox().len(), 1);
+        assert_eq!(a.state.outbox().await.len(), 1);
         assert_eq!(net.dial.dialed(&relay), 2, "send, then the retry");
 
         let _ = std::fs::remove_dir_all(temp_root("raw-spec"));
@@ -611,13 +626,15 @@ mod tests {
             TestClock::new(),
             wall,
             net.clone(),
-        );
+        )
+        .await;
         let ghost = DeviceKey::from_seed([93; 32]);
         let envelope = chain(&a.device, ghost.public(), 1).remove(0);
         let id = envelope.id();
-        a.state.store_envelope(id, &envelope).expect("store");
+        a.state.store_envelope(id, &envelope).await.expect("store");
         a.state
             .add_outbox(id, &mailbox_spec(&relay_a), id, T0)
+            .await
             .expect("owe");
         a.add_contact(
             &ContactRecord::new(
@@ -627,6 +644,7 @@ mod tests {
             ),
             Some("ghost".to_string()),
         )
+        .await
         .expect("add");
 
         // When
@@ -637,7 +655,7 @@ mod tests {
         assert_eq!(report.released, 1);
         assert_eq!(report.expired, 1);
         assert_eq!(report.delivered + report.pending, 0);
-        let outbox = a.state.outbox();
+        let outbox = a.state.outbox().await;
         assert_eq!(outbox.len(), 1);
         assert_eq!(outbox[0].relay, mailbox_spec(&relay_b));
         assert_eq!(outbox[0].created_ms, T0, "age inherited, not reset");

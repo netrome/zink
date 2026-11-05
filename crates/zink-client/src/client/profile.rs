@@ -52,18 +52,19 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // bump the persisted revision so receivers holding both claims have
         // a winner. Only *name* changes bump — the counter is scoped per
         // claim-kind; relay changes order by receipt time instead (D1b).
-        if let Some(previous) = self.state.profile_name()
+        if let Some(previous) = self.state.profile_name().await
             && previous != name.trim()
         {
             self.state
-                .save_profile_revision(self.state.profile_revision() + 1)?;
+                .save_profile_revision(self.state.profile_revision().await + 1)
+                .await?;
         }
-        let previous = self.home_relay_urls()?;
-        self.state.save_profile(name.trim(), &entries)?;
+        let previous = self.home_relay_urls().await?;
+        self.state.save_profile(name.trim(), &entries).await?;
         // Home the RUNNING endpoint (De5): the relay transport is always
         // bound (net::bind_endpoint), so map changes apply immediately —
         // a profile save no longer needs a restart to take effect.
-        let next = self.home_relay_urls()?;
+        let next = self.home_relay_urls().await?;
         for url in next.iter().filter(|url| !previous.contains(url)) {
             self.transport
                 .insert_relay(url)
@@ -79,53 +80,55 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The profile's home-relay URLs (entries without one skipped),
     /// normalized through the parser so `set_profile`'s diff compares the
     /// way the endpoint's relay map does — not raw string spellings.
-    fn home_relay_urls(&self) -> Result<Vec<String>, Error> {
+    async fn home_relay_urls(&self) -> Result<Vec<String>, Error> {
         self.state
             .home_relay_entries()
+            .await
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref())
             .map(|url| crate::adapters::iroh::parse_relay_url(url).map(|url| url.to_string()))
             .collect()
     }
 
-    pub fn profile_name(&self) -> Option<String> {
-        self.state.profile_name()
+    pub async fn profile_name(&self) -> Option<String> {
+        self.state.profile_name().await
     }
 
     /// Set this device's label — the device qualifier beside the person
     /// name ("phone", "laptop"; SPEC §3.2 `DeviceLabel`). Optional, and
     /// superseded independently of the name: a relabel bumps its own
     /// revision, a rename never touches it.
-    pub fn set_device_label(&self, label: &str) -> Result<(), Error> {
+    pub async fn set_device_label(&self, label: &str) -> Result<(), Error> {
         let label = label.trim();
         if label.is_empty() {
             return Err(Error::InvalidInput("device label must not be empty".into()));
         }
-        let revision = match self.state.device_label_meta() {
+        let revision = match self.state.device_label_meta().await {
             Some((previous, revision)) if previous == label => revision,
             Some((_, revision)) => revision + 1,
             None => 0,
         };
-        self.state.save_device_label(label, revision)
+        self.state.save_device_label(label, revision).await
     }
 
-    pub fn device_label(&self) -> Option<String> {
-        self.state.device_label_meta().map(|(label, _)| label)
+    pub async fn device_label(&self) -> Option<String> {
+        self.state.device_label_meta().await.map(|(label, _)| label)
     }
 
     /// The home relays' mailbox dial strings — what the mailbox paths
     /// (recv, subscribe, register) dial.
-    pub fn home_relays(&self) -> Vec<String> {
-        self.state.home_relays()
+    pub async fn home_relays(&self) -> Vec<String> {
+        self.state.home_relays().await
     }
 
     /// The home relays as full specs (`dial[#relay-url]`) — the round-trip
     /// form: what an edge shows in a profile form and feeds back into
     /// `set_profile`. Using `home_relays` there instead would silently drop
     /// the relay URL on a re-save.
-    pub fn home_relay_specs(&self) -> Vec<String> {
+    pub async fn home_relay_specs(&self) -> Vec<String> {
         self.state
             .home_relay_entries()
+            .await
             .iter()
             .map(RelayEntry::to_spec)
             .collect()
@@ -133,11 +136,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// This device's ContactRecord: key, self-attested name, home relays.
     /// The QR/paste payload is `record.to_qr_string()`.
-    pub fn my_record(&self) -> Result<ContactRecord, Error> {
-        if self.state.profile_name().is_none() {
+    pub async fn my_record(&self) -> Result<ContactRecord, Error> {
+        if self.state.profile_name().await.is_none() {
             return Err(Error::ProfileIncomplete("set a profile name first"));
         }
         build_own_record(&self.device, &self.state)
+            .await
             .ok_or(Error::ProfileIncomplete("set a home relay first"))
     }
 
@@ -154,6 +158,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let registrations = self
             .state
             .home_relays()
+            .await
             .into_iter()
             .map(|relay| async move {
                 let connection = net::connect(
@@ -193,13 +198,16 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             )));
         }
         let (blob, key) = seal_avatar(&image, &mut OsRng);
-        self.state.save_blob(&blob.hash, &blob.bytes)?;
+        self.state.save_blob(&blob.hash, &blob.bytes).await?;
         let revision = self
             .state
             .avatar_meta()
+            .await
             .map(|(_, _, revision)| revision + 1)
             .unwrap_or(0);
-        self.state.save_avatar_meta(&blob.hash, &key, revision)?;
+        self.state
+            .save_avatar_meta(&blob.hash, &key, revision)
+            .await?;
         Ok(AvatarReceipt {
             hash: blob.hash,
             revision,
@@ -217,28 +225,30 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let hashes = self
             .state
             .avatar_meta()
+            .await
             .map(|(hash, _, _)| hash)
             .into_iter()
             .chain(
                 self.state
                     .issued_avatar_shares()
+                    .await
                     .into_iter()
                     .filter_map(|signed| match signed.attestation.claim {
                         Claim::Avatar { hash, .. } => Some(hash),
                         _ => None,
                     }),
             );
-        let blobs: Vec<EncryptedBlob> = hashes
-            .filter_map(|hash| {
-                let bytes = self.state.load_blob(&hash)?;
-                Some(EncryptedBlob { hash, bytes })
-            })
-            .collect();
+        let mut blobs: Vec<EncryptedBlob> = Vec::new();
+        for hash in hashes {
+            if let Some(bytes) = self.state.load_blob(&hash).await {
+                blobs.push(EncryptedBlob { hash, bytes });
+            }
+        }
         if blobs.is_empty() {
             return 0;
         }
         let mut pushed = 0;
-        for relay in self.state.home_relays() {
+        for relay in self.state.home_relays().await {
             match blobs::push_blobs(
                 &self.transport,
                 &relay,
@@ -264,8 +274,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         if image.len() > 512 * 1024 {
             return Err(Error::InvalidInput("image too large (max 512 KiB)".into()));
         }
-        self.state.save_local_avatar(&key, &image)?;
-        if self.state.avatar_share_for(&key).is_some() {
+        self.state.save_local_avatar(&key, &image).await?;
+        if self.state.avatar_share_for(&key).await.is_some() {
             self.share_avatar(key).await?;
         }
         Ok(())
@@ -274,9 +284,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Drop the local avatar override — `avatar` falls back to the
     /// self-claim. A standing share is withdrawn with it: a photo no
     /// longer held cannot honestly stay shared.
-    pub fn clear_local_avatar(&self, key: PublicKey) {
-        self.state.remove_local_avatar(&key);
-        self.state.remove_avatar_share(&key);
+    pub async fn clear_local_avatar(&self, key: PublicKey) {
+        self.state.remove_local_avatar(&key).await;
+        self.state.remove_avatar_share(&key).await;
     }
 
     /// Share my photo of a contact with friends who ask about them
@@ -290,7 +300,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     pub async fn share_avatar(&self, subject: PublicKey) -> Result<u64, Error> {
         let held = self
             .state
-            .contacts()?
+            .contacts()
+            .await?
             .iter()
             .any(|(_, record)| record.keys.contains(&subject));
         if !held {
@@ -298,7 +309,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 "not a contact — add them before sharing a photo of them".into(),
             ));
         }
-        let Some(image) = self.state.local_avatar(&subject) else {
+        let Some(image) = self.state.local_avatar(&subject).await else {
             return Err(Error::InvalidInput(
                 "no photo of them set — choose one first".into(),
             ));
@@ -307,6 +318,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let revision = self
             .state
             .avatar_share_for(&subject)
+            .await
             .map(|prior| prior.attestation.revision + 1)
             .unwrap_or(0);
         let share = SignedAttestation::new(
@@ -322,8 +334,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             },
             &self.device,
         );
-        self.state.save_blob(&blob.hash, &blob.bytes)?;
-        self.state.save_avatar_share(&subject, &share)?;
+        self.state.save_blob(&blob.hash, &blob.bytes).await?;
+        self.state.save_avatar_share(&subject, &share).await?;
         self.push_avatar().await;
         Ok(revision)
     }
@@ -331,14 +343,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Withdraw an avatar share: it stops being served, and observers'
     /// per-responder learned entries replace it away on their next
     /// freshness pull — exactly the `unvouch` semantics.
-    pub fn unshare_avatar(&self, subject: PublicKey) {
-        self.state.remove_avatar_share(&subject);
+    pub async fn unshare_avatar(&self, subject: PublicKey) {
+        self.state.remove_avatar_share(&subject).await;
     }
 
     /// Whether this device currently shares a photo of a key (drives the
     /// share toggle, like `vouches` drives the vouch).
-    pub fn shares_avatar(&self, subject: &PublicKey) -> bool {
-        self.state.avatar_share_for(subject).is_some()
+    pub async fn shares_avatar(&self, subject: &PublicKey) -> bool {
+        self.state.avatar_share_for(subject).await.is_some()
     }
 
     /// A friend's shared photo of a subject (S5) — "as Bob tells you":
@@ -356,6 +368,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let Some(entry) = self
             .state
             .learned(&subject)
+            .await
             .into_iter()
             .find(|entry| entry.responder == friend)
         else {
@@ -364,13 +377,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let Some((hash, key, _)) = super::contacts::shared_avatar_claim(&entry, subject) else {
             return Ok(None);
         };
-        if let Some(bytes) = self.state.load_blob(&hash)
+        if let Some(bytes) = self.state.load_blob(&hash).await
             && let Ok(plaintext) = open_avatar(&bytes, &hash, &key)
         {
             return Ok(Some(plaintext));
         }
         let relays = self
             .relay_resolution(friend)
+            .await
             .map(|resolution| resolution.relays)
             .unwrap_or_default();
         for relay in relays {
@@ -385,7 +399,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             {
                 Ok(bytes) => match open_avatar(&bytes, &hash, &key) {
                     Ok(plaintext) => {
-                        self.state.save_blob(&hash, &bytes)?;
+                        self.state.save_blob(&hash, &bytes).await?;
                         return Ok(Some(plaintext));
                     }
                     Err(error) => {
@@ -402,8 +416,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// Whether a local avatar override is set for a key (drives the "remove
     /// your photo" affordance).
-    pub fn has_local_avatar(&self, key: &PublicKey) -> bool {
-        self.state.local_avatar(key).is_some()
+    pub async fn has_local_avatar(&self, key: &PublicKey) -> bool {
+        self.state.local_avatar(key).await.is_some()
     }
 
     /// The best-believed avatar for a key (D1d): the highest-revision
@@ -416,14 +430,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     pub async fn avatar(&self, subject: PublicKey) -> Result<Option<Vec<u8>>, Error> {
         // A local override (U6, my lens) wins over any claim — a photo I
         // chose for them, stored on this device only, never fetched.
-        if let Some(bytes) = self.state.local_avatar(&subject) {
+        if let Some(bytes) = self.state.local_avatar(&subject).await {
             return Ok(Some(bytes));
         }
         if subject == self.device.public() {
-            let Some((hash, key, _)) = self.state.avatar_meta() else {
+            let Some((hash, key, _)) = self.state.avatar_meta().await else {
                 return Ok(None);
             };
-            let Some(bytes) = self.state.load_blob(&hash) else {
+            let Some(bytes) = self.state.load_blob(&hash).await else {
                 return Ok(None);
             };
             return Ok(Some(open_avatar(&bytes, &hash, &key).map_err(Error::Open)?));
@@ -436,18 +450,18 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 best = Some((hash, key, revision, record.relays.clone()));
             }
         };
-        for (_, record) in self.state.contacts()? {
+        for (_, record) in self.state.contacts().await? {
             if record.keys.contains(&subject) {
                 consider(&record);
             }
         }
-        for learned in self.state.learned(&subject) {
+        for learned in self.state.learned(&subject).await {
             consider(&learned.record);
         }
         let Some((hash, key, _, relays)) = best else {
             return Ok(None);
         };
-        if let Some(bytes) = self.state.load_blob(&hash)
+        if let Some(bytes) = self.state.load_blob(&hash).await
             && let Ok(plaintext) = open_avatar(&bytes, &hash, &key)
         {
             return Ok(Some(plaintext));
@@ -464,7 +478,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             {
                 Ok(bytes) => match open_avatar(&bytes, &hash, &key) {
                     Ok(plaintext) => {
-                        self.state.save_blob(&hash, &bytes)?;
+                        self.state.save_blob(&hash, &bytes).await?;
                         return Ok(Some(plaintext));
                     }
                     Err(error) => {
@@ -485,9 +499,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 /// QR/paste publishing path) and the sync handler (serving `WhoIs` about
 /// our own key, D1a), so the two can't drift. The attestation `revision`
 /// is the persisted supersession counter, bumped per rename (D1b).
-pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Option<ContactRecord> {
-    let name = state.profile_name()?;
-    let relays = state.home_relay_entries();
+pub(crate) async fn build_own_record(
+    device: &DeviceKey,
+    state: &ClientState,
+) -> Option<ContactRecord> {
+    let name = state.profile_name().await?;
+    let relays = state.home_relay_entries().await;
     if relays.is_empty() {
         return None;
     }
@@ -504,27 +521,30 @@ pub(crate) fn build_own_record(device: &DeviceKey, state: &ClientState) -> Optio
             device,
         )
     };
-    let mut attestations = vec![self_claim(Claim::Name(name), state.profile_revision())];
+    let mut attestations = vec![self_claim(
+        Claim::Name(name),
+        state.profile_revision().await,
+    )];
     // The device label (S1, profile pages): the qualifier beside the name,
     // its own claim kind so the two supersede independently (SPEC §3.2).
-    if let Some((label, revision)) = state.device_label_meta() {
+    if let Some((label, revision)) = state.device_label_meta().await {
         attestations.push(self_claim(Claim::DeviceLabel(label), revision));
     }
     // The avatar claim (D1d): hash + key together, under the signature —
     // whoever holds the record can fetch and decrypt; relays cannot.
-    if let Some((hash, key, revision)) = state.avatar_meta() {
+    if let Some((hash, key, revision)) = state.avatar_meta().await {
         attestations.push(self_claim(Claim::Avatar { hash, key }, revision));
     }
     // The outgoing device vouches (D3b, multi-device.md §4): the record
     // gains exactly this — links live in the record's attestations
     // (SPEC §3.6). `keys` stays this device's own key; observers gather
     // link evidence across the records they hold.
-    attestations.extend(state.device_vouches());
+    attestations.extend(state.device_vouches().await);
     // …and the issued repudiations (D4b, web-of-trust.md §5): a lost key's
     // disavowal reaches contacts through any freshness pull on US — the
     // endorsement channel needs a servable record for the *subject*, which
     // an un-recognized key no longer has.
-    attestations.extend(state.issued_negatives());
+    attestations.extend(state.issued_negatives().await);
     Some(ContactRecord::new(vec![me], attestations, relays))
 }
 
@@ -543,9 +563,10 @@ mod tests {
             .await
             .expect("open");
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
-        let revision = |client: &Client| {
+        let revision = async |client: &Client| {
             client
                 .my_record()
+                .await
                 .expect("record")
                 .self_name_claim()
                 .expect("claim")
@@ -557,15 +578,15 @@ mod tests {
         a.set_profile("alice", std::slice::from_ref(&relay))
             .await
             .expect("set");
-        assert_eq!(revision(&a), 0);
+        assert_eq!(revision(&a).await, 0);
         a.set_profile("alice", std::slice::from_ref(&relay))
             .await
             .expect("re-set");
-        assert_eq!(revision(&a), 0);
+        assert_eq!(revision(&a).await, 0);
         a.set_profile("alicia", std::slice::from_ref(&relay))
             .await
             .expect("rename");
-        assert_eq!(revision(&a), 1);
+        assert_eq!(revision(&a).await, 1);
 
         let _ = std::fs::remove_dir_all(temp_root("rev"));
     }
@@ -582,15 +603,15 @@ mod tests {
             .expect("profile");
 
         // When: label set, re-set unchanged, relabeled — then a rename
-        a.set_device_label("phone").expect("set");
-        let set = a.my_record().expect("record");
-        a.set_device_label("phone").expect("re-set");
-        let re_set = a.my_record().expect("record");
-        a.set_device_label("laptop").expect("relabel");
+        a.set_device_label("phone").await.expect("set");
+        let set = a.my_record().await.expect("record");
+        a.set_device_label("phone").await.expect("re-set");
+        let re_set = a.my_record().await.expect("record");
+        a.set_device_label("laptop").await.expect("relabel");
         a.set_profile("mårten ii", std::slice::from_ref(&relay))
             .await
             .expect("rename");
-        let renamed = a.my_record().expect("record");
+        let renamed = a.my_record().await.expect("record");
 
         // Then: the label supersedes on change only, and the rename bumps
         // the name's revision without touching the label's (SPEC §3.2
@@ -628,7 +649,7 @@ mod tests {
         a.set_profile("alice", std::slice::from_ref(&relay))
             .await
             .expect("profile");
-        let record = a.my_record().expect("record");
+        let record = a.my_record().await.expect("record");
         assert_eq!(
             record
                 .self_avatar_claim()
@@ -657,9 +678,17 @@ mod tests {
         a.set_profile("alice", std::slice::from_ref(&relay))
             .await
             .expect("profile");
-        let ciphertext = a.state.load_blob(&receipt.hash).expect("cached at set");
-        b.state.save_blob(&receipt.hash, &ciphertext).expect("seed");
-        b.add_contact(&a.my_record().expect("record"), None)
+        let ciphertext = a
+            .state
+            .load_blob(&receipt.hash)
+            .await
+            .expect("cached at set");
+        b.state
+            .save_blob(&receipt.hash, &ciphertext)
+            .await
+            .expect("seed");
+        b.add_contact(&a.my_record().await.expect("record"), None)
+            .await
             .expect("add");
 
         // When
@@ -668,7 +697,10 @@ mod tests {
         // Then: decrypted via the claim's key; at rest it stays ciphertext
         assert_eq!(rendered.as_deref(), Some(b"portrait".as_slice()));
         assert_ne!(
-            b.state.load_blob(&receipt.hash).expect("still cached"),
+            b.state
+                .load_blob(&receipt.hash)
+                .await
+                .expect("still cached"),
             b"portrait".to_vec(),
             "cache holds ciphertext, like a relay would"
         );
@@ -681,8 +713,8 @@ mod tests {
         // Given: bob holds carol with a photo he chose and shares it; bob
         // serves anna (mutual), and anna can dial him
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("share-serve", "anna", &wire);
-        let (b, _b_net, _b_clock) = loop_client("share-serve", "bob", &wire);
+        let (a, _a_net, _a_clock) = loop_client("share-serve", "anna", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("share-serve", "bob", &wire).await;
         let carol = DeviceKey::from_seed([90; 32]).public();
         let carol_record = ContactRecord::new(
             vec![carol],
@@ -693,12 +725,13 @@ mod tests {
             }],
         );
         b.add_contact(&carol_record, Some("carol".to_string()))
+            .await
             .expect("bob adds carol");
         b.set_local_avatar(carol, b"a picture of carol".to_vec())
             .await
             .expect("photo");
         b.share_avatar(carol).await.expect("share");
-        befriend(&b.state, a.public_key());
+        befriend(&b.state, a.public_key()).await;
         a.add_contact(
             &ContactRecord::new(
                 vec![b.public_key()],
@@ -710,22 +743,30 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("anna adds bob");
 
         // When: anna asks about carol, and the ciphertext reaches her cache
         // (what a successful relay fetch leaves behind)
         a.who_is(carol).await.expect("who_is");
-        let share = b.state.avatar_share_for(&carol).expect("share stored");
+        let share = b
+            .state
+            .avatar_share_for(&carol)
+            .await
+            .expect("share stored");
         let Claim::Avatar { hash, .. } = share.attestation.claim else {
             panic!("expected an avatar claim");
         };
-        let ciphertext = b.state.load_blob(&hash).expect("sealed at share");
-        a.state.save_blob(&hash, &ciphertext).expect("seed cache");
+        let ciphertext = b.state.load_blob(&hash).await.expect("sealed at share");
+        a.state
+            .save_blob(&hash, &ciphertext)
+            .await
+            .expect("seed cache");
 
         // Then: the friends lens carries the share, and the photo renders
         // as bob tells it — while carol's own face stays unclaimed: a
         // friend's photo never enters `avatar` resolution
-        let views = a.friend_views(carol).expect("views");
+        let views = a.friend_views(carol).await.expect("views");
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].petname, "bob");
         assert_eq!(views[0].responder, b.public_key());
@@ -755,6 +796,7 @@ mod tests {
             ),
             Some("carol".to_string()),
         )
+        .await
         .expect("add carol");
         a.set_local_avatar(carol, b"first photo".to_vec())
             .await
@@ -768,16 +810,20 @@ mod tests {
 
         // Then: re-shared at the next revision, so what friends fetch is
         // what the toggle says it is
-        let reshared = a.state.avatar_share_for(&carol).expect("still shared");
+        let reshared = a
+            .state
+            .avatar_share_for(&carol)
+            .await
+            .expect("still shared");
         assert_eq!((first, reshared.attestation.revision), (0, 1));
 
         // When: carol's key is repudiated
-        a.repudiate(carol).expect("repudiate");
+        a.repudiate(carol).await.expect("repudiate");
 
         // Then: the share is withdrawn, and the Negative out-revisions it —
         // copies already learned void under the §4 rule
-        assert!(a.state.avatar_share_for(&carol).is_none());
-        let negative = a.state.vouch_for(&carol).expect("negative stored");
+        assert!(a.state.avatar_share_for(&carol).await.is_none());
+        let negative = a.state.vouch_for(&carol).await.expect("negative stored");
         assert!(matches!(negative.attestation.claim, Claim::Negative));
         assert!(negative.attestation.revision > 1);
 
@@ -802,6 +848,7 @@ mod tests {
             ),
             Some("carol".to_string()),
         )
+        .await
         .expect("add carol");
         a.set_local_avatar(carol, b"photo".to_vec())
             .await
@@ -809,10 +856,10 @@ mod tests {
         a.share_avatar(carol).await.expect("share");
 
         // When: the photo is removed
-        a.clear_local_avatar(carol);
+        a.clear_local_avatar(carol).await;
 
         // Then: a photo no longer held cannot honestly stay shared
-        assert!(a.state.avatar_share_for(&carol).is_none());
+        assert!(a.state.avatar_share_for(&carol).await.is_none());
 
         let _ = std::fs::remove_dir_all(temp_root("share-clear"));
     }

@@ -111,8 +111,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// renders under the first row only, and a contact entry no person
     /// claims — a crash gap, or a store from before the eager invariant —
     /// gets its row minted on sight, so every entry renders exactly once.
-    pub fn persons(&self) -> Result<Vec<PersonEntry>, Error> {
-        let contacts = self.state.contacts()?;
+    pub async fn persons(&self) -> Result<Vec<PersonEntry>, Error> {
+        let contacts = self.state.contacts().await?;
         let entry_for = |stem: &PublicKey| {
             contacts
                 .iter()
@@ -120,7 +120,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         };
         let mut persons = Vec::new();
         let mut claimed: BTreeSet<PublicKey> = BTreeSet::new();
-        for (id, label, member_stems) in self.state.persons() {
+        for (id, label, member_stems) in self.state.persons().await {
             let members: Vec<(String, ContactRecord)> = member_stems
                 .iter()
                 .filter(|stem| !claimed.contains(stem))
@@ -143,7 +143,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             if claimed.contains(&stem) {
                 continue;
             }
-            let id = self.claim_entry(petname, stem)?;
+            let id = self.claim_entry(petname, stem).await?;
             persons.push(PersonEntry {
                 id,
                 label: petname.clone(),
@@ -159,9 +159,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// an unclaimed entry. The label starts as the petname; they are
     /// independent facts from here on (rename_person moves one, the
     /// contact-store rename the other).
-    pub(super) fn claim_entry(&self, petname: &str, stem: PublicKey) -> Result<PersonId, Error> {
+    pub(super) async fn claim_entry(
+        &self,
+        petname: &str,
+        stem: PublicKey,
+    ) -> Result<PersonId, Error> {
         let id = PersonId::mint(&self.rng);
-        self.state.save_person(id.to_storage(), petname, &[stem])?;
+        self.state
+            .save_person(id.to_storage(), petname, &[stem])
+            .await?;
         Ok(id)
     }
 
@@ -170,14 +176,19 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// relays — relays bind to the publishing device, SPEC §3.6), falling
     /// back to the per-device layer (an entry petname addresses that device
     /// alone — the manual override for "message Alice's phone").
-    pub fn resolve_person(&self, name: &str) -> Result<Vec<Contact>, Error> {
-        match self.person_by_label(name) {
-            Ok(person) => Ok(person
-                .members
-                .iter()
-                .map(|(_, record)| self.contact_from(record))
-                .collect()),
-            Err(Error::NotAContact(_)) => self.resolve_contact(name).map(|contact| vec![contact]),
+    pub async fn resolve_person(&self, name: &str) -> Result<Vec<Contact>, Error> {
+        match self.person_by_label(name).await {
+            Ok(person) => {
+                let mut contacts = Vec::with_capacity(person.members.len());
+                for (_, record) in &person.members {
+                    contacts.push(self.contact_from(record).await);
+                }
+                Ok(contacts)
+            }
+            Err(Error::NotAContact(_)) => self
+                .resolve_contact(name)
+                .await
+                .map(|contact| vec![contact]),
             Err(error) => Err(error),
         }
     }
@@ -186,31 +197,37 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// evidence popup's accept, or a manual merge). `into` keeps its label
     /// and id; `from` dissolves. Advisory evidence never merges anything:
     /// this act is the only path.
-    pub fn merge_persons(&self, into: PersonId, from: PersonId) -> Result<PersonEntry, Error> {
+    pub async fn merge_persons(
+        &self,
+        into: PersonId,
+        from: PersonId,
+    ) -> Result<PersonEntry, Error> {
         if into == from {
             return Err(Error::InvalidInput(
                 "cannot merge a person into itself".into(),
             ));
         }
-        let keep = self.person_by_id(into)?;
-        let absorb = self.person_by_id(from)?;
+        let keep = self.person_by_id(into).await?;
+        let absorb = self.person_by_id(from).await?;
         let mut members = keep.member_stems();
         members.extend(absorb.member_stems());
         // Grow first, remove after: a crash in between double-claims the
         // stems, which `persons()` renders once (first row wins) until the
         // next act rewrites — never a lost entry.
         self.state
-            .save_person(into.to_storage(), &keep.label, &members)?;
-        self.state.remove_person(from.to_storage());
-        self.person_by_id(into)
+            .save_person(into.to_storage(), &keep.label, &members)
+            .await?;
+        self.state.remove_person(from.to_storage()).await;
+        self.person_by_id(into).await
     }
 
     /// Split a member entry back out to its own person, labeled by its
     /// petname — the undo of a merge (or of a wrong accept). The source
     /// person keeps its label and the rest of its members.
-    pub fn split_person(&self, member_petname: &str) -> Result<PersonEntry, Error> {
+    pub async fn split_person(&self, member_petname: &str) -> Result<PersonEntry, Error> {
         let source = self
-            .persons()?
+            .persons()
+            .await?
             .into_iter()
             .find(|person| {
                 person
@@ -232,7 +249,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // refuse rather than mint a twin — rename the person first.
         if source.label == member_petname
             || self
-                .persons()?
+                .persons()
+                .await?
                 .iter()
                 .any(|person| person.id != source.id && person.label == member_petname)
         {
@@ -245,24 +263,28 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // Shrink first, split after: a crash in between leaves the member
         // unclaimed, and the `persons()` self-heal re-mints it as its own
         // singleton — the very outcome this act wanted.
-        self.state.save_person(
-            source.id.to_storage(),
-            &source.label,
-            &kept
-                .iter()
-                .filter_map(|(_, record)| record.keys.first().copied())
-                .collect::<Vec<_>>(),
-        )?;
+        self.state
+            .save_person(
+                source.id.to_storage(),
+                &source.label,
+                &kept
+                    .iter()
+                    .filter_map(|(_, record)| record.keys.first().copied())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
         let split_id = PersonId::mint(&self.rng);
-        self.state.save_person(
-            split_id.to_storage(),
-            member_petname,
-            &split
-                .iter()
-                .filter_map(|(_, record)| record.keys.first().copied())
-                .collect::<Vec<_>>(),
-        )?;
-        self.person_by_id(split_id)
+        self.state
+            .save_person(
+                split_id.to_storage(),
+                member_petname,
+                &split
+                    .iter()
+                    .filter_map(|(_, record)| record.keys.first().copied())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        self.person_by_id(split_id).await
     }
 
     /// Rename a person — the addressing label, my lens (like a petname,
@@ -270,20 +292,21 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// label or contact petname, except its own members' petnames: the
     /// person layer resolves first, so shadowing our own member stays
     /// unambiguous.
-    pub fn rename_person(&self, id: PersonId, new: &str) -> Result<(), Error> {
+    pub async fn rename_person(&self, id: PersonId, new: &str) -> Result<(), Error> {
         let new = new.trim();
-        let person = self.person_by_id(id)?;
+        let person = self.person_by_id(id).await?;
         if new == person.label {
             return Ok(());
         }
-        self.set_person_label(&person, new)?;
+        self.set_person_label(&person, new).await?;
         // My act supersedes (lens-sync.md §5): a surfaced conflict for
         // this person clears, and the rename travels to the siblings.
-        self.state.remove_conflict(id.to_storage());
+        self.state.remove_conflict(id.to_storage()).await;
         self.emit_lens_op(super::lens::LensOp::LabelPerson {
             members: person.keys().iter().map(|key| key.0).collect(),
             label: new.to_string(),
-        });
+        })
+        .await;
         Ok(())
     }
 
@@ -291,22 +314,28 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// emits) and the adoption replay (which must not — re-emitting an
     /// adopted op would amplify; the original reaches every sibling by
     /// itself).
-    pub(super) fn set_person_label(&self, person: &PersonEntry, new: &str) -> Result<(), Error> {
+    pub(super) async fn set_person_label(
+        &self,
+        person: &PersonEntry,
+        new: &str,
+    ) -> Result<(), Error> {
         let new = new.trim();
         if new.is_empty() {
             return Err(Error::InvalidInput("person label cannot be empty".into()));
         }
-        self.ensure_label_free(new, Some(person))?;
+        self.ensure_label_free(new, Some(person)).await?;
         self.state
             .save_person(person.id.to_storage(), new, &person.member_stems())
+            .await
     }
 
     /// Look a person up by id — the reference every act takes. Total over
     /// everything `persons()` renders: ids are stable for a person's whole
     /// lifetime (only a split's new person, or a merge's dissolved one,
     /// changes the id set).
-    pub fn person_by_id(&self, id: PersonId) -> Result<PersonEntry, Error> {
-        self.persons()?
+    pub async fn person_by_id(&self, id: PersonId) -> Result<PersonEntry, Error> {
+        self.persons()
+            .await?
             .into_iter()
             .find(|person| person.id == id)
             .ok_or_else(|| Error::NotAContact(format!("no person with id {id}")))
@@ -316,9 +345,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// send-by-name), and the only place labels resolve. Labels are unique
     /// by construction (`ensure_label_free`); a duplicate means a damaged
     /// store and errors honestly instead of first-match-wins.
-    pub fn person_by_label(&self, label: &str) -> Result<PersonEntry, Error> {
+    pub async fn person_by_label(&self, label: &str) -> Result<PersonEntry, Error> {
         let mut matching = self
-            .persons()?
+            .persons()
+            .await?
             .into_iter()
             .filter(|person| person.label == label);
         let person = matching
@@ -335,13 +365,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The joint-namespace collision check (S2: the collision rule moves to
     /// person labels): a name must not already be another person's label or
     /// a contact petname outside `exempt`'s members.
-    pub(super) fn ensure_label_free(
+    pub(super) async fn ensure_label_free(
         &self,
         name: &str,
         exempt: Option<&PersonEntry>,
     ) -> Result<(), Error> {
         let exempt_id = exempt.map(|person| person.id);
-        for person in self.persons()? {
+        for person in self.persons().await? {
             if Some(person.id) == exempt_id {
                 continue;
             }
@@ -377,14 +407,18 @@ mod tests {
 
     /// The label→id hop the acts no longer do themselves — tests speak
     /// labels (readable), acts take ids.
-    fn id_of<C, W, N, R>(client: &Client<C, W, N, R>, label: &str) -> PersonId
+    async fn id_of<C, W, N, R>(client: &Client<C, W, N, R>, label: &str) -> PersonId
     where
         C: crate::ports::clock::Clock,
         W: crate::ports::clock::WallClock,
         N: crate::ports::transport::Transport,
         R: crate::ports::rng::Draw + crate::ports::rng::Mint,
     {
-        client.person_by_label(label).expect("person by label").id
+        client
+            .person_by_label(label)
+            .await
+            .expect("person by label")
+            .id
     }
 
     #[test]
@@ -424,14 +458,21 @@ mod tests {
             &signed_record(&device_key(1), "alice-phone", 0, relay(1)),
             None,
         )
+        .await
         .expect("add");
         a.add_contact(&signed_record(&device_key(2), "bob", 0, relay(2)), None)
+            .await
             .expect("add");
 
         // Then: one persisted person row per entry, labeled by its petname
-        assert_eq!(a.state.persons().len(), 2, "rows persisted at add time");
+        assert_eq!(
+            a.state.persons().await.len(),
+            2,
+            "rows persisted at add time"
+        );
         let labels: Vec<(String, usize)> = a
             .persons()
+            .await
             .expect("persons")
             .iter()
             .map(|person| (person.label.clone(), person.members.len()))
@@ -456,16 +497,17 @@ mod tests {
                 "carol",
                 &signed_record(&device_key(3), "carol", 0, relay(3)),
             )
+            .await
             .expect("save");
-        assert_eq!(a.state.persons().len(), 0);
+        assert_eq!(a.state.persons().await.len(), 0);
 
         // When: any read runs
-        let persons = a.persons().expect("persons");
+        let persons = a.persons().await.expect("persons");
 
         // Then: the invariant self-healed — claimed, rendered, persisted
         assert_eq!(persons.len(), 1);
         assert_eq!(persons[0].label, "carol");
-        assert_eq!(a.state.persons().len(), 1);
+        assert_eq!(a.state.persons().await.len(), 1);
 
         let _ = std::fs::remove_dir_all(temp_root("pheal"));
     }
@@ -479,27 +521,30 @@ mod tests {
             .expect("open");
         let (phone, laptop) = (device_key(1), device_key(2));
         a.add_contact(&signed_record(&phone, "Alice", 0, relay(1)), None)
+            .await
             .expect("add phone");
         a.add_contact(&signed_record(&laptop, "alice-laptop", 0, relay(2)), None)
+            .await
             .expect("add laptop");
 
         // When: the explicit clustering act
         let merged = a
-            .merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+            .merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
             .expect("merge");
 
         // Then: one person, two member entries; addressing the person
         // reaches both keys, each riding its own entry's relays (relays
         // bind to the publishing device — SPEC §3.6)
         assert_eq!(merged.members.len(), 2);
-        assert_eq!(a.persons().expect("persons").len(), 1);
-        let contacts = a.resolve_person("Alice").expect("resolve");
+        assert_eq!(a.persons().await.expect("persons").len(), 1);
+        let contacts = a.resolve_person("Alice").await.expect("resolve");
         assert_eq!(contacts.len(), 2);
         assert_eq!(contacts[0].keys, vec![phone.public()]);
         assert_eq!(contacts[1].keys, vec![laptop.public()]);
         assert_ne!(contacts[0].relays, contacts[1].relays);
         // The per-device layer stays addressable underneath
-        let device_only = a.resolve_person("alice-laptop").expect("member");
+        let device_only = a.resolve_person("alice-laptop").await.expect("member");
         assert_eq!(device_only.len(), 1);
         assert_eq!(device_only[0].keys, vec![laptop.public()]);
 
@@ -514,20 +559,28 @@ mod tests {
             .expect("open");
         let (phone, laptop) = (device_key(1), device_key(2));
         a.add_contact(&signed_record(&phone, "Alice", 0, relay(1)), None)
+            .await
             .expect("add");
         a.add_contact(&signed_record(&laptop, "alice-laptop", 0, relay(2)), None)
+            .await
             .expect("add");
-        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+        a.merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
             .expect("merge");
 
         // When: a send addressed by the person label (staged — local only)
-        let contacts = a.resolve_person("Alice").expect("resolve");
+        let contacts = a.resolve_person("Alice").await.expect("resolve");
         let staged = a
             .stage_send(&contacts, b"hi alice".to_vec(), vec![])
+            .await
             .expect("stage");
 
         // Then: both device keys are sealed recipients
-        let envelopes = a.state.load_envelopes(staged.conversation).expect("stored");
+        let envelopes = a
+            .state
+            .load_envelopes(staged.conversation)
+            .await
+            .expect("stored");
         let recipients = &envelopes
             .first()
             .expect("the staged message")
@@ -546,22 +599,25 @@ mod tests {
             .await
             .expect("open");
         a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
+            .await
             .expect("add");
         a.add_contact(
             &signed_record(&device_key(2), "alice-laptop", 0, relay(2)),
             None,
         )
+        .await
         .expect("add");
-        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+        a.merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
             .expect("merge");
 
         // When
-        let split = a.split_person("alice-laptop").expect("split");
+        let split = a.split_person("alice-laptop").await.expect("split");
 
         // Then: two persons again, nothing dangling
         assert_eq!(split.label, "alice-laptop");
         assert_eq!(split.members.len(), 1);
-        let persons = a.persons().expect("persons");
+        let persons = a.persons().await.expect("persons");
         assert_eq!(persons.len(), 2);
         assert!(persons.iter().all(|person| !person.members.is_empty()));
 
@@ -576,21 +632,24 @@ mod tests {
             .await
             .expect("open");
         a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
+            .await
             .expect("add");
         a.add_contact(
             &signed_record(&device_key(2), "alice-laptop", 0, relay(2)),
             None,
         )
+        .await
         .expect("add");
-        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+        a.merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
             .expect("merge");
 
         // When: splitting the namesake member out
-        let result = a.split_person("Alice");
+        let result = a.split_person("Alice").await;
 
         // Then: refused — labels stay unique, addressing stays unambiguous
         assert!(matches!(result, Err(Error::PetnameCollision(_))));
-        let persons = a.persons().expect("persons");
+        let persons = a.persons().await.expect("persons");
         assert_eq!(persons.len(), 1);
         assert_eq!(persons[0].members.len(), 2);
 
@@ -607,26 +666,29 @@ mod tests {
             &signed_record(&device_key(1), "alice-phone", 0, relay(1)),
             None,
         )
+        .await
         .expect("add");
         a.add_contact(&signed_record(&device_key(2), "bob", 0, relay(2)), None)
+            .await
             .expect("add");
 
         // When: rename by id — the id survives the label move
-        let alice = id_of(&a, "alice-phone");
-        a.rename_person(alice, "Alice").expect("rename");
+        let alice = id_of(&a, "alice-phone").await;
+        a.rename_person(alice, "Alice").await.expect("rename");
 
         // Then: resolution follows the new label at the same id; the old
         // label now only reaches the member entry (petname layer);
         // collisions refuse
-        assert_eq!(id_of(&a, "Alice"), alice);
-        assert_eq!(a.resolve_person("Alice").expect("resolve").len(), 1);
+        assert_eq!(id_of(&a, "Alice").await, alice);
+        assert_eq!(a.resolve_person("Alice").await.expect("resolve").len(), 1);
         assert!(matches!(
-            a.rename_person(alice, "bob"),
+            a.rename_person(alice, "bob").await,
             Err(Error::PetnameCollision(_))
         ));
         // …and a new contact can't take a person label either
         assert!(matches!(
-            a.add_contact(&signed_record(&device_key(3), "Alice", 0, relay(3)), None),
+            a.add_contact(&signed_record(&device_key(3), "Alice", 0, relay(3)), None)
+                .await,
             Err(Error::PetnameCollision(_))
         ));
 
@@ -643,19 +705,22 @@ mod tests {
             .expect("open");
         let (phone, laptop, fresh) = (device_key(1), device_key(2), device_key(3));
         a.add_contact(&signed_record(&phone, "Alice", 0, relay(1)), None)
+            .await
             .expect("add");
         a.add_contact(&signed_record(&laptop, "alice-laptop", 0, relay(2)), None)
+            .await
             .expect("add");
-        a.merge_persons(id_of(&a, "Alice"), id_of(&a, "alice-laptop"))
+        a.merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
             .expect("merge");
         let mut rekeyed = signed_record(&fresh, "alice laptop", 1, relay(2));
         rekeyed.keys.push(laptop.public());
 
         // When: the explicit update act moves the entry's stem
-        a.update_contact(&rekeyed).expect("update");
+        a.update_contact(&rekeyed).await.expect("update");
 
         // Then: the membership followed the stem — nothing dangles
-        let persons = a.persons().expect("persons");
+        let persons = a.persons().await.expect("persons");
         assert_eq!(persons.len(), 1, "the cluster held: {persons:?}");
         assert_eq!(persons[0].label, "Alice");
         assert_eq!(persons[0].members.len(), 2);

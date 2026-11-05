@@ -82,7 +82,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
     ) -> Result<SendReceipt, Error> {
-        let staged = self.stage_send(contacts, plaintext, blob_drafts)?;
+        let staged = self.stage_send(contacts, plaintext, blob_drafts).await?;
         self.deliver(&staged).await
     }
 
@@ -95,14 +95,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Safe to hand off: the outbox entry is written before this returns, so
     /// even if the process dies before `deliver` runs, a later flush finishes
     /// the job (live-delivery.md §2). Nothing is lost by not waiting.
-    pub fn stage_send(
+    pub async fn stage_send(
         &self,
         contacts: &[Contact],
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
     ) -> Result<StagedSend, Error> {
-        let draft = self.send_draft(contacts)?;
-        self.stage(draft, plaintext, blob_drafts, contacts)
+        let draft = self.send_draft(contacts).await?;
+        self.stage(draft, plaintext, blob_drafts, contacts).await
     }
 
     /// `stage_send`, but **always a fresh genesis**: the participant-set
@@ -113,7 +113,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// auto-threading remains the send-by-name convenience. The index still
     /// records this set → the new conversation (latest writer wins, like
     /// any send).
-    pub fn stage_send_new(
+    pub async fn stage_send_new(
         &self,
         contacts: &[Contact],
         plaintext: Vec<u8>,
@@ -129,11 +129,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             blob_drafts,
             contacts,
         )
+        .await
     }
 
     /// The draft `send` threads: into the participant set's conversation if we
     /// know one, else a fresh genesis.
-    fn send_draft(&self, contacts: &[Contact]) -> Result<MessageDraft, Error> {
+    async fn send_draft(&self, contacts: &[Contact]) -> Result<MessageDraft, Error> {
         if contacts.is_empty() {
             return Err(Error::NoRecipients);
         }
@@ -151,14 +152,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let extended: BTreeSet<PublicKey> = participants
             .iter()
             .copied()
-            .chain(self.own_keys())
+            .chain(self.own_keys().await)
             .collect();
-        let existing = self
-            .state
-            .conversation_for(&extended)
-            .or_else(|| self.state.conversation_for(&participants));
+        let existing = match self.state.conversation_for(&extended).await {
+            Some(conversation) => Some(conversation),
+            None => self.state.conversation_for(&participants).await,
+        };
         match existing {
-            Some(conversation) => self.threaded_draft(conversation, recipients),
+            Some(conversation) => self.threaded_draft(conversation, recipients).await,
             None => Ok(self.genesis_draft(recipients)),
         }
     }
@@ -188,12 +189,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         plaintext: Vec<u8>,
         blob_drafts: Vec<BlobDraft>,
     ) -> Result<SendReceipt, Error> {
-        let staged = self.stage_send_in(conversation, contacts, plaintext, blob_drafts)?;
+        let staged = self
+            .stage_send_in(conversation, contacts, plaintext, blob_drafts)
+            .await?;
         self.deliver(&staged).await
     }
 
     /// `send_in`'s local half — see `stage_send`.
-    pub fn stage_send_in(
+    pub async fn stage_send_in(
         &self,
         conversation: MessageId,
         contacts: &[Contact],
@@ -204,8 +207,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             return Err(Error::NoRecipients);
         }
         let recipients: Vec<PublicKey> = contacts.iter().flat_map(|c| c.keys.clone()).collect();
-        let draft = self.threaded_draft(conversation, recipients)?;
-        self.stage(draft, plaintext, blob_drafts, contacts)
+        let draft = self.threaded_draft(conversation, recipients).await?;
+        self.stage(draft, plaintext, blob_drafts, contacts).await
     }
 
     /// Whom a reply in this conversation goes to: the current membership
@@ -219,12 +222,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// deliverability: their copy stays fetchable via peer sync once they
     /// have a route. Such keys are also listed in `unknown`, so the edge
     /// can say so.
-    pub fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, Error> {
+    pub async fn reply_contacts(&self, conversation: MessageId) -> Result<ReplyContacts, Error> {
         let me = self.device.public();
         let mut contacts = Vec::new();
         let mut unknown = Vec::new();
         let mut disavowed = Vec::new();
-        for key in self.membership(conversation)? {
+        for key in self.membership(conversation).await? {
             if key == me {
                 continue;
             }
@@ -234,7 +237,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             // Explicit acts (send to the entry by name) still work: that
             // is the manual override.
             if self
-                .disavowals(key)?
+                .disavowals(key)
+                .await?
                 .iter()
                 .any(|disavowal| disavowal.excludes)
             {
@@ -243,9 +247,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             }
             // Contact record, or a recognized own device's (D3c): a
             // sibling in the membership routes through the devices store.
-            let stored = self.trusted_record_for(&key);
+            let stored = self.trusted_record_for(&key).await;
             let relays: Vec<String> = self
                 .effective_relays(key, stored.as_ref())
+                .await
                 .into_iter()
                 .map(|entry| entry.mailbox)
                 .collect();
@@ -266,12 +271,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// A draft threaded onto the stored DAG's heads (body filled by
     /// `finish_send`).
-    pub(super) fn threaded_draft(
+    pub(super) async fn threaded_draft(
         &self,
         conversation: MessageId,
         recipients: Vec<PublicKey>,
     ) -> Result<MessageDraft, Error> {
-        let dag = self.state.load_dag(conversation)?;
+        let dag = self.state.load_dag(conversation).await?;
         Ok(MessageDraft {
             conversation: Some(conversation),
             parents: dag.heads(),
@@ -287,7 +292,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The local half of every send: seal, persist (envelope, own-blob cache,
     /// outbox ledger, participant mapping), and stop. Everything here is
     /// filesystem work — no network, nothing that can hang.
-    pub(super) fn stage(
+    pub(super) async fn stage(
         &self,
         mut draft: MessageDraft,
         plaintext: Vec<u8>,
@@ -305,7 +310,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // finding the conversation, and the grown set is what gets
         // recorded below — same latest-writer-wins index as any add.
         let mut device_contacts = Vec::new();
-        for (key, record) in self.state.recognized_devices() {
+        for (key, record) in self.state.recognized_devices().await {
             if key == self.device.public() || draft.recipients.contains(&key) {
                 continue;
             }
@@ -314,6 +319,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 keys: vec![key],
                 relays: self
                     .effective_relays(key, Some(&record))
+                    .await
                     .into_iter()
                     .map(|entry| entry.mailbox)
                     .collect(),
@@ -325,7 +331,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             MessageEnvelope::seal(draft, &self.device, &mut OsRng).map_err(Error::Crypto)?;
         let id = sealed.envelope.id();
         let conversation = existing.unwrap_or(id);
-        self.state.store_envelope(conversation, &sealed.envelope)?;
+        self.state
+            .store_envelope(conversation, &sealed.envelope)
+            .await?;
         // The participant-set index (groups.md §3): every send maps its
         // message's set -> conversation, exactly like `remember` does on
         // receipt -- sender and receivers agree by construction, so adding
@@ -333,12 +341,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // send-by-name. Latest writer wins per set.
         let participants: BTreeSet<PublicKey> = participants_of(&sealed.envelope).collect();
         self.state
-            .record_conversation(&participants, conversation)?;
+            .record_conversation(&participants, conversation)
+            .await?;
         // Own blobs go straight into the local cache: they get pushed to the
         // *recipients'* relays, so this is the only place we can refetch
         // them from when rendering our own history.
         for blob in &sealed.blobs {
-            self.state.save_blob(&blob.hash, &blob.bytes)?;
+            self.state.save_blob(&blob.hash, &blob.bytes).await?;
         }
 
         // Ledger before network (live-delivery.md §2): a crash or failure
@@ -352,7 +361,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         );
         let now = self.wall_clock.now_ms();
         for relay in &relays {
-            self.state.add_outbox(id, relay, conversation, now)?;
+            self.state.add_outbox(id, relay, conversation, now).await?;
         }
         Ok(StagedSend {
             id,
@@ -467,7 +476,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // took the deposit. Best-effort: a device that told us it stored
         // the message *has* it, so a failed sidecar write must not fail a
         // send; it costs the confirmation, not the delivery.
-        if let Err(error) = self.state.add_acks(conversation, id, &direct) {
+        if let Err(error) = self.state.add_acks(conversation, id, &direct).await {
             tracing::warn!(%error, "could not record a delivery confirmation");
         }
 
@@ -493,21 +502,21 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // first — n down relays cost n × `connect_timeout` instead of one.
         // Same shape as `deliver_direct`'s dials and De3's who-is fan-out.
         let mut skipped_relays = 0;
-        let deliveries = relays.iter().filter(|relay| {
+        // Sorted out before the concurrent pass: `discharged` borrows
+        // `direct`, and the skip's side effects (logging, outbox clearing)
+        // belong to this sequential pass, not to the concurrent one.
+        let mut deliveries: Vec<&String> = Vec::new();
+        for relay in relays.iter() {
             if discharged(relay) {
                 // The philosophy win (§1): for this message the relay learns
                 // nothing at all — not that it exists, not who it was for.
                 tracing::info!(relay, "delivered directly; skipping the deposit");
-                self.state.clear_outbox(id, relay);
+                self.state.clear_outbox(id, relay).await;
                 skipped_relays += 1;
-                return false;
+            } else {
+                deliveries.push(relay);
             }
-            true
-        });
-        // Collected before awaiting: `discharged` borrows `direct`, and the
-        // filter's side effects (skip logging, outbox clearing) belong to
-        // this synchronous pass, not to the concurrent one.
-        let deliveries: Vec<&String> = deliveries.collect();
+        }
         let outcomes = n0_future::join_all(deliveries.into_iter().map(|relay| async move {
             match pushed.get(relay) {
                 // A relay that did not take the blobs gets no deposit: the
@@ -531,7 +540,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             }
             match self.deposit_to(relay, envelope).await {
                 Ok(()) => {
-                    self.state.clear_outbox(id, relay);
+                    self.state.clear_outbox(id, relay).await;
                     None
                 }
                 Err(error) => {
@@ -596,8 +605,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 tracing::debug!("blobs direct: recently unreachable; relay cache only");
                 continue;
             };
-            let stored = self.trusted_record_for(&key);
-            match self.peer_addr_for(key, stored.as_ref()) {
+            let stored = self.trusted_record_for(&key).await;
+            match self.peer_addr_for(key, stored.as_ref()).await {
                 Ok(addr) => targets.push((key, addr, budget)),
                 Err(_) => tracing::debug!("blobs direct: no dialable route; relay cache only"),
             }
@@ -648,7 +657,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             .flatten()
             .collect();
         if dialed {
-            self.persist_unreachable(now);
+            self.persist_unreachable(now).await;
         }
         took
     }
@@ -686,8 +695,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 tracing::debug!("direct: recently unreachable; mailbox only");
                 continue;
             };
-            let stored = self.trusted_record_for(&key);
-            match self.peer_addr_for(key, stored.as_ref()) {
+            let stored = self.trusted_record_for(&key).await;
+            match self.peer_addr_for(key, stored.as_ref()).await {
                 Ok(addr) => targets.push((key, addr, budget)),
                 Err(_) => tracing::debug!("direct: no dialable route; mailbox only"),
             }
@@ -755,7 +764,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // dialed nobody: a send to a peer already in cooldown must cost
         // nothing, and that includes not rewriting the file to say so.
         if dialed {
-            self.persist_unreachable(now);
+            self.persist_unreachable(now).await;
         }
         acked
     }
@@ -764,9 +773,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// next process doesn't re-pay a dial deadline to learn what this one
     /// learned. Best-effort — a failed write costs one extra dial next time,
     /// which is not worth failing a send over.
-    fn persist_unreachable(&self, now: u64) {
+    async fn persist_unreachable(&self, now: u64) {
         let entries = self.reach.unreachable_snapshot(now);
-        if let Err(error) = self.state.save_unreachable(&entries) {
+        if let Err(error) = self.state.save_unreachable(&entries).await {
             tracing::debug!(%error, "could not persist unreachable peers");
         }
     }
@@ -866,9 +875,11 @@ mod tests {
         let conversation = genesis.id();
         a.state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
         a.state
             .record_conversation(&BTreeSet::from([a.public_key(), b]), conversation)
+            .await
             .expect("map");
         let contact = |key: PublicKey| Contact {
             keys: vec![key],
@@ -890,7 +901,7 @@ mod tests {
         // Then: the sender's own index maps the grown set — a send-by-name
         // to {B, C} now threads instead of forking
         let grown = BTreeSet::from([a.public_key(), b, c]);
-        assert_eq!(a.state.conversation_for(&grown), Some(conversation));
+        assert_eq!(a.state.conversation_for(&grown).await, Some(conversation));
 
         let _ = std::fs::remove_dir_all(temp_root("index"));
     }
@@ -909,12 +920,14 @@ mod tests {
         let conversation = genesis.id();
         a.state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
         let set = BTreeSet::from([a.public_key(), b]);
         a.state
             .record_conversation(&set, conversation)
+            .await
             .expect("map");
-        assert_eq!(a.state.conversation_for(&set), Some(conversation));
+        assert_eq!(a.state.conversation_for(&set).await, Some(conversation));
 
         // When: staging a *new* conversation to the same person
         let staged = a
@@ -926,13 +939,14 @@ mod tests {
                 b"again, separately".to_vec(),
                 vec![],
             )
+            .await
             .expect("stage");
 
         // Then: a second, distinct conversation exists beside the first
         assert_ne!(staged.conversation, conversation);
         assert_eq!(staged.conversation, staged.id, "its genesis names it");
         assert_eq!(
-            a.state.conversation_for(&set),
+            a.state.conversation_for(&set).await,
             Some(staged.conversation),
             "the index re-points to the latest writer, like any send"
         );
@@ -947,8 +961,8 @@ mod tests {
         // deposit is discharged and the dead mailbox is never even dialed
         // (an attempt would panic as unscripted).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("direct", "a", &wire);
-        let (b, _b_net, _b_clock) = loop_client("direct", "b", &wire);
+        let (a, _a_net, _a_clock) = loop_client("direct", "a", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("direct", "b", &wire).await;
         let relay_a = DeviceKey::from_seed([131; 32]).public();
         let relay_b = DeviceKey::from_seed([132; 32]).public();
         // The serving gate (D0c) covers `Deliver` too: B accepts a push
@@ -957,11 +971,13 @@ mod tests {
             &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
+        .await
         .expect("B adds A");
         a.add_contact(
             &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
+        .await
         .expect("A adds B");
         // The live sink is the *only* signal for a direct arrival: no
         // mailbox means no nudge to drain.
@@ -974,7 +990,7 @@ mod tests {
         // When
         let receipt = a
             .send(
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"straight to you".to_vec(),
                 vec![],
             )
@@ -986,12 +1002,12 @@ mod tests {
         assert_eq!(receipt.skipped_relays, 1, "the deposit was skipped");
         assert_eq!(receipt.pending_relays, 0, "nothing owed");
         assert!(
-            a.state.outbox().is_empty(),
+            a.state.outbox().await.is_empty(),
             "a discharged ledger leaves no entry"
         );
 
         // …and B has it, readable, live
-        let history = b.history(receipt.conversation).expect("B history");
+        let history = b.history(receipt.conversation).await.expect("B history");
         assert_eq!(history.len(), 1);
         assert_eq!(
             history[0].body.as_deref(),
@@ -1028,7 +1044,7 @@ mod tests {
         b_trusts_a: bool,
         b_takes_blobs: bool,
     ) -> (LoopClient, TestTransport, TestClock, LoopClient) {
-        let (a, a_net, a_clock) = loop_client(test, "a", wire);
+        let (a, a_net, a_clock) = loop_client(test, "a", wire).await;
         let b_config = ClientConfig {
             blob_limits: crate::blobs::BlobLimits {
                 max_connections_per_peer: if b_takes_blobs { 2 } else { 0 },
@@ -1036,19 +1052,21 @@ mod tests {
             },
             ..Default::default()
         };
-        let (b, _b_net, _b_clock) = loop_client_with(test, "b", wire, b_config);
+        let (b, _b_net, _b_clock) = loop_client_with(test, "b", wire, b_config).await;
         let relay_a = DeviceKey::from_seed([137; 32]).public();
         if b_trusts_a {
             b.add_contact(
                 &routed_record(a.public_key(), &relay_a),
                 Some("a".to_string()),
             )
+            .await
             .expect("B adds A");
         }
         a.add_contact(
             &routed_record(b.public_key(), relay_b),
             Some("b".to_string()),
         )
+        .await
         .expect("A adds B");
         (a, a_net, a_clock, b)
     }
@@ -1083,7 +1101,7 @@ mod tests {
         // When: an image — a thumbnail and a full-res blob
         let receipt = a
             .send(
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"look at this".to_vec(),
                 an_image(),
             )
@@ -1134,7 +1152,10 @@ mod tests {
             })
             .collect();
         assert_eq!(referenced, vec![b.public_key(), relay_b]);
-        assert!(a.state.outbox().is_empty(), "fully served — nothing owed");
+        assert!(
+            a.state.outbox().await.is_empty(),
+            "fully served — nothing owed"
+        );
 
         let _ = std::fs::remove_dir_all(temp_root("blobs-first"));
     }
@@ -1143,7 +1164,7 @@ mod tests {
     /// on the recipient's blob task. Yield until it has.
     async fn landed(client: &LoopClient, hash: &BlobHash) -> bool {
         for _ in 0..200 {
-            if client.state.load_blob(hash).is_some() {
+            if client.state.load_blob(hash).await.is_some() {
                 return true;
             }
             tokio::task::yield_now().await;
@@ -1180,7 +1201,7 @@ mod tests {
         // When: an image
         let receipt = a
             .send(
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"look at this".to_vec(),
                 an_image(),
             )
@@ -1192,7 +1213,7 @@ mod tests {
         assert_eq!(receipt.direct_recipients, 1);
         assert_eq!(receipt.skipped_relays, 1, "the relay never heard of it");
         assert_eq!(receipt.pending_relays, 0);
-        assert!(a.state.outbox().is_empty(), "nothing owed");
+        assert!(a.state.outbox().await.is_empty(), "nothing owed");
         let events = a_net.log.events();
         let pushed = pushed_to(&events, b.public_key());
         assert_eq!(pushed.len(), 2, "both blobs went to B: {events:?}");
@@ -1233,7 +1254,7 @@ mod tests {
         // When
         let receipt = a
             .send(
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"look at this".to_vec(),
                 an_image(),
             )
@@ -1266,7 +1287,10 @@ mod tests {
             "cache before deposit: {events:?}"
         );
         for hash in a_net.blobs.held(&relay_b) {
-            assert!(b.state.load_blob(&hash).is_none(), "B's cache stayed empty");
+            assert!(
+                b.state.load_blob(&hash).await.is_none(),
+                "B's cache stayed empty"
+            );
         }
 
         let _ = std::fs::remove_dir_all(temp_root("blobs-declined"));
@@ -1285,7 +1309,7 @@ mod tests {
         a_net.dial.connect(&relay_b).reply(deposited_frame());
 
         // When: the send, with the clock run past the stalled push's budget
-        let to = [a.resolve_contact("b").expect("resolve")];
+        let to = [a.resolve_contact("b").await.expect("resolve")];
         let (result, ()) = tokio::join!(a.send(&to, b"look at this".to_vec(), an_image()), async {
             clock.wait_for_sleepers(1).await;
             clock.advance(Duration::from_secs(3600));
@@ -1311,7 +1335,10 @@ mod tests {
             "{events:?}"
         );
         for hash in a_net.blobs.held(&relay_b) {
-            assert!(b.state.load_blob(&hash).is_none(), "nothing landed on B");
+            assert!(
+                b.state.load_blob(&hash).await.is_none(),
+                "nothing landed on B"
+            );
         }
 
         let _ = std::fs::remove_dir_all(temp_root("blobs-stall"));
@@ -1329,7 +1356,7 @@ mod tests {
         a_net.blobs.refuse(&relay_b);
 
         // When
-        let to = [a.resolve_contact("b").expect("resolve")];
+        let to = [a.resolve_contact("b").await.expect("resolve")];
         let result = a.send(&to, b"look at this".to_vec(), an_image()).await;
 
         // Then: delivered to B directly, the relay still owed in full —
@@ -1338,11 +1365,17 @@ mod tests {
         assert_eq!(receipt.direct_recipients, 1);
         assert_eq!(receipt.pending_relays, 1, "the relay is owed");
         assert_eq!(
-            a.state.outbox().len(),
+            a.state.outbox().await.len(),
             1,
             "push-then-deposit retries on flush"
         );
-        assert_eq!(b.history(receipt.conversation).expect("B history").len(), 1);
+        assert_eq!(
+            b.history(receipt.conversation)
+                .await
+                .expect("B history")
+                .len(),
+            1
+        );
         let events = a_net.log.events();
         assert!(
             !events
@@ -1360,25 +1393,27 @@ mod tests {
         // send earns a `Stored` ack from B's *own device key* — the only
         // party whose word means "delivered" (a relay's `Deposited` doesn't).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("confirm", "a", &wire);
-        let (b, _b_net, _b_clock) = loop_client("confirm", "b", &wire);
+        let (a, _a_net, _a_clock) = loop_client("confirm", "a", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("confirm", "b", &wire).await;
         let relay_a = DeviceKey::from_seed([133; 32]).public();
         let relay_b = DeviceKey::from_seed([134; 32]).public();
         b.add_contact(
             &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
+        .await
         .expect("B adds A");
         a.add_contact(
             &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
+        .await
         .expect("A adds B");
 
         // When
         let receipt = a
             .send(
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"did you get this".to_vec(),
                 vec![],
             )
@@ -1388,7 +1423,7 @@ mod tests {
 
         // Then: the sender's history names the device that confirmed it —
         // the D5 ack, which before De7 was computed and thrown away.
-        let history = a.history(receipt.conversation).expect("A history");
+        let history = a.history(receipt.conversation).await.expect("A history");
         assert_eq!(history[0].confirmed, vec![b.public_key()]);
         assert!(
             history[0].owed_since_ms.is_none(),
@@ -1405,16 +1440,17 @@ mod tests {
             TestClock::new(),
             SystemClock,
             TestTransport::new(),
-        );
+        )
+        .await;
         assert_eq!(
-            a.history(receipt.conversation).expect("A history")[0].confirmed,
+            a.history(receipt.conversation).await.expect("A history")[0].confirmed,
             vec![b.public_key()],
             "the confirmation is persisted, not in-memory"
         );
 
         // …while B's own copy claims nothing: a confirmation is something a
         // *sender* holds about a recipient, never a self-report.
-        let received = b.history(receipt.conversation).expect("B history");
+        let received = b.history(receipt.conversation).await.expect("B history");
         assert!(
             received[0].confirmed.is_empty(),
             "the recipient does not confirm to itself"
@@ -1448,24 +1484,25 @@ mod tests {
         // When: only the local half runs
         let staged = a
             .stage_send(&[contact], b"render me now".to_vec(), vec![])
+            .await
             .expect("stage");
 
         // Then: it is already readable history, flagged as still owed…
-        let history = a.history(staged.conversation).expect("history");
+        let history = a.history(staged.conversation).await.expect("history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].body.as_deref(), Ok(b"render me now".as_slice()));
         assert!(
             history[0].owed_since_ms.is_some(),
             "the ledger owes its delivery"
         );
-        assert_eq!(a.state.outbox().len(), 1);
+        assert_eq!(a.state.outbox().await.len(), 1);
 
         // …and delivery is a separate step that a crash can't lose: even
         // without `deliver`, the flush path owes the same entry.
         let report = a.flush_outbox().await.expect("flush");
         assert_eq!(report.pending, 1, "still owed after a failed retry");
         assert!(
-            a.history(staged.conversation).expect("history")[0]
+            a.history(staged.conversation).await.expect("history")[0]
                 .owed_since_ms
                 .is_some(),
             "and still honestly marked pending"
@@ -1488,16 +1525,18 @@ mod tests {
             &record_with_dead_mailbox(a.public_key(), &url_a),
             Some("a".to_string()),
         )
+        .await
         .expect("B adds A");
         a.add_contact(
             &record_with_dead_mailbox(b.public_key(), &url_b),
             Some("b".to_string()),
         )
+        .await
         .expect("A adds B");
         b.transport.online().await;
         let first = a
             .send(
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"before".to_vec(),
                 vec![],
             )
@@ -1535,7 +1574,7 @@ mod tests {
         let second = a
             .send_in(
                 first.conversation,
-                &[a.resolve_contact("b").expect("resolve")],
+                &[a.resolve_contact("b").await.expect("resolve")],
                 b"after".to_vec(),
                 vec![],
             )
@@ -1543,7 +1582,7 @@ mod tests {
             .expect("second send");
         assert_eq!(second.direct_recipients, 1, "still delivered peer-to-peer");
         assert_eq!(second.skipped_relays, 1);
-        let history = b.history(first.conversation).expect("B history");
+        let history = b.history(first.conversation).await.expect("B history");
         assert_eq!(history.len(), 2, "both messages landed at B");
         assert_eq!(history[1].body.as_deref(), Ok(b"after".as_slice()));
 
@@ -1564,12 +1603,13 @@ mod tests {
             &record_with_dead_mailbox(absent, &url_a),
             Some("ghost".to_string()),
         )
+        .await
         .expect("A adds the absent peer");
 
         // When: every path fails — no peer to dial, no mailbox to deposit in
         let result = a
             .send(
-                &[a.resolve_contact("ghost").expect("resolve")],
+                &[a.resolve_contact("ghost").await.expect("resolve")],
                 b"are you there".to_vec(),
                 vec![],
             )
@@ -1577,7 +1617,7 @@ mod tests {
 
         // Then: "queued", not "lost" — the C4a semantics, unchanged by D5
         assert!(matches!(result, Err(Error::AllRelaysPending(_))));
-        assert_eq!(a.state.outbox().len(), 1, "the mailbox is still owed");
+        assert_eq!(a.state.outbox().await.len(), 1, "the mailbox is still owed");
 
         let _ = std::fs::remove_dir_all(temp_root("offline"));
     }
@@ -1613,10 +1653,12 @@ mod tests {
             clock.clone(),
             TestWallClock::new(T0),
             net.clone(),
-        );
+        )
+        .await;
         a.add_contact(&record, Some("ghost".to_string()))
+            .await
             .expect("A adds the absent peer");
-        let recipients = [a.resolve_contact("ghost").expect("resolve")];
+        let recipients = [a.resolve_contact("ghost").await.expect("resolve")];
 
         // When: one send pays the probe (the deposit itself lands)
         let (receipt, ()) = tokio::join!(
@@ -1629,7 +1671,7 @@ mod tests {
         assert_eq!(receipt.expect("send").direct_recipients, 0);
 
         // Then: the failure is on disk…
-        let persisted = a.state.unreachable();
+        let persisted = a.state.unreachable().await;
         assert_eq!(persisted.len(), 1, "one failed peer recorded");
         assert_eq!(persisted[0].0, absent.0, "…and it is the peer we dialed");
         drop(a);
@@ -1645,10 +1687,11 @@ mod tests {
             TestClock::new(),
             TestWallClock::new(T0 + 5_000),
             net.clone(),
-        );
+        )
+        .await;
         reopened
             .send(
-                &[reopened.resolve_contact("ghost").expect("resolve")],
+                &[reopened.resolve_contact("ghost").await.expect("resolve")],
                 b"still there?".to_vec(),
                 vec![],
             )
@@ -1687,7 +1730,8 @@ mod tests {
             clock.clone(),
             SystemClock,
             net.clone(),
-        );
+        )
+        .await;
         a.add_contact(
             &ContactRecord::new(
                 vec![DeviceKey::from_seed([73; 32]).public()],
@@ -1705,8 +1749,9 @@ mod tests {
             ),
             Some("ghost".to_string()),
         )
+        .await
         .expect("add the contact");
-        let recipients = [a.resolve_contact("ghost").expect("resolve")];
+        let recipients = [a.resolve_contact("ghost").await.expect("resolve")];
 
         // When: one send fans out to both, and time moves only after BOTH
         // deadline timers are parked — serial fan-out would park one at a
@@ -1721,7 +1766,7 @@ mod tests {
 
         // Then: queued for both
         assert!(matches!(result, Err(Error::AllRelaysPending(_))));
-        assert_eq!(a.state.outbox().len(), 2, "both relays still owed");
+        assert_eq!(a.state.outbox().await.len(), 2, "both relays still owed");
 
         // And: the outbox flush pays the same way, over the same two entries
         net.dial.hold(&relay_key(74));
@@ -1745,9 +1790,9 @@ mod tests {
         // phone (two one-way recognize acts — the laptop first, so the
         // record the phone stores and serves carries the reverse vouch).
         let wire = Loopback::new();
-        let (alice, a_net, a_clock) = loop_client("multidevice", "alice", &wire);
-        let (phone, p_net, p_clock) = loop_client("multidevice", "phone", &wire);
-        let (laptop, l_net, l_clock) = loop_client("multidevice", "laptop", &wire);
+        let (alice, a_net, a_clock) = loop_client("multidevice", "alice", &wire).await;
+        let (phone, p_net, p_clock) = loop_client("multidevice", "phone", &wire).await;
+        let (laptop, l_net, l_clock) = loop_client("multidevice", "laptop", &wire).await;
         let relay_a = DeviceKey::from_seed([121; 32]).public();
         let relay_p = DeviceKey::from_seed([122; 32]).public();
         let relay_l = DeviceKey::from_seed([123; 32]).public();
@@ -1764,22 +1809,26 @@ mod tests {
             .set_profile("mårten laptop", &[spec(&relay_l)])
             .await
             .expect("laptop profile");
-        let record_p = phone.my_record().expect("phone record");
+        let record_p = phone.my_record().await.expect("phone record");
         alice
             .add_contact(&record_p, Some("mårten phone".into()))
+            .await
             .expect("alice adds phone");
         phone
             .add_contact(
-                &alice.my_record().expect("alice record"),
+                &alice.my_record().await.expect("alice record"),
                 Some("Alice".into()),
             )
+            .await
             .expect("phone adds alice");
         laptop
             .recognize_device(&record_p)
+            .await
             .expect("laptop recognizes phone");
-        let record_l = laptop.my_record().expect("laptop record");
+        let record_l = laptop.my_record().await.expect("laptop record");
         phone
             .recognize_device(&record_l)
+            .await
             .expect("phone recognizes laptop");
         // The laptop reports what its own device stored directly (D5).
         let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1794,7 +1843,7 @@ mod tests {
         p_net.dial.hold(&alice.public_key());
         let ra_hi = p_net.dial.connect(&relay_a);
         ra_hi.reply(deposited_frame());
-        let to_alice = [phone.resolve_contact("Alice").expect("resolve")];
+        let to_alice = [phone.resolve_contact("Alice").await.expect("resolve")];
         let (receipt, ()) =
             tokio::join!(phone.send(&to_alice, b"hi alice".to_vec(), vec![]), async {
                 p_clock.wait_for_sleepers(1).await;
@@ -1809,7 +1858,7 @@ mod tests {
         let arrived = direct_rx.recv().await.expect("the laptop's direct copy");
         laptop.after_direct(&arrived).await;
         assert!(
-            !laptop.state.learned(&alice.public_key()).is_empty(),
+            !laptop.state.learned(&alice.public_key()).await.is_empty(),
             "the sibling should have answered the scoped auto-query"
         );
 
@@ -1822,13 +1871,14 @@ mod tests {
             "alice's copy came through her mailbox"
         );
         assert!(
-            !alice.state.learned(&laptop.public_key()).is_empty(),
+            !alice.state.learned(&laptop.public_key()).await.is_empty(),
             "the phone should have served its recognized device's record"
         );
 
         // …alice accepts the offer — one explicit act, nothing auto-adopts
         alice
             .add_contact(&record_l, Some("mårten laptop".into()))
+            .await
             .expect("alice promotes the laptop");
 
         // When: the phone goes OFFLINE — everything from here on must work
@@ -1840,7 +1890,10 @@ mod tests {
         a_rp.reply(deposited_frame());
         let a_rl = a_net.dial.connect(&relay_l);
         a_rl.reply(deposited_frame());
-        let reply = alice.reply_contacts(conv).expect("alice reply contacts");
+        let reply = alice
+            .reply_contacts(conv)
+            .await
+            .expect("alice reply contacts");
         let (replied, ()) = tokio::join!(
             alice.send_in(conv, &reply.contacts, b"hello both".to_vec(), vec![]),
             async {
@@ -1865,7 +1918,10 @@ mod tests {
         l_net.dial.hold(&phone.public_key());
         let l_rp = l_net.dial.connect(&relay_p);
         l_rp.reply(deposited_frame());
-        let laptop_reply = laptop.reply_contacts(conv).expect("laptop reply contacts");
+        let laptop_reply = laptop
+            .reply_contacts(conv)
+            .await
+            .expect("laptop reply contacts");
         let (replied, ()) = tokio::join!(
             laptop.send_in(
                 conv,
@@ -1889,6 +1945,7 @@ mod tests {
         );
         let alice_bodies: Vec<_> = alice
             .history(conv)
+            .await
             .expect("alice history")
             .into_iter()
             .filter_map(|message| message.body.ok())
@@ -1917,13 +1974,14 @@ mod tests {
         // "any recipient acked" would silently lose C's copy. This is the
         // regression test for that hazard.
         let wire = Loopback::new();
-        let (a, a_net, a_clock) = loop_client("shared", "a", &wire);
-        let (b, _b_net, _b_clock) = loop_client("shared", "b", &wire);
+        let (a, a_net, a_clock) = loop_client("shared", "a", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("shared", "b", &wire).await;
         let relay_a = DeviceKey::from_seed([138; 32]).public();
         b.add_contact(
             &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
+        .await
         .expect("B adds A");
         let carol = DeviceKey::from_seed([42; 32]).public();
         // One shared mailbox for both — what a shared relay looks like. The
@@ -1932,16 +1990,18 @@ mod tests {
         let shared_relay = DeviceKey::from_seed([139; 32]).public();
         let shared = |key: PublicKey| routed_record(key, &shared_relay);
         a.add_contact(&shared(b.public_key()), Some("b".to_string()))
+            .await
             .expect("A adds B");
         a.add_contact(&shared(carol), Some("c".to_string()))
+            .await
             .expect("A adds C");
         a_net.dial.hold(&carol);
         a_net.dial.hold(&shared_relay);
 
         // When
         let recipients = [
-            a.resolve_contact("b").expect("resolve b"),
-            a.resolve_contact("c").expect("resolve c"),
+            a.resolve_contact("b").await.expect("resolve b"),
+            a.resolve_contact("c").await.expect("resolve c"),
         ];
         let (result, ()) =
             tokio::join!(a.send(&recipients, b"hello both".to_vec(), vec![]), async {
@@ -1957,7 +2017,7 @@ mod tests {
         assert_eq!(receipt.direct_recipients, 1, "B acked");
         assert_eq!(receipt.skipped_relays, 0, "C's copy still needs the relay");
         assert_eq!(receipt.pending_relays, 1, "and it is owed, not forgotten");
-        assert_eq!(a.state.outbox().len(), 1);
+        assert_eq!(a.state.outbox().await.len(), 1);
 
         let _ = std::fs::remove_dir_all(temp_root("shared"));
     }
@@ -1974,13 +2034,14 @@ mod tests {
         // namespace, and a shared one means one test's cleanup deletes the
         // other's live stores mid-run (the gate reads then fail closed —
         // a served-nothing that flaked the suite).
-        let (a, _a_net, _a_clock) = loop_client("pushgate", "a", &wire);
-        let (b, _b_net, _b_clock) = loop_client("pushgate", "b", &wire);
+        let (a, _a_net, _a_clock) = loop_client("pushgate", "a", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("pushgate", "b", &wire).await;
         let relay_b = DeviceKey::from_seed([135; 32]).public();
         a.add_contact(
             &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
+        .await
         .expect("A adds B");
         let for_b = sealed_for(&a.device, b.public_key(), b"psst");
 
@@ -1989,7 +2050,7 @@ mod tests {
 
         // Then: declined, and nothing stored
         assert!(acked.is_empty(), "a stranger's push is declined");
-        assert!(b.state.find_envelope(for_b.id()).is_none());
+        assert!(b.state.find_envelope(for_b.id()).await.is_none());
 
         let _ = std::fs::remove_dir_all(temp_root("pushgate"));
     }
@@ -2001,19 +2062,21 @@ mod tests {
         // arbitrary history into our store — not even our own relay can do
         // that (it indexes deposits per recipient key).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("addressed", "a", &wire);
-        let (b, _b_net, _b_clock) = loop_client("addressed", "b", &wire);
+        let (a, _a_net, _a_clock) = loop_client("addressed", "a", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("addressed", "b", &wire).await;
         let relay_a = DeviceKey::from_seed([136; 32]).public();
         let relay_b = DeviceKey::from_seed([137; 32]).public();
         a.add_contact(
             &routed_record(b.public_key(), &relay_b),
             Some("b".to_string()),
         )
+        .await
         .expect("A adds B");
         b.add_contact(
             &routed_record(a.public_key(), &relay_a),
             Some("a".to_string()),
         )
+        .await
         .expect("B adds A");
         let elsewhere = DeviceKey::from_seed([43; 32]).public();
         let for_carol = sealed_for(&a.device, elsewhere, b"not for you");
@@ -2023,14 +2086,14 @@ mod tests {
 
         // Then: declined and unstored…
         assert!(acked.is_empty(), "not addressed to B");
-        assert!(b.state.find_envelope(for_carol.id()).is_none());
+        assert!(b.state.find_envelope(for_carol.id()).await.is_none());
 
         // …while a push addressed to B, over that same open connection, is
         // accepted: the per-request check is independent of the gate.
         let for_b = sealed_for(&a.device, b.public_key(), b"psst");
         let acked = a.deliver_direct(&for_b, &[b.public_key()]).await;
         assert_eq!(acked.len(), 1, "a contact's push for B is stored");
-        assert!(b.state.find_envelope(for_b.id()).is_some());
+        assert!(b.state.find_envelope(for_b.id()).await.is_some());
 
         let _ = std::fs::remove_dir_all(temp_root("addressed"));
     }
@@ -2059,6 +2122,7 @@ mod tests {
                 vec![],
                 mailbox_only("ll@203.0.113.5:5"),
             ))
+            .await
             .expect("recognize");
         let to_alice = || {
             vec![Contact {
@@ -2075,11 +2139,12 @@ mod tests {
 
         // Then: exactly ONE conversation — the device-extended lookup
         // keeps post-pairing sends threading instead of forking
-        let conversations = phone.state.conversations();
+        let conversations = phone.state.conversations().await;
         assert_eq!(conversations.len(), 1, "post-pairing send-by-name forked");
         let envelopes = phone
             .state
             .load_envelopes(conversations[0])
+            .await
             .expect("envelopes");
         assert_eq!(envelopes.len(), 2);
         // …and every sealed core lists the laptop as an honest member,
@@ -2094,6 +2159,7 @@ mod tests {
             phone
                 .state
                 .outbox()
+                .await
                 .iter()
                 .any(|entry| entry.relay == "ll@203.0.113.5:5"),
             "no outbox entry for the device's relay"

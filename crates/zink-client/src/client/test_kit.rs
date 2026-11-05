@@ -299,10 +299,11 @@ pub(crate) async fn spawn_test_relay() -> (iroh_relay::server::Server, String) {
 /// contacts-only serving gate lets the requester's sync calls through
 /// (the minimal record — key only — via the store, skipping
 /// `add_contact`'s reachability validation, which serving doesn't need).
-pub(crate) fn befriend(server: &ClientState, requester: PublicKey) {
+pub(crate) async fn befriend(server: &ClientState, requester: PublicKey) {
     let record = ContactRecord::new(vec![requester], vec![], vec![]);
     server
         .save_contact("requester", &record)
+        .await
         .expect("save contact");
 }
 
@@ -338,6 +339,7 @@ pub(crate) async fn open_homed_with(
                 relay_url: Some(relay_url.to_string()),
             }],
         )
+        .await
         .expect("save profile");
     keystore::load_or_create(&key_path).expect("device key");
     Client::open_with(
@@ -357,16 +359,16 @@ pub(crate) async fn open_homed_with(
 /// pass clients around.
 pub(crate) type LoopClient = Client<TestClock, SystemClock, TestTransport>;
 
-pub(crate) fn loop_client(
+pub(crate) async fn loop_client(
     test: &str,
     name: &str,
     wire: &Loopback,
 ) -> (LoopClient, TestTransport, TestClock) {
-    loop_client_with(test, name, wire, ClientConfig::default())
+    loop_client_with(test, name, wire, ClientConfig::default()).await
 }
 
 /// `loop_client` with edge-injected tuning (a blob gate's caps, say).
-pub(crate) fn loop_client_with(
+pub(crate) async fn loop_client_with(
     test: &str,
     name: &str,
     wire: &Loopback,
@@ -384,7 +386,8 @@ pub(crate) fn loop_client_with(
         clock.clone(),
         SystemClock,
         net.clone(),
-    );
+    )
+    .await;
     (client, net, clock)
 }
 

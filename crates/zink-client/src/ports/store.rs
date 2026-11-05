@@ -55,14 +55,13 @@ pub trait List: Send + Sync + 'static {
 pub struct Key(Vec<Segment>);
 
 impl Key {
-    pub fn new(first: Segment) -> Self {
-        Key(vec![first])
-    }
-
-    pub fn child(&self, segment: Segment) -> Self {
-        let mut segments = self.0.clone();
-        segments.push(segment);
-        Key(segments)
+    /// A key from a `/`-joined path — every part must be a segment.
+    pub fn parse(path: &str) -> Result<Self, InvalidSegment> {
+        let segments = path
+            .split('/')
+            .map(Segment::new)
+            .collect::<Result<_, _>>()?;
+        Ok(Key(segments))
     }
 
     pub fn segments(&self) -> &[Segment] {
@@ -187,9 +186,25 @@ mod tests {
     }
 
     #[test]
+    fn key_parse__should_split_a_path_into_segments() {
+        // When
+        let key = Key::parse("contacts/ab.record").expect("valid path");
+
+        // Then
+        assert_eq!(key.segments(), [seg("contacts"), seg("ab.record")]);
+    }
+
+    #[test]
+    fn key_parse__should_reject_empty_and_traversing_paths() {
+        for path in ["", "/a", "a/", "a//b", "a/../b", "./a"] {
+            assert!(Key::parse(path).is_err(), "{path:?}");
+        }
+    }
+
+    #[test]
     fn key__should_display_as_a_slash_joined_path() {
         // Given
-        let key = Key::new(seg("contacts")).child(seg("ab.record"));
+        let key = Key::parse("contacts/ab.record").expect("valid path");
 
         // Then
         assert_eq!(key.to_string(), "contacts/ab.record");

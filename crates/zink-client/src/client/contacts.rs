@@ -266,7 +266,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// hostile record smuggling a contact's key must never rewrite that
     /// contact's trust anchor as a side effect of adding "someone new";
     /// a record overlapping two or more contacts is refused outright.
-    pub fn add_contact(
+    pub async fn add_contact(
         &self,
         record: &ContactRecord,
         petname: Option<String>,
@@ -286,26 +286,27 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     "record has no valid self-claimed name; provide a petname".into(),
                 )
             })?;
-        let contacts = self.state.contacts()?;
+        let contacts = self.state.contacts().await?;
         match overlapping(&contacts, record).as_slice() {
             // A brand-new person; the name must stay unique across BOTH
             // namespaces — person labels and entry petnames — so
             // send-by-name stays unambiguous (S2: the collision rule lives
             // at the person layer).
             [] => {
-                self.ensure_label_free(&petname, None)?;
-                self.state.save_contact(&petname, record)?;
+                self.ensure_label_free(&petname, None).await?;
+                self.state.save_contact(&petname, record).await?;
                 // The eager invariant (S2): the add IS the person-creating
                 // act — the row lands with the entry, label = petname.
                 if let Some(&stem) = record.keys.first() {
-                    self.claim_entry(&petname, stem)?;
+                    self.claim_entry(&petname, stem).await?;
                 }
                 // The add travels as an offer (lens-sync.md §6): siblings
                 // render it; only their explicit accept writes anything.
                 self.emit_lens_op(super::lens::LensOp::OfferContact {
                     record: record.to_bytes(),
                     petname: petname.clone(),
-                });
+                })
+                .await;
             }
             [(existing_name, existing)] => {
                 if *existing_name != petname {
@@ -313,7 +314,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                         existing: existing_name.clone(),
                     });
                 }
-                self.state.replace_contact(existing, &petname, record)?;
+                self.state
+                    .replace_contact(existing, &petname, record)
+                    .await?;
             }
             several => {
                 let names: Vec<&str> = several.iter().map(|(name, _)| name.as_str()).collect();
@@ -328,8 +331,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// renders), or an ambiguous span that storing would refuse. Read-only
     /// — this is what lets an edge put the explicit update confirm in
     /// front of a human instead of asking them to retype a petname (R1).
-    pub fn preview_contact(&self, record: &ContactRecord) -> Result<RecordMatch, Error> {
-        let contacts = self.state.contacts()?;
+    pub async fn preview_contact(&self, record: &ContactRecord) -> Result<RecordMatch, Error> {
+        let contacts = self.state.contacts().await?;
         Ok(match overlapping(&contacts, record).as_slice() {
             [] => RecordMatch::New {
                 suggested_petname: record.self_claimed_name().map(str::to_string),
@@ -349,7 +352,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// `preview_contact`; a record matching nothing belongs to
     /// `add_contact`, and one spanning two contacts is refused outright,
     /// same as everywhere (multi-device.md §4).
-    pub fn update_contact(&self, record: &ContactRecord) -> Result<String, Error> {
+    pub async fn update_contact(&self, record: &ContactRecord) -> Result<String, Error> {
         if record.keys.is_empty() {
             return Err(Error::InvalidRecord("record has no keys".into()));
         }
@@ -358,13 +361,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 "record has no relays — no way to reach them".into(),
             ));
         }
-        let contacts = self.state.contacts()?;
+        let contacts = self.state.contacts().await?;
         match overlapping(&contacts, record).as_slice() {
             [] => Err(Error::NotAContact(
                 "record shares no key with a stored contact — add it instead".into(),
             )),
             [(petname, existing)] => {
-                self.state.replace_contact(existing, petname, record)?;
+                self.state
+                    .replace_contact(existing, petname, record)
+                    .await?;
                 Ok(petname.clone())
             }
             several => {
@@ -379,7 +384,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// in place; nothing is published (sharing a name with friends is the
     /// explicit `vouch`). Rejects an empty name or a collision with another
     /// contact, so send-by-name stays unambiguous.
-    pub fn rename(&self, current: &str, new: &str) -> Result<(), Error> {
+    pub async fn rename(&self, current: &str, new: &str) -> Result<(), Error> {
         let new = new.trim();
         if new.is_empty() {
             return Err(Error::InvalidInput("petname cannot be empty".into()));
@@ -387,7 +392,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         if new == current {
             return Ok(());
         }
-        let contacts = self.state.contacts()?;
+        let contacts = self.state.contacts().await?;
         let record = contacts
             .iter()
             .find(|(name, _)| name == current)
@@ -397,16 +402,17 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // shadowing our own person's label is unambiguous (the person layer
         // resolves first), anyone else's is a collision.
         let own_person = self
-            .persons()?
+            .persons()
+            .await?
             .into_iter()
             .find(|person| person.members.iter().any(|(name, _)| name == current));
-        self.ensure_label_free(new, own_person.as_ref())?;
-        self.state.save_contact(new, &record)
+        self.ensure_label_free(new, own_person.as_ref()).await?;
+        self.state.save_contact(new, &record).await
     }
 
     /// All stored contacts as `(petname, record)`.
-    pub fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, Error> {
-        self.state.contacts()
+    pub async fn contacts(&self) -> Result<Vec<(String, ContactRecord)>, Error> {
+        self.state.contacts().await
     }
 
     /// The one-way "recognize this device as me" act (multi-device.md §3),
@@ -415,7 +421,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// that `my_record` carries from now on. One direction only — the
     /// shown side does nothing, and serving/inclusion move only from this
     /// device toward the recognized key. Returns that key.
-    pub fn recognize_device(&self, record: &ContactRecord) -> Result<PublicKey, Error> {
+    pub async fn recognize_device(&self, record: &ContactRecord) -> Result<PublicKey, Error> {
         let device_key = *record
             .keys
             .first()
@@ -444,14 +450,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             },
             &self.device,
         );
-        self.state.save_recognized_device(record, &vouch)?;
+        self.state.save_recognized_device(record, &vouch).await?;
         Ok(device_key)
     }
 
     /// Recognized own devices as `(device key, record)` — this device's
     /// recognition set, its own social-graph decision like everything else.
-    pub fn recognized_devices(&self) -> Vec<(PublicKey, ContactRecord)> {
-        self.state.recognized_devices()
+    pub async fn recognized_devices(&self) -> Vec<(PublicKey, ContactRecord)> {
+        self.state.recognized_devices().await
     }
 
     /// Vouch for a contact (D4a, web-of-trust.md §2): sign "I call this
@@ -463,10 +469,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// by default (SPEC §3.2); nothing vouches on add. A re-vouch (after
     /// a rename, say) supersedes at the next revision. Returns the
     /// vouched key.
-    pub fn vouch(&self, petname: &str) -> Result<PublicKey, Error> {
-        let subject = self.contact_key(petname)?;
+    pub async fn vouch(&self, petname: &str) -> Result<PublicKey, Error> {
+        let subject = self.contact_key(petname).await?;
         let label = self
-            .persons()?
+            .persons()
+            .await?
             .into_iter()
             .find(|person| person.keys().contains(&subject))
             .map(|person| person.label)
@@ -476,6 +483,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let revision = self
             .state
             .vouch_for(&subject)
+            .await
             .map(|prior| prior.attestation.revision + 1)
             .unwrap_or(0);
         let vouch = SignedAttestation::new(
@@ -488,16 +496,16 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             },
             &self.device,
         );
-        self.state.save_vouch(&subject, &vouch)?;
+        self.state.save_vouch(&subject, &vouch).await?;
         Ok(subject)
     }
 
     /// Withdraw a vouch: it stops being served, and observers'
     /// per-responder learned entries replace it away on their next
     /// freshness pull. The *active* disavowal (`Negative`) is D4b.
-    pub fn unvouch(&self, petname: &str) -> Result<(), Error> {
-        let subject = self.contact_key(petname)?;
-        self.state.remove_vouch(&subject);
+    pub async fn unvouch(&self, petname: &str) -> Result<(), Error> {
+        let subject = self.contact_key(petname).await?;
+        self.state.remove_vouch(&subject).await;
         Ok(())
     }
 
@@ -505,8 +513,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// being served, included, and re-wrapped — but nothing is published.
     /// Losing interest in a sibling is not the same as declaring it
     /// compromised; that is `repudiate`.
-    pub fn unrecognize_device(&self, key: &PublicKey) {
-        self.state.remove_recognized_device(key);
+    pub async fn unrecognize_device(&self, key: &PublicKey) {
+        self.state.remove_recognized_device(key).await;
     }
 
     /// Repudiate a key (web-of-trust.md §4/§5): sign the `Negative` that
@@ -514,30 +522,34 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// endorsements), and un-recognize a repudiated sibling. Advisory
     /// like every claim — observers weigh it by their own policy, and a
     /// yet-higher re-vouch restores.
-    pub fn repudiate(&self, key: PublicKey) -> Result<(), Error> {
+    pub async fn repudiate(&self, key: PublicKey) -> Result<(), Error> {
         if key == self.device.public() {
             return Err(Error::InvalidInput("that is this device's own key".into()));
         }
         let stance = self
             .state
             .vouch_for(&key)
+            .await
             .map(|prior| prior.attestation.revision);
-        let device_link = self
+        let is_device = self
             .state
             .recognized_devices()
+            .await
             .iter()
-            .find(|(device_key, _)| *device_key == key)
-            .and_then(|_| {
-                self.state.device_vouches().into_iter().find(|vouch| {
+            .any(|(device_key, _)| *device_key == key);
+        let device_link = match is_device {
+            true => self.state.device_vouches().await.into_iter().find(|vouch| {
                 matches!(vouch.attestation.claim, Claim::SamePersonAs(linked) if linked == key)
-            })
-            })
-            .map(|vouch| vouch.attestation.revision);
+            }),
+            false => None,
+        }
+        .map(|vouch| vouch.attestation.revision);
         // The Negative must out-revision every standing claim it voids —
         // the avatar share (S5) included.
         let avatar_share = self
             .state
             .avatar_share_for(&key)
+            .await
             .map(|prior| prior.attestation.revision);
         let revision = match stance
             .into_iter()
@@ -558,14 +570,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             },
             &self.device,
         );
-        self.state.save_vouch(&key, &negative)?;
+        self.state.save_vouch(&key, &negative).await?;
         // A repudiated key's photo stops being shared and re-pushed; the
         // Negative's higher revision voids copies already learned.
-        self.state.remove_avatar_share(&key);
+        self.state.remove_avatar_share(&key).await;
         // …and its pending contact-add offers void with it
         // (lens-sync.md §6): the offer gates the write surface.
-        self.state.remove_offers_by(&key);
-        self.state.remove_recognized_device(&key);
+        self.state.remove_offers_by(&key).await;
+        self.state.remove_recognized_device(&key).await;
         Ok(())
     }
 
@@ -573,9 +585,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// and whether it `excludes` the key from addressed sets — true only
     /// for our own stance or a same-person disavowal; third-party
     /// negatives warn, never exclude (web-of-trust.md §4).
-    pub fn disavowals(&self, key: PublicKey) -> Result<Vec<Disavowal>, Error> {
-        let contacts = self.state.contacts()?;
-        let attestations = self.held_attestations(key)?;
+    pub async fn disavowals(&self, key: PublicKey) -> Result<Vec<Disavowal>, Error> {
+        let contacts = self.state.contacts().await?;
+        let attestations = self.held_attestations(key).await?;
         let same_entry = |attester: &PublicKey| {
             contacts
                 .iter()
@@ -596,7 +608,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                         || (attestation.attester == key && to == *attester))
             })
         };
-        let own = self.own_keys();
+        let own = self.own_keys().await;
         let mut disavowals: Vec<Disavowal> = Vec::new();
         for signed in &attestations {
             let Some((attester, disavowed, _)) = zink_protocol::verified_negative(signed) else {
@@ -609,7 +621,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             disavowals.push(Disavowal {
                 attester,
                 attester_label: self
-                    .participant_labels(&[attester])?
+                    .participant_labels(&[attester])
+                    .await?
                     .pop()
                     .unwrap_or_default(),
                 excludes,
@@ -621,17 +634,17 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Every attestation this client holds that could bear on `key`: its
     /// own stances, stored contact records, and the learned records +
     /// endorsements for the key and for each contact's keys.
-    fn held_attestations(&self, key: PublicKey) -> Result<Vec<SignedAttestation>, Error> {
+    async fn held_attestations(&self, key: PublicKey) -> Result<Vec<SignedAttestation>, Error> {
         let mut attestations: Vec<SignedAttestation> = Vec::new();
-        attestations.extend(self.state.vouch_for(&key));
-        attestations.extend(self.state.issued_negatives());
-        for entry in self.state.learned(&key) {
+        attestations.extend(self.state.vouch_for(&key).await);
+        attestations.extend(self.state.issued_negatives().await);
+        for entry in self.state.learned(&key).await {
             attestations.extend(entry.record.attestations.clone());
             attestations.extend(entry.endorsements.clone());
         }
-        for (_, record) in self.state.contacts()? {
+        for (_, record) in self.state.contacts().await? {
             for contact_key in &record.keys {
-                for entry in self.state.learned(contact_key) {
+                for entry in self.state.learned(contact_key).await {
                     attestations.extend(entry.record.attestations.clone());
                     attestations.extend(entry.endorsements.clone());
                 }
@@ -642,14 +655,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     }
 
     /// Whether this device currently vouches for a key (edge rendering).
-    pub fn vouches(&self, subject: &PublicKey) -> bool {
-        self.state.vouch_for(subject).is_some()
+    pub async fn vouches(&self, subject: &PublicKey) -> bool {
+        self.state.vouch_for(subject).await.is_some()
     }
 
     /// A contact entry's identity key (its record's first key).
-    fn contact_key(&self, petname: &str) -> Result<PublicKey, Error> {
+    async fn contact_key(&self, petname: &str) -> Result<PublicKey, Error> {
         self.state
-            .contacts()?
+            .contacts()
+            .await?
             .into_iter()
             .find(|(name, _)| name == petname)
             .and_then(|(_, record)| record.keys.first().copied())
@@ -659,46 +673,59 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// This device's key cluster as its own client sees it: self plus the
     /// recognized devices (D3c). Edges filter "other participants" with
     /// this — a conversation with a contact is not "with mårten laptop".
-    pub fn own_keys(&self) -> BTreeSet<PublicKey> {
+    pub async fn own_keys(&self) -> BTreeSet<PublicKey> {
         std::iter::once(self.device.public())
-            .chain(self.state.recognized_devices().into_iter().map(|(k, _)| k))
+            .chain(
+                self.state
+                    .recognized_devices()
+                    .await
+                    .into_iter()
+                    .map(|(k, _)| k),
+            )
             .collect()
     }
 
     /// The stored record for a key this client trusts: a user-added
     /// contact's, else a recognized own device's (D3c — devices resolve
     /// routes and labels through their own store, never through contacts).
-    pub(super) fn trusted_record_for(&self, key: &PublicKey) -> Option<ContactRecord> {
-        self.state
+    pub(super) async fn trusted_record_for(&self, key: &PublicKey) -> Option<ContactRecord> {
+        let contact = self
+            .state
             .contacts()
+            .await
             .unwrap_or_default()
             .into_iter()
             .find(|(_, record)| record.keys.contains(key))
+            .map(|(_, record)| record);
+        if contact.is_some() {
+            return contact;
+        }
+        self.state
+            .recognized_devices()
+            .await
+            .into_iter()
+            .find(|(device_key, _)| device_key == key)
             .map(|(_, record)| record)
-            .or_else(|| {
-                self.state
-                    .recognized_devices()
-                    .into_iter()
-                    .find(|(device_key, _)| device_key == key)
-                    .map(|(_, record)| record)
-            })
     }
 
     /// Petname → the Contact to send to. Keys come from the user-added
     /// record alone; relays resolve at read time (D1b, who-is-this.md §7).
-    pub fn resolve_contact(&self, petname: &str) -> Result<Contact, Error> {
-        self.state
-            .contacts()?
+    pub async fn resolve_contact(&self, petname: &str) -> Result<Contact, Error> {
+        let record = self
+            .state
+            .contacts()
+            .await?
             .into_iter()
             .find(|(name, _)| name == petname)
-            .map(|(_, record)| self.contact_from(&record))
-            .ok_or_else(|| Error::NotAContact(format!("no contact named {petname:?}")))
+            .map(|(_, record)| record)
+            .ok_or_else(|| Error::NotAContact(format!("no contact named {petname:?}")))?;
+        Ok(self.contact_from(&record).await)
     }
 
     /// Keys from the stored record; relays resolved at read time (§7).
-    pub(super) fn contact_from(&self, record: &ContactRecord) -> Contact {
+    pub(super) async fn contact_from(&self, record: &ContactRecord) -> Contact {
         let relays = match record.keys.first() {
-            Some(&key) => self.effective_relays(key, Some(record)),
+            Some(&key) => self.effective_relays(key, Some(record)).await,
             None => record.relays.clone(),
         };
         Contact {
@@ -716,12 +743,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// **contact-served** hearsay (only ever decisive in the one-way-add
     /// bootstrap, where it's the whole point). Keys never come from
     /// learned records — sealing stays on the user-added record until D3.
-    pub(super) fn effective_relays(
+    pub(super) async fn effective_relays(
         &self,
         key: PublicKey,
         stored: Option<&ContactRecord>,
     ) -> Vec<RelayEntry> {
         self.resolve_relays(key, stored)
+            .await
             .map(|resolution| resolution.relays)
             .unwrap_or_default()
     }
@@ -729,7 +757,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// `effective_relays` with the winning class named — what the person
     /// view renders as provenance (R5). `None`: nothing anywhere names a
     /// relay for this key.
-    pub(super) fn resolve_relays(
+    pub(super) async fn resolve_relays(
         &self,
         key: PublicKey,
         stored: Option<&ContactRecord>,
@@ -741,13 +769,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // override rides the same rule: it patches the entry's device.
         let publishes = |record: &&ContactRecord| record.keys.first() == Some(&key);
         let stored = stored.filter(publishes);
-        if let Some(relays) = self.state.relay_override(stored) {
+        if let Some(relays) = self.state.relay_override(stored).await {
             return Some(RelayResolution {
                 relays,
                 source: RelaySource::Override,
             });
         }
-        let learned = self.state.learned(&key);
+        let learned = self.state.learned(&key).await;
         let best = |from_subject: bool| {
             learned
                 .iter()
@@ -779,8 +807,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The read-time relay resolution for a bare key (project 7 S3 — the
     /// stranger page's route panel): `effective_relays` with provenance,
     /// no contact entry required. `None`: nothing anywhere names a relay.
-    pub fn relay_resolution(&self, key: PublicKey) -> Option<RelayResolution> {
-        self.resolve_relays(key, self.trusted_record_for(&key).as_ref())
+    pub async fn relay_resolution(&self, key: PublicKey) -> Option<RelayResolution> {
+        let stored = self.trusted_record_for(&key).await;
+        self.resolve_relays(key, stored.as_ref()).await
     }
 
     /// Set (or clear, with an empty list) the manual relay override for a
@@ -789,8 +818,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// (`update_contact` / a confirmed rescan) clears it — the fresh scan
     /// supersedes the patch. Specs validate before anything persists; the
     /// scanned `ZINK-RELAY:` form is accepted.
-    pub fn set_relay_override(&self, petname: &str, specs: &[String]) -> Result<(), Error> {
-        let contacts = self.state.contacts()?;
+    pub async fn set_relay_override(&self, petname: &str, specs: &[String]) -> Result<(), Error> {
+        let contacts = self.state.contacts().await?;
         let (_, record) = contacts
             .iter()
             .find(|(name, _)| name == petname)
@@ -800,7 +829,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             .first()
             .ok_or_else(|| Error::InvalidRecord("stored record has no keys".into()))?;
         if specs.is_empty() {
-            self.state.clear_relay_override(key);
+            self.state.clear_relay_override(key).await;
             return Ok(());
         }
         let entries: Vec<RelayEntry> = specs
@@ -812,14 +841,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             // rule).
             crate::adapters::iroh::parse_dial(&entry.mailbox)?;
         }
-        self.state.save_relay_override(key, &entries)
+        self.state.save_relay_override(key, &entries).await
     }
 
     /// The person-view relay panel (R5): the relays a send to this contact
     /// would use right now, the provenance class they came from, and what
     /// the outbox still owes each of them.
-    pub fn relay_status(&self, petname: &str) -> Result<RelayStatus, Error> {
-        let contacts = self.state.contacts()?;
+    pub async fn relay_status(&self, petname: &str) -> Result<RelayStatus, Error> {
+        let contacts = self.state.contacts().await?;
         let (_, record) = contacts
             .iter()
             .find(|(name, _)| name == petname)
@@ -831,9 +860,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             .ok_or_else(|| Error::InvalidRecord("stored record has no keys".into()))?;
         let resolution = self
             .resolve_relays(key, Some(record))
+            .await
             .ok_or_else(|| Error::InvalidRecord("no relays resolve for this contact".into()))?;
         let mut owed: BTreeMap<String, (usize, u64)> = BTreeMap::new();
-        for entry in self.state.outbox() {
+        for entry in self.state.outbox().await {
             let slot = owed.entry(entry.relay).or_insert((0, entry.created_ms));
             slot.0 += 1;
             slot.1 = slot.1.min(entry.created_ms);
@@ -858,13 +888,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// The dialable peer address for a person: their key, routed via the
     /// relay URLs their records resolve to at read time.
-    pub(super) fn peer_addr_for(
+    pub(super) async fn peer_addr_for(
         &self,
         key: PublicKey,
         stored: Option<&ContactRecord>,
     ) -> Result<Peer, Error> {
         let relay_urls: Vec<String> = self
             .effective_relays(key, stored)
+            .await
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref().map(str::to_string))
             .collect();
@@ -880,17 +911,19 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// arbitrated) > unknown (the edge renders the key). Provenance rides
     /// along: which contacts hold a record claiming each name, and whether
     /// the subject itself served one.
-    pub fn resolve_name(&self, key: PublicKey) -> Result<ResolvedName, Error> {
+    pub async fn resolve_name(&self, key: PublicKey) -> Result<ResolvedName, Error> {
         if let Some((petname, _)) = self
             .state
-            .contacts()?
+            .contacts()
+            .await?
             .iter()
             .find(|(_, record)| record.keys.contains(&key))
         {
             return Ok(ResolvedName::Petname(petname.clone()));
         }
         let names: Vec<LearnedName> = self
-            .learned_candidates(key)?
+            .learned_candidates(key)
+            .await?
             .into_iter()
             .map(|(name, _)| name)
             .collect();
@@ -905,11 +938,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// claiming that name (highest revision, then latest receipt) — the
     /// promotable payload behind the wild-key popup's add button (D2c,
     /// groups.md §5). Best first; a genuine tie surfaces both.
-    pub fn learned_candidates(
+    pub async fn learned_candidates(
         &self,
         subject: PublicKey,
     ) -> Result<Vec<(LearnedName, ContactRecord)>, Error> {
-        let contacts = self.state.contacts()?;
+        let contacts = self.state.contacts().await?;
         let petname_of = |responder: PublicKey| {
             contacts
                 .iter()
@@ -921,7 +954,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         };
         let mut groups: BTreeMap<String, (LearnedName, ContactRecord, (u64, u64))> =
             BTreeMap::new();
-        let entries = self.state.learned(&subject);
+        let entries = self.state.learned(&subject).await;
         for entry in &entries {
             let Some((name, revision)) = entry.record.self_name_claim() else {
                 continue; // no verifiable self-claim — relays-only evidence
@@ -1024,11 +1057,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// surface, honestly — the §8 misattribution case is exactly why the
     /// popup says *who* claims, and why nothing here auto-adopts: every
     /// tier only ever produces an offer, accepted via `add_contact`.
-    pub fn device_evidence(&self, subject: PublicKey) -> Result<Vec<DeviceEvidence>, Error> {
-        let contacts = self.state.contacts()?;
+    pub async fn device_evidence(&self, subject: PublicKey) -> Result<Vec<DeviceEvidence>, Error> {
+        let contacts = self.state.contacts().await?;
         // Links AND negatives now travel as endorsements too, so the pool
         // is everything held (D4b) — `link_tier` applies the voiding rule.
-        let attestations = self.held_attestations(subject)?;
+        let attestations = self.held_attestations(subject).await?;
         let mut evidence: Vec<DeviceEvidence> = contacts
             .iter()
             .filter_map(|(petname, record)| {
@@ -1051,8 +1084,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// applied), and when the answer landed. Subject-served entries are
     /// excluded — the subject's own answers are the "what they claim"
     /// layer, not a friend's lens.
-    pub fn friend_views(&self, subject: PublicKey) -> Result<Vec<FriendView>, Error> {
-        let contacts = self.state.contacts()?;
+    pub async fn friend_views(&self, subject: PublicKey) -> Result<Vec<FriendView>, Error> {
+        let contacts = self.state.contacts().await?;
         let petname_of = |responder: PublicKey| {
             contacts
                 .iter()
@@ -1063,6 +1096,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         Ok(self
             .state
             .learned(&subject)
+            .await
             .into_iter()
             .filter(|entry| entry.responder != subject)
             .map(|entry| {
@@ -1111,8 +1145,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// device never scanned back. Never trusted by itself: the offer
     /// routes through the pair-confirm fingerprint like every recognize
     /// act (multi-device.md §3).
-    pub fn claims_to_be_my_device(&self, subject: PublicKey) -> Option<ContactRecord> {
-        let own = self.own_keys();
+    pub async fn claims_to_be_my_device(&self, subject: PublicKey) -> Option<ContactRecord> {
+        let own = self.own_keys().await;
         if own.contains(&subject) {
             return None;
         }
@@ -1138,6 +1172,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         };
         self.state
             .learned(&subject)
+            .await
             .into_iter()
             .filter(|entry| claims_us(&entry.record))
             .max_by_key(|entry| entry.received_ms)
@@ -1147,12 +1182,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Ignore an unknown key (D2c, groups.md §5): the popup stops
     /// proposing it; the key keeps rendering as hex (honest), and the
     /// manual who-is path stays available. Local presentation policy.
-    pub fn dismiss(&self, key: PublicKey) -> Result<(), Error> {
-        self.state.dismiss_key(&key)
+    pub async fn dismiss(&self, key: PublicKey) -> Result<(), Error> {
+        self.state.dismiss_key(&key).await
     }
 
-    pub fn dismissed(&self) -> BTreeSet<PublicKey> {
-        self.state.dismissed_keys()
+    pub async fn dismissed(&self) -> BTreeSet<PublicKey> {
+        self.state.dismissed_keys().await
     }
 }
 
@@ -1186,6 +1221,7 @@ mod tests {
             }],
         );
         a.add_contact(&stored, Some("carol".to_string()))
+            .await
             .expect("add");
         let served = ContactRecord::new(
             vec![carol.public(), extra],
@@ -1197,6 +1233,7 @@ mod tests {
         );
         a.state
             .save_learned(&carol.public(), &carol.public(), &served, &[], 1)
+            .await
             .expect("learn subject-served");
         let hearsay = ContactRecord::new(
             vec![carol.public()],
@@ -1214,10 +1251,11 @@ mod tests {
                 &[],
                 2,
             )
+            .await
             .expect("learn hearsay");
 
         // When
-        let contact = a.resolve_contact("carol").expect("resolve");
+        let contact = a.resolve_contact("carol").await.expect("resolve");
 
         // Then: subject-served relays beat newer hearsay; sealing keys come
         // strictly from the user-added record — the smuggled key is inert
@@ -1238,6 +1276,7 @@ mod tests {
         let original =
             ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1"));
         a.add_contact(&original, Some("bob".to_string()))
+            .await
             .expect("add");
 
         // When: a re-scan with the key set extended and *reordered* — a new
@@ -1248,10 +1287,11 @@ mod tests {
             mailbox_only("bb@203.0.113.2:2"),
         );
         a.add_contact(&rescanned, Some("bob".to_string()))
+            .await
             .expect("update");
 
         // Then: still exactly one contact, holding the fresh record
-        let contacts = a.contacts().expect("contacts");
+        let contacts = a.contacts().await.expect("contacts");
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].0, "bob");
         assert_eq!(contacts[0].1, rescanned);
@@ -1272,6 +1312,7 @@ mod tests {
             &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
         let contacts_dir =
             std::path::PathBuf::from(format!("{}.state", temp_key("overlap-confirm", "a")))
@@ -1284,7 +1325,7 @@ mod tests {
         );
 
         // When: added as "someone new"
-        let result = a.add_contact(&smuggling, Some("mallory".to_string()));
+        let result = a.add_contact(&smuggling, Some("mallory".to_string())).await;
 
         // Then: surfaced, naming the entry it would rewrite; nothing stored
         assert!(matches!(
@@ -1296,8 +1337,9 @@ mod tests {
         // And: the same add under the matched petname is the explicit
         // confirm — it updates bob's entry, keeping one contact
         a.add_contact(&smuggling, Some("bob".to_string()))
+            .await
             .expect("confirmed update");
-        let contacts = a.contacts().expect("contacts");
+        let contacts = a.contacts().await.expect("contacts");
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].0, "bob");
 
@@ -1320,6 +1362,7 @@ mod tests {
                 &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
                 Some(name.to_string()),
             )
+            .await
             .expect("add");
         }
         let contacts_dir =
@@ -1336,7 +1379,7 @@ mod tests {
         // and the store is untouched
         for petname in ["dana", "bob"] {
             assert!(matches!(
-                a.add_contact(&spanning, Some(petname.to_string())),
+                a.add_contact(&spanning, Some(petname.to_string())).await,
                 Err(Error::AmbiguousOverlap(_))
             ));
         }
@@ -1357,6 +1400,7 @@ mod tests {
             &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
 
         // When / Then: no shared key = no identity evidence — rejected
@@ -1368,7 +1412,8 @@ mod tests {
                     mailbox_only("oo@203.0.113.2:2"),
                 ),
                 Some("bob".to_string()),
-            ),
+            )
+            .await,
             Err(Error::PetnameCollision(_))
         ));
 
@@ -1390,6 +1435,7 @@ mod tests {
             mailbox_only("xx@203.0.113.1:1"),
         );
         a.add_contact(&stored, Some("carol".to_string()))
+            .await
             .expect("add");
         let served = ContactRecord::new(
             vec![carol.public()],
@@ -1398,24 +1444,26 @@ mod tests {
         );
         a.state
             .save_learned(&carol.public(), &carol.public(), &served, &[], 1)
+            .await
             .expect("learn subject-served");
 
         // When: a manual override, pasted in the scanned QR form
         a.set_relay_override("carol", &[format!("ZINK-RELAY:{}", mailbox_spec(&relay_z))])
+            .await
             .expect("set override");
 
         // Then: the override beats even the subject's own answer
-        let contact = a.resolve_contact("carol").expect("resolve");
+        let contact = a.resolve_contact("carol").await.expect("resolve");
         assert_eq!(contact.relays, vec![mailbox_spec(&relay_z)]);
-        let status = a.relay_status("carol").expect("status");
+        let status = a.relay_status("carol").await.expect("status");
         assert_eq!(status.source, RelaySource::Override);
 
         // And: clearing it (an empty list) falls back to subject-served
-        a.set_relay_override("carol", &[]).expect("clear");
-        let contact = a.resolve_contact("carol").expect("resolve");
+        a.set_relay_override("carol", &[]).await.expect("clear");
+        let contact = a.resolve_contact("carol").await.expect("resolve");
         assert_eq!(contact.relays, vec!["yy@203.0.113.2:2".to_string()]);
         assert_eq!(
-            a.relay_status("carol").expect("status").source,
+            a.relay_status("carol").await.expect("status").source,
             RelaySource::SubjectServed { received_ms: 1 }
         );
 
@@ -1433,15 +1481,17 @@ mod tests {
             &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
             Some("bob".to_string()),
         )
+        .await
         .expect("add");
 
         // When / Then: a malformed dial is refused before anything persists
         assert!(
             a.set_relay_override("bob", &["not-a-dial".to_string()])
+                .await
                 .is_err()
         );
         assert_eq!(
-            a.relay_status("bob").expect("status").source,
+            a.relay_status("bob").await.expect("status").source,
             RelaySource::Scanned,
             "no override took effect"
         );
@@ -1461,20 +1511,22 @@ mod tests {
             &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
             Some("bob".to_string()),
         )
+        .await
         .expect("add");
         a.set_relay_override("bob", &[mailbox_spec(&relay)])
+            .await
             .expect("set override");
 
         // When: an explicit record update (the confirmed rescan)
         let fresh =
             ContactRecord::new(vec![bob.public()], vec![], mailbox_only("cc@203.0.113.7:7"));
-        a.update_contact(&fresh).expect("update");
+        a.update_contact(&fresh).await.expect("update");
 
         // Then: the fresh scan supersedes the patch
-        let status = a.relay_status("bob").expect("status");
+        let status = a.relay_status("bob").await.expect("status");
         assert_eq!(status.source, RelaySource::Scanned);
         assert_eq!(
-            a.resolve_contact("bob").expect("resolve").relays,
+            a.resolve_contact("bob").await.expect("resolve").relays,
             vec!["cc@203.0.113.7:7".to_string()]
         );
 
@@ -1497,14 +1549,16 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("add");
         let message = zink_protocol::MessageId([7; 32]);
         a.state
             .add_outbox(message, &mailbox_spec(&relay), message, 5)
+            .await
             .expect("owe");
 
         // When
-        let status = a.relay_status("bob").expect("status");
+        let status = a.relay_status("bob").await.expect("status");
 
         // Then: the stored record is the source, and the debt shows
         assert_eq!(status.source, RelaySource::Scanned);
@@ -1535,10 +1589,13 @@ mod tests {
         // it is identity evidence, honestly unroutable until its own
         // record is learned
         assert_eq!(
-            a.effective_relays(bob.public(), Some(&record)),
+            a.effective_relays(bob.public(), Some(&record)).await,
             mailbox_only("bb@203.0.113.1:1")
         );
-        assert_eq!(a.effective_relays(sibling.public(), Some(&record)), vec![]);
+        assert_eq!(
+            a.effective_relays(sibling.public(), Some(&record)).await,
+            vec![]
+        );
 
         let _ = std::fs::remove_dir_all(temp_root("relay-bind"));
     }
@@ -1553,7 +1610,7 @@ mod tests {
         let record = signed_record(&carol, "carol", 0, mailbox_only("cc@203.0.113.1:1"));
 
         // When
-        let matched = a.preview_contact(&record).expect("preview");
+        let matched = a.preview_contact(&record).await.expect("preview");
 
         // Then
         assert!(matches!(
@@ -1576,6 +1633,7 @@ mod tests {
         let laptop = DeviceKey::from_seed([42; 32]);
         let stored = signed_record(&anna, "Anna", 0, mailbox_only("old@203.0.113.1:1"));
         a.add_contact(&stored, Some("anna".to_string()))
+            .await
             .expect("add");
         let renamed = SignedAttestation::new(
             Attestation {
@@ -1594,7 +1652,7 @@ mod tests {
         );
 
         // When
-        let matched = a.preview_contact(&rescanned).expect("preview");
+        let matched = a.preview_contact(&rescanned).await.expect("preview");
 
         // Then: an update of anna's entry, with the full diff
         let RecordMatch::Update(update) = matched else {
@@ -1627,6 +1685,7 @@ mod tests {
                 &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
                 Some(name.to_string()),
             )
+            .await
             .expect("add");
         }
         let spanning = ContactRecord::new(
@@ -1636,7 +1695,7 @@ mod tests {
         );
 
         // When
-        let matched = a.preview_contact(&spanning).expect("preview");
+        let matched = a.preview_contact(&spanning).await.expect("preview");
 
         // Then
         assert!(matches!(
@@ -1657,19 +1716,20 @@ mod tests {
         let anna = DeviceKey::from_seed([45; 32]);
         let stored = signed_record(&anna, "Anna", 0, mailbox_only("old@203.0.113.1:1"));
         a.add_contact(&stored, Some("anna".to_string()))
+            .await
             .expect("add");
         let rescanned = signed_record(&anna, "Ann", 1, mailbox_only("new@203.0.113.9:9"));
 
         // When: the confirmed update — no petname anywhere in sight
-        let petname = a.update_contact(&rescanned).expect("update");
+        let petname = a.update_contact(&rescanned).await.expect("update");
 
         // Then: same entry, my label kept, her fresh record the new anchor
         assert_eq!(petname, "anna");
-        let contacts = a.contacts().expect("contacts");
+        let contacts = a.contacts().await.expect("contacts");
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].0, "anna");
         assert_eq!(contacts[0].1, rescanned);
-        let contact = a.resolve_contact("anna").expect("resolve");
+        let contact = a.resolve_contact("anna").await.expect("resolve");
         assert_eq!(contact.relays, vec!["new@203.0.113.9:9".to_string()]);
 
         let _ = std::fs::remove_dir_all(temp_root("update-keeps"));
@@ -1687,6 +1747,7 @@ mod tests {
             &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
             Some("bob".to_string()),
         )
+        .await
         .expect("add");
         let contacts_dir =
             std::path::PathBuf::from(format!("{}.state", temp_key("update-none", "a")))
@@ -1699,7 +1760,8 @@ mod tests {
                 vec![stranger.public()],
                 vec![],
                 mailbox_only("ss@203.0.113.2:2"),
-            )),
+            ))
+            .await,
             Err(Error::NotAContact(_))
         ));
         assert_eq!(dir_bytes(&contacts_dir), before);
@@ -1723,6 +1785,7 @@ mod tests {
                 &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
                 Some(name.to_string()),
             )
+            .await
             .expect("add");
         }
         let contacts_dir =
@@ -1736,7 +1799,8 @@ mod tests {
                 vec![bob.public(), carol.public()],
                 vec![],
                 mailbox_only("xx@203.0.113.7:7"),
-            )),
+            ))
+            .await,
             Err(Error::AmbiguousOverlap(_))
         ));
         assert_eq!(dir_bytes(&contacts_dir), before);
@@ -1758,18 +1822,20 @@ mod tests {
         let held_by_a = chain(&DeviceKey::from_seed([42; 32]), a.public_key(), 3);
         let conv_a = held_by_a[0].id();
         for envelope in &held_by_a {
-            a.state.store_envelope(conv_a, envelope).unwrap();
+            a.state.store_envelope(conv_a, envelope).await.unwrap();
         }
         b.state
             .store_envelope(conv_a, held_by_a.last().unwrap())
+            .await
             .unwrap();
         let held_by_b = chain(&DeviceKey::from_seed([43; 32]), b.public_key(), 3);
         let conv_b = held_by_b[0].id();
         for envelope in &held_by_b {
-            b.state.store_envelope(conv_b, envelope).unwrap();
+            b.state.store_envelope(conv_b, envelope).await.unwrap();
         }
         a.state
             .store_envelope(conv_b, held_by_b.last().unwrap())
+            .await
             .unwrap();
 
         // When: B pulls as a stranger
@@ -1787,6 +1853,7 @@ mod tests {
             vec![],
             mailbox_only("bb@203.0.113.5:5"),
         ))
+        .await
         .expect("recognize");
         let served = b
             .backfill_addr(conv_a, a.transport.peer())
@@ -1795,7 +1862,7 @@ mod tests {
 
         // Then: B is served like self…
         assert_eq!(served, 2, "genesis + the middle message");
-        assert!(b.state.load_dag(conv_a).is_ok());
+        assert!(b.state.load_dag(conv_a).await.is_ok());
 
         // …while the reverse direction stays closed
         let reverse = a
@@ -1810,6 +1877,7 @@ mod tests {
             vec![],
             mailbox_only("aa@203.0.113.6:6"),
         ))
+        .await
         .expect("recognize back");
         let reverse = a
             .backfill_addr(conv_b, b.transport.peer())
@@ -1841,11 +1909,11 @@ mod tests {
         );
 
         // When
-        a.recognize_device(&laptop_record).expect("recognize");
+        a.recognize_device(&laptop_record).await.expect("recognize");
 
         // Then: my_record vouches the laptop — an observer trusting A's
         // key tiers the laptop as offerable (the D3a evaluation)…
-        let my = a.my_record().expect("record");
+        let my = a.my_record().await.expect("record");
         assert_eq!(
             zink_protocol::link_tier(&[a.public_key()], laptop.public(), &my.attestations),
             zink_protocol::LinkTier::VouchedFromTrust
@@ -1885,12 +1953,12 @@ mod tests {
         let a = Client::open(&temp_key("recognize-vouch", "a"))
             .await
             .expect("reopen");
-        assert_eq!(a.recognized_devices().len(), 1);
+        assert_eq!(a.recognized_devices().await.len(), 1);
         assert_eq!(
             zink_protocol::link_tier(
                 &[a.public_key()],
                 laptop.public(),
-                &a.my_record().expect("record").attestations
+                &a.my_record().await.expect("record").attestations
             ),
             zink_protocol::LinkTier::VouchedFromTrust
         );
@@ -1924,10 +1992,11 @@ mod tests {
             mailbox_only("pp@203.0.113.1:1"),
         );
         a.add_contact(&p_record, Some("p".to_string()))
+            .await
             .expect("add");
 
         // Then: the one-way tier — offerable, labeled as P's claim
-        let evidence = a.device_evidence(laptop.public()).expect("evidence");
+        let evidence = a.device_evidence(laptop.public()).await.expect("evidence");
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].petname, "p");
         assert_eq!(evidence[0].tier, zink_protocol::LinkTier::VouchedFromTrust);
@@ -1941,11 +2010,12 @@ mod tests {
         );
         a.state
             .save_learned(&laptop.public(), &p.public(), &laptop_record, &[], 1)
+            .await
             .expect("learn");
 
         // Then: upgraded to mutually confirmed
         assert_eq!(
-            a.device_evidence(laptop.public()).expect("evidence")[0].tier,
+            a.device_evidence(laptop.public()).await.expect("evidence")[0].tier,
             zink_protocol::LinkTier::MutuallyConfirmed
         );
 
@@ -1959,9 +2029,11 @@ mod tests {
         );
         a.state
             .save_learned(&stranger.public(), &p.public(), &spoof, &[], 2)
+            .await
             .expect("learn");
         assert!(
             a.device_evidence(stranger.public())
+                .await
                 .expect("evidence")
                 .is_empty()
         );
@@ -2009,6 +2081,7 @@ mod tests {
                 &[],
                 1,
             )
+            .await
             .expect("learn phone");
         a.state
             .save_learned(
@@ -2018,15 +2091,17 @@ mod tests {
                 &[],
                 2,
             )
+            .await
             .expect("learn forged");
 
         // Then: only the verified claim surfaces, as its record
         assert_eq!(
             a.claims_to_be_my_device(phone.public())
+                .await
                 .map(|record| record.keys),
             Some(vec![phone.public()])
         );
-        assert_eq!(a.claims_to_be_my_device(stranger.public()), None);
+        assert_eq!(a.claims_to_be_my_device(stranger.public()).await, None);
 
         // And: the phone repudiating me voids its own link — no offer
         let negative = SignedAttestation::new(
@@ -2047,8 +2122,9 @@ mod tests {
                 &[],
                 3,
             )
+            .await
             .expect("learn voided");
-        assert_eq!(a.claims_to_be_my_device(phone.public()), None);
+        assert_eq!(a.claims_to_be_my_device(phone.public()).await, None);
 
         let _ = std::fs::remove_dir_all(temp_root("pairback"));
     }
@@ -2068,28 +2144,33 @@ mod tests {
             ),
             Some("Carrie".to_string()),
         )
+        .await
         .expect("add");
 
         // When / Then: the explicit act signs at revision 0; a re-vouch
         // supersedes; withdrawal removes; a non-contact errors
-        assert!(!a.vouches(&carol.public()));
-        a.vouch("Carrie").expect("vouch");
-        let first = a.state.vouch_for(&carol.public()).expect("stored");
+        assert!(!a.vouches(&carol.public()).await);
+        a.vouch("Carrie").await.expect("vouch");
+        let first = a.state.vouch_for(&carol.public()).await.expect("stored");
         assert_eq!(first.attestation.revision, 0);
         assert_eq!(first.attestation.claim, Claim::Name("Carrie".to_string()));
         assert_eq!(first.verify(), Ok(()));
-        a.vouch("Carrie").expect("re-vouch");
+        a.vouch("Carrie").await.expect("re-vouch");
         assert_eq!(
             a.state
                 .vouch_for(&carol.public())
+                .await
                 .expect("stored")
                 .attestation
                 .revision,
             1
         );
-        a.unvouch("Carrie").expect("unvouch");
-        assert!(!a.vouches(&carol.public()));
-        assert!(matches!(a.vouch("nobody"), Err(Error::NotAContact(_))));
+        a.unvouch("Carrie").await.expect("unvouch");
+        assert!(!a.vouches(&carol.public()).await);
+        assert!(matches!(
+            a.vouch("nobody").await,
+            Err(Error::NotAContact(_))
+        ));
 
         let _ = std::fs::remove_dir_all(temp_root("vouch"));
     }
@@ -2110,16 +2191,17 @@ mod tests {
             ),
             Some("carol-phone".to_string()),
         )
+        .await
         .expect("add");
-        let person = a.person_by_label("carol-phone").expect("person");
-        a.rename_person(person.id, "Carol").expect("rename");
+        let person = a.person_by_label("carol-phone").await.expect("person");
+        a.rename_person(person.id, "Carol").await.expect("rename");
 
         // When: vouching by the entry petname (the act's handle)
-        a.vouch("carol-phone").expect("vouch");
+        a.vouch("carol-phone").await.expect("vouch");
 
         // Then: what travels is the person label — the name my lens
         // addresses by, exactly what the toggle copy promises
-        let stored = a.state.vouch_for(&carol.public()).expect("stored");
+        let stored = a.state.vouch_for(&carol.public()).await.expect("stored");
         assert_eq!(stored.attestation.claim, Claim::Name("Carol".to_string()));
 
         let _ = std::fs::remove_dir_all(temp_root("vouch-label"));
@@ -2145,8 +2227,9 @@ mod tests {
             ),
             Some("Carrie".to_string()),
         )
+        .await
         .expect("add");
-        a.vouch("Carrie").expect("vouch");
+        a.vouch("Carrie").await.expect("vouch");
         let laptop = DeviceKey::from_seed([91; 32]);
         a.recognize_device(&signed_record(
             &laptop,
@@ -2154,20 +2237,23 @@ mod tests {
             0,
             mailbox_only("ll@203.0.113.5:5"),
         ))
+        .await
         .expect("recognize");
-        let old_record = a.my_record().expect("record");
+        let old_record = a.my_record().await.expect("record");
 
         // When: both get repudiated
-        a.repudiate(carol.public()).expect("repudiate carol");
-        a.repudiate(laptop.public()).expect("repudiate laptop");
+        a.repudiate(carol.public()).await.expect("repudiate carol");
+        a.repudiate(laptop.public())
+            .await
+            .expect("repudiate laptop");
 
         // Then: the negative supersedes the vouch (rev 1 over rev 0), the
         // sibling is un-recognized, and the fresh record publishes both
-        let carol_stance = a.state.vouch_for(&carol.public()).expect("stance");
+        let carol_stance = a.state.vouch_for(&carol.public()).await.expect("stance");
         assert!(matches!(carol_stance.attestation.claim, Claim::Negative));
         assert_eq!(carol_stance.attestation.revision, 1);
-        assert!(a.recognized_devices().is_empty());
-        let fresh = a.my_record().expect("record");
+        assert!(a.recognized_devices().await.is_empty());
+        let fresh = a.my_record().await.expect("record");
         assert_eq!(
             fresh
                 .attestations
@@ -2185,8 +2271,8 @@ mod tests {
             zink_protocol::LinkTier::None
         );
         // …and a yet-higher re-vouch restores the contact's name stance
-        a.vouch("Carrie").expect("re-vouch");
-        let restored = a.state.vouch_for(&carol.public()).expect("stance");
+        a.vouch("Carrie").await.expect("re-vouch");
+        let restored = a.state.vouch_for(&carol.public()).await.expect("stance");
         assert_eq!(restored.attestation.revision, 2);
         assert!(matches!(restored.attestation.claim, Claim::Name(_)));
 
@@ -2211,6 +2297,7 @@ mod tests {
                 &ContactRecord::new(vec![device.public()], vec![], mailbox_only(mailbox)),
                 Some(name.to_string()),
             )
+            .await
             .expect("add");
         }
         let endorse = |claim: Claim, revision: u64| {
@@ -2237,10 +2324,14 @@ mod tests {
                 ],
                 1,
             )
+            .await
             .expect("learn");
 
         // Then: the endorsed name is voided by its attester's negative…
-        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        let candidates = a
+            .learned_candidates(carol.public())
+            .await
+            .expect("candidates");
         assert!(
             candidates
                 .iter()
@@ -2249,7 +2340,7 @@ mod tests {
         );
         // …the disavowal renders with WHO — but as third-party it never
         // excludes (the griefing bound, web-of-trust.md §7)
-        let disavowals = a.disavowals(carol.public()).expect("disavowals");
+        let disavowals = a.disavowals(carol.public()).await.expect("disavowals");
         assert_eq!(disavowals.len(), 1);
         assert_eq!(disavowals[0].attester_label, "bob");
         assert!(!disavowals[0].excludes);
@@ -2269,8 +2360,8 @@ mod tests {
         // owns that temp namespace, and a shared one means one test's
         // cleanup deletes the other's live stores mid-run (the S5 flake
         // class).
-        let (phone, _p_net, _p_clock) = loop_client("lostdevice", "phone", &wire);
-        let (alice, _a_net, _a_clock) = loop_client("lostdevice", "alice", &wire);
+        let (phone, _p_net, _p_clock) = loop_client("lostdevice", "phone", &wire).await;
+        let (alice, _a_net, _a_clock) = loop_client("lostdevice", "alice", &wire).await;
         // The phone's profile — `my_record` reads it (as `open_homed` wrote).
         phone
             .state
@@ -2281,8 +2372,9 @@ mod tests {
                     relay_url: Some("http://203.0.113.1:1".to_string()),
                 }],
             )
+            .await
             .expect("save profile");
-        befriend(&phone.state, alice.public_key()); // alice is served by the phone
+        befriend(&phone.state, alice.public_key()).await; // alice is served by the phone
         let laptop = DeviceKey::from_seed([94; 32]);
         let laptop_link = SignedAttestation::new(
             Attestation {
@@ -2301,7 +2393,10 @@ mod tests {
             mailbox_only("ll@203.0.113.5:5"),
         );
         laptop_record.attestations.push(laptop_link);
-        phone.recognize_device(&laptop_record).expect("recognize");
+        phone
+            .recognize_device(&laptop_record)
+            .await
+            .expect("recognize");
         let to_alice = vec![Contact {
             keys: vec![alice.public_key()],
             relays: vec!["aa@203.0.113.9:9".to_string()],
@@ -2310,44 +2405,54 @@ mod tests {
         // (with the laptop appended) is stored; hand it to alice directly.
         let result = phone.send(&to_alice, b"hi".to_vec(), vec![]).await;
         assert!(matches!(result, Err(Error::AllRelaysPending(_))));
-        let conversation = phone.state.conversations()[0];
-        for envelope in phone.state.load_envelopes(conversation).expect("stored") {
+        let conversation = phone.state.conversations().await[0];
+        for envelope in phone
+            .state
+            .load_envelopes(conversation)
+            .await
+            .expect("stored")
+        {
             alice
                 .state
                 .store_envelope(conversation, &envelope)
+                .await
                 .expect("copy");
         }
         alice
             .add_contact(
-                &phone.my_record().expect("record"),
+                &phone.my_record().await.expect("record"),
                 Some("mårten".to_string()),
             )
+            .await
             .expect("add phone");
-        alice.add_contact(&laptop_record, None).expect("add laptop");
+        alice
+            .add_contact(&laptop_record, None)
+            .await
+            .expect("add laptop");
 
         // Baseline: a reply addresses both of mårten's keys
-        let baseline = alice.reply_contacts(conversation).expect("reply");
+        let baseline = alice.reply_contacts(conversation).await.expect("reply");
         assert_eq!(baseline.contacts.len(), 2);
         assert!(baseline.disavowed.is_empty());
 
         // When: the phone repudiates the lost laptop; alice's next
         // freshness pull on the phone brings the fresh record
-        phone.repudiate(laptop.public()).expect("repudiate");
+        phone.repudiate(laptop.public()).await.expect("repudiate");
         let outcome = alice.who_is(phone.public_key()).await.expect("pull");
         assert!(!outcome.answers.is_empty());
 
         // Then: the laptop drops out of the addressed set — the accepted
         // disavowal is the deliberate stop-include — and renders with WHO
-        let after = alice.reply_contacts(conversation).expect("reply");
+        let after = alice.reply_contacts(conversation).await.expect("reply");
         assert_eq!(after.contacts.len(), 1);
         assert_eq!(after.disavowed, vec![laptop.public()]);
-        let disavowals = alice.disavowals(laptop.public()).expect("disavowals");
+        let disavowals = alice.disavowals(laptop.public()).await.expect("disavowals");
         assert_eq!(disavowals.len(), 1);
         assert!(disavowals[0].excludes);
         assert_eq!(disavowals[0].attester_label, "mårten");
         // …while the explicit act survives everything: sending to the
         // entry by name is the manual override
-        assert!(alice.resolve_contact("mårten laptop").is_ok());
+        assert!(alice.resolve_contact("mårten laptop").await.is_ok());
 
         let _ = std::fs::remove_dir_all(temp_root("lostdevice"));
     }
@@ -2386,6 +2491,7 @@ mod tests {
                 &[],
                 1,
             )
+            .await
             .expect("learn older");
         a.state
             .save_learned(
@@ -2395,10 +2501,14 @@ mod tests {
                 &[],
                 2,
             )
+            .await
             .expect("learn newer");
 
         // When
-        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        let candidates = a
+            .learned_candidates(carol.public())
+            .await
+            .expect("candidates");
 
         // Then: one group (agreement of two), paired with the freshest
         // record — the promotable payload
@@ -2418,13 +2528,13 @@ mod tests {
         let noisy = DeviceKey::from_seed([28; 32]).public();
 
         // When
-        a.dismiss(noisy).expect("dismiss");
-        a.dismiss(noisy).expect("idempotent");
+        a.dismiss(noisy).await.expect("dismiss");
+        a.dismiss(noisy).await.expect("idempotent");
         drop(a);
         let a = Client::open_or_create(&key_path).await.expect("reopen");
 
         // Then
-        assert!(a.dismissed().contains(&noisy));
+        assert!(a.dismissed().await.contains(&noisy));
 
         let _ = std::fs::remove_dir_all(temp_root("dismiss"));
     }
@@ -2448,11 +2558,13 @@ mod tests {
                     &[],
                     at,
                 )
+                .await
                 .expect("learn");
         }
 
         // When
-        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).expect("resolve") else {
+        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).await.expect("resolve")
+        else {
             panic!("expected learned names");
         };
 

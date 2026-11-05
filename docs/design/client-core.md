@@ -261,10 +261,13 @@ a map, not a contract.
 
 - **No tokio dependency.** All flows are plain `async fn`s awaiting iroh futures; the
   binaries own the runtime. Keeps the crate portable (single-threaded WASM later).
-- **Storage stays `std::fs`**, gated `#[cfg(not(target_family = "wasm"))]` along with
-  the rest of the native flows. The PWA client will need a storage port + IndexedDB
-  adapter — abstracting that boundary now would be a speculative port with one
-  implementation (STYLE: don't abstract before it pays).
+- **Storage sits behind an async port** (project 9): `ClientState` is the typed
+  layer — layout, encoding, cross-key invariants — over `ports/store.rs`'s byte
+  store (`Get`/`Put`/`Delete`/`List` under typed path-like keys). `FsStore` is the
+  native adapter, byte-identical to the earlier direct-`std::fs` layout (a golden
+  test pins it); the PWA client brings an IndexedDB/OPFS adapter. Still gated
+  `#[cfg(not(target_family = "wasm"))]` with the rest of the native flows until
+  then. Async because the browser's backends are.
 - **WASM deps are target-scoped** (`wasm-bindgen` only for `wasm32`); the A6 spike
   moves to a wasm-gated module so `web/spike/build.sh` keeps working.
 - **iroh with `default-features = false, features = ["tls-ring"]`** (the WASM-proven

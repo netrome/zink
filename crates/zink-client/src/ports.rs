@@ -5,9 +5,5 @@
 
 pub(crate) mod clock;
 pub(crate) mod rng;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "ClientState moves onto the port in project 9 S2")
-)]
 pub(crate) mod store;
 pub(crate) mod transport;

@@ -164,13 +164,9 @@ pub(crate) async fn clones__should_share_one_store(store: impl Store) {
     );
 }
 
-/// A key from a slash-joined literal — test-only shorthand.
+/// A key from a `/`-joined literal — test-only shorthand.
 pub(crate) fn key(path: &str) -> Key {
-    let mut segments = path
-        .split('/')
-        .map(|name| Segment::new(name).expect("valid segment"));
-    let first = segments.next().expect("non-empty path");
-    segments.fold(Key::new(first), |key, segment| key.child(segment))
+    Key::parse(path).expect("valid key path")
 }
 
 fn segments(names: &[&str]) -> Vec<Segment> {

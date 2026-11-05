@@ -167,6 +167,7 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
         let state = ClientState::open(key_path);
         let home_relays: Vec<String> = state
             .home_relay_entries()
+            .await
             .iter()
             .filter_map(|entry| entry.relay_url.as_deref().map(str::to_string))
             .collect();
@@ -175,7 +176,8 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
                 .await?;
         Ok(Self::assemble(
             device, state, config, clock, wall_clock, transport, SystemRng,
-        ))
+        )
+        .await)
     }
 
     /// This client's peer dial string `<endpoint-id>@<ip:port>` — how another
@@ -193,7 +195,7 @@ impl<C: Clock, W: WallClock> Client<C, W, IrohTransport> {
 impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
     /// A client on injected doubles: no endpoint, no I/O — the network is
     /// whatever the test scripts.
-    fn with_transport(
+    async fn with_transport(
         device: DeviceKey,
         key_path: &str,
         config: ClientConfig,
@@ -210,13 +212,14 @@ impl<C: Clock, W: WallClock, N: Transport> Client<C, W, N> {
             transport,
             SystemRng,
         )
+        .await
     }
 }
 
 impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Wire a client around an already-built transport — shared by
     /// `with_device` (real iroh) and the test constructor (doubles).
-    fn assemble(
+    async fn assemble(
         device: DeviceKey,
         state: ClientState,
         config: ClientConfig,
@@ -234,7 +237,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // fresh process re-pays the dial deadline for every peer that is
         // simply offline, which the app does on every start and the one-shot
         // CLI on every command.
-        let reach = ReachLedger::restore(state.unreachable(), wall_clock.now_ms());
+        let reach = ReachLedger::restore(state.unreachable().await, wall_clock.now_ms());
         let handler = crate::sync::SyncHandler::new(
             state.clone(),
             DeviceKey::from_seed(device.seed()),
@@ -266,9 +269,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // Person rows from before drawn ids (project 7's brief counter
         // era) re-mint at open, labels and clustering intact; unclaimed
         // contact entries self-heal in `persons()` instead.
-        for (label, members) in client.state.take_legacy_persons() {
+        for (label, members) in client.state.take_legacy_persons().await {
             let id = PersonId::mint(&client.rng);
-            if let Err(error) = client.state.save_person(id.to_storage(), &label, &members) {
+            if let Err(error) = client
+                .state
+                .save_person(id.to_storage(), &label, &members)
+                .await
+            {
                 tracing::warn!(%error, label, "could not re-mint a legacy person row");
             }
         }
@@ -340,6 +347,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         if self
             .state
             .home_relay_entries()
+            .await
             .iter()
             .all(|entry| entry.relay_url.is_none())
         {
@@ -353,16 +361,16 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// Persist a verified envelope and its participant→conversation mapping,
     /// so a later `send` to the same people threads into this conversation.
-    fn remember(&self, envelope: &MessageEnvelope) -> Result<(), Error> {
-        remember(&self.state, envelope)
+    async fn remember(&self, envelope: &MessageEnvelope) -> Result<(), Error> {
+        remember(&self.state, envelope).await
     }
 }
 
 /// `Client::remember` over bare state — the serving router (D5 `Deliver`)
 /// stores exactly what a drain stores, and holds state but no `Client`.
-pub(crate) fn remember(state: &ClientState, envelope: &MessageEnvelope) -> Result<(), Error> {
+pub(crate) async fn remember(state: &ClientState, envelope: &MessageEnvelope) -> Result<(), Error> {
     let conversation = envelope.core.conversation.unwrap_or_else(|| envelope.id());
-    state.store_envelope(conversation, envelope)?;
+    state.store_envelope(conversation, envelope).await?;
     let participants: BTreeSet<PublicKey> = envelope
         .core
         .recipients
@@ -370,7 +378,7 @@ pub(crate) fn remember(state: &ClientState, envelope: &MessageEnvelope) -> Resul
         .copied()
         .chain([envelope.core.sender])
         .collect();
-    state.record_conversation(&participants, conversation)
+    state.record_conversation(&participants, conversation).await
 }
 /// Whether other devices can reach this one by key (De6c) — the answer from
 /// `Client::await_reachable`.
@@ -414,8 +422,8 @@ mod tests {
         // same state.
         const DEADLINE: Duration = Duration::from_secs(10);
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("drill", "anna", &wire);
-        let (b, b_net, b_clock) = loop_client("drill", "bob", &wire);
+        let (a, _a_net, _a_clock) = loop_client("drill", "anna", &wire).await;
+        let (b, b_net, b_clock) = loop_client("drill", "bob", &wire).await;
         let relay_old = DeviceKey::from_seed([120; 32]).public();
         let relay_new = DeviceKey::from_seed([121; 32]).public();
 
@@ -429,16 +437,17 @@ mod tests {
                     relay_url: None,
                 }],
             )
+            .await
             .expect("anna's profile");
-        befriend(&a.state, b.public_key());
-        let original = a.my_record().expect("original record");
-        let petname = b.add_contact(&original, None).expect("bob adds anna");
+        befriend(&a.state, b.public_key()).await;
+        let original = a.my_record().await.expect("original record");
+        let petname = b.add_contact(&original, None).await.expect("bob adds anna");
         assert_eq!(petname, "Anna");
 
         // When: her relay is gone and bob's send times out — the honest
         // "sending…" (owed, retried, surfaced)
         b_net.dial.hold(&relay_old);
-        let recipients = [b.resolve_contact("Anna").expect("resolve")];
+        let recipients = [b.resolve_contact("Anna").await.expect("resolve")];
         let (result, ()) = tokio::join!(
             b.send(&recipients, b"are you there?".to_vec(), vec![]),
             async {
@@ -448,11 +457,11 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::AllRelaysPending(_))));
         let (stuck_id, conversation) = {
-            let entry = &b.state.outbox()[0];
+            let entry = &b.state.outbox().await[0];
             (entry.message, entry.conversation)
         };
         assert!(
-            b.history(conversation).expect("history")[0]
+            b.history(conversation).await.expect("history")[0]
                 .owed_since_ms
                 .is_some(),
             "the marker says sending…"
@@ -468,8 +477,9 @@ mod tests {
                     relay_url: None,
                 }],
             )
+            .await
             .expect("anna migrates");
-        a.state.save_profile_revision(1).expect("bump");
+        a.state.save_profile_revision(1).await.expect("bump");
 
         // Layer 1+2 — subject-refresh (R6) + outbox re-target (R2): one
         // message from anna arrives over the live channel. Nothing else.
@@ -486,11 +496,11 @@ mod tests {
         // followed her to the NEW relay, the marker converged — and bob's
         // stored record was never touched by any of it
         assert_eq!(
-            b.resolve_contact("Anna").expect("resolve").relays,
+            b.resolve_contact("Anna").await.expect("resolve").relays,
             vec![mailbox_spec(&relay_new)]
         );
         assert!(matches!(
-            b.relay_status("Anna").expect("status").source,
+            b.relay_status("Anna").await.expect("status").source,
             RelaySource::SubjectServed { .. }
         ));
         assert!(
@@ -499,15 +509,15 @@ mod tests {
                 .any(|envelope| envelope.id() == stuck_id),
             "the owed message was deposited to the new relay"
         );
-        assert!(b.state.outbox().is_empty(), "the debt is settled");
+        assert!(b.state.outbox().await.is_empty(), "the debt is settled");
         assert!(
-            b.history(conversation).expect("history")[0]
+            b.history(conversation).await.expect("history")[0]
                 .owed_since_ms
                 .is_none(),
             "the marker converged to the truth"
         );
         assert_eq!(
-            b.contacts().expect("contacts")[0].1,
+            b.contacts().await.expect("contacts")[0].1,
             original,
             "healing never wrote the trust anchor"
         );
@@ -515,8 +525,9 @@ mod tests {
         // Layer 3 — rescan-as-update (R1): her renamed record previews as
         // an update of the same entry — the diff a confirm card renders —
         // and applies while keeping bob's petname
-        let renamed = a.my_record().expect("renamed record");
-        let RecordMatch::Update(update) = b.preview_contact(&renamed).expect("preview") else {
+        let renamed = a.my_record().await.expect("renamed record");
+        let RecordMatch::Update(update) = b.preview_contact(&renamed).await.expect("preview")
+        else {
             panic!("expected an update match");
         };
         assert_eq!(update.petname, "Anna");
@@ -524,9 +535,9 @@ mod tests {
         assert_eq!(update.new_name.as_deref(), Some("Ann"));
         assert_eq!(update.relays_added, vec![mailbox_spec(&relay_new)]);
         assert_eq!(update.relays_removed, vec![mailbox_spec(&relay_old)]);
-        assert_eq!(b.update_contact(&renamed).expect("update"), "Anna");
+        assert_eq!(b.update_contact(&renamed).await.expect("update"), "Anna");
         assert_eq!(
-            b.contacts().expect("contacts")[0].1,
+            b.contacts().await.expect("contacts")[0].1,
             renamed,
             "the explicit act replaced the anchor"
         );
@@ -571,7 +582,7 @@ mod tests {
         let a = Client::open_or_create(&temp_key("blobs-p2p", "sender"))
             .await
             .expect("open A");
-        befriend(&b.state, a.public_key());
+        befriend(&b.state, a.public_key()).await;
         a.add_contact(
             &ContactRecord::new(
                 vec![b.public_key()],
@@ -583,13 +594,14 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
         b.transport.online().await;
 
         // When
         let receipt = a
             .send(
-                &[a.resolve_contact("bob").expect("resolve")],
+                &[a.resolve_contact("bob").await.expect("resolve")],
                 b"a photo".to_vec(),
                 vec![
                     BlobDraft {
@@ -613,13 +625,14 @@ mod tests {
         let envelope = a
             .state
             .load_envelope(receipt.conversation, receipt.id)
+            .await
             .expect("stored");
         assert_eq!(envelope.core.blob_refs.len(), 2);
         for blob_ref in &envelope.core.blob_refs {
             // The push confirmed B's store holds it; B's cache write
             // follows on B's own task, a few polls behind at most.
             let started = std::time::Instant::now();
-            while b.state.load_blob(&blob_ref.hash).is_none() {
+            while b.state.load_blob(&blob_ref.hash).await.is_none() {
                 assert!(
                     started.elapsed() < Duration::from_secs(5),
                     "B's cache never took the pushed blob"
@@ -647,7 +660,7 @@ mod tests {
         let a = Client::open_or_create(&temp_key("rebind5", "newborn"))
             .await
             .expect("open A");
-        befriend(&b.state, a.public_key());
+        befriend(&b.state, a.public_key()).await;
         a.add_contact(
             &ContactRecord::new(
                 vec![b.public_key()],
@@ -659,6 +672,7 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
         b.transport.online().await;
 

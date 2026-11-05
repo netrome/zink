@@ -12,7 +12,6 @@ use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::Transport;
-use crate::state::ClientState;
 
 use super::{Client, PersonId};
 
@@ -111,19 +110,23 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// `Hello` genesis with no human recipients — send-to-self appends
     /// the siblings, and single-device it's a self-wrapped note that
     /// backfill + re-wrap hand to future siblings.
-    fn lens_emission_channel(&self) -> Result<MessageId, Error> {
-        if let Some(id) = self.state.lens_conversation() {
+    async fn lens_emission_channel(&self) -> Result<MessageId, Error> {
+        if let Some(id) = self.state.lens_conversation().await {
             return Ok(id);
         }
-        let staged = self.stage(
-            self.genesis_draft(vec![]),
-            op_body(LensOp::Hello),
-            vec![],
-            &[],
-        )?;
-        self.state.set_lens_conversation(staged.conversation)?;
-        self.state.add_lens_channel(staged.conversation)?;
-        self.state.add_lens_applied(staged.id)?;
+        let staged = self
+            .stage(
+                self.genesis_draft(vec![]),
+                op_body(LensOp::Hello),
+                vec![],
+                &[],
+            )
+            .await?;
+        self.state
+            .set_lens_conversation(staged.conversation)
+            .await?;
+        self.state.add_lens_channel(staged.conversation).await?;
+        self.state.add_lens_applied(staged.id).await?;
         Ok(staged.conversation)
     }
 
@@ -131,14 +134,16 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// rides the normal flush. Best-effort by design: emission failure
     /// never fails the local act it mirrors — the devices diverge until
     /// the next act, and the warn says so.
-    pub(super) fn emit_lens_op(&self, op: LensOp) {
-        let staged = self.lens_emission_channel().and_then(|channel| {
-            let draft = self.threaded_draft(channel, vec![])?;
-            self.stage(draft, op_body(op), vec![], &[])
-        });
+    pub(super) async fn emit_lens_op(&self, op: LensOp) {
+        let staged = async {
+            let channel = self.lens_emission_channel().await?;
+            let draft = self.threaded_draft(channel, vec![]).await?;
+            self.stage(draft, op_body(op), vec![], &[]).await
+        }
+        .await;
         match staged {
             Ok(staged) => {
-                let _ = self.state.add_lens_applied(staged.id);
+                let _ = self.state.add_lens_applied(staged.id).await;
             }
             Err(error) => {
                 tracing::warn!(%error, "lens op emission failed; devices diverge until the next act")
@@ -149,23 +154,23 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The adoption replay (lens-sync.md §5): store-driven and
     /// idempotent — run after drains and after re-wraps land. Errors are
     /// swallowed with a debug line; the next drain retries.
-    pub fn adopt_lens_ops(&self) {
-        if let Err(error) = self.replay_lens() {
+    pub async fn adopt_lens_ops(&self) {
+        if let Err(error) = self.replay_lens().await {
             tracing::debug!(%error, "lens replay failed; retried at the next drain");
         }
     }
 
-    fn replay_lens(&self) -> Result<(), Error> {
-        let own = self.own_keys();
+    async fn replay_lens(&self) -> Result<(), Error> {
+        let own = self.own_keys().await;
         let me = self.device.public();
         // Classify new channels (§3): genesis authored by an own key,
         // body opening to a `Hello` frame.
-        let mut channels = self.state.lens_channels();
-        for id in self.state.conversations() {
+        let mut channels = self.state.lens_channels().await;
+        for id in self.state.conversations().await {
             if channels.contains(&id) {
                 continue;
             }
-            let Some(genesis) = self.state.find_envelope(id) else {
+            let Some(genesis) = self.state.find_envelope(id).await else {
                 continue;
             };
             if !own.contains(&genesis.core.sender) {
@@ -175,23 +180,23 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 continue;
             };
             if matches!(parse_op(&body), Some(LensOp::Hello)) {
-                self.state.add_lens_channel(id)?;
+                self.state.add_lens_channel(id).await?;
                 channels.insert(id);
             }
         }
         // Emission converges on the smallest classified channel (§3) — a
         // deterministic tiebreak every sibling computes alike.
         if let Some(&smallest) = channels.iter().next()
-            && self.state.lens_conversation() != Some(smallest)
+            && self.state.lens_conversation().await != Some(smallest)
         {
-            self.state.set_lens_conversation(smallest)?;
+            self.state.set_lens_conversation(smallest).await?;
         }
         // My label ops across every channel, precomputed: an op of mine
         // in a *different* channel can never be a sibling op's ancestor —
         // which is exactly the concurrency that split channels represent.
         let mut mine: Vec<MyLabelOp> = Vec::new();
         for &channel in &channels {
-            for envelope in self.state.load_envelopes(channel)? {
+            for envelope in self.state.load_envelopes(channel).await? {
                 if envelope.core.sender != me {
                     continue;
                 }
@@ -207,14 +212,14 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 }
             }
         }
-        let applied = self.state.lens_applied();
+        let applied = self.state.lens_applied().await;
         for &channel in &channels {
-            let envelopes = self.state.load_envelopes(channel)?;
+            let envelopes = self.state.load_envelopes(channel).await?;
             let by_id: BTreeMap<MessageId, &MessageEnvelope> = envelopes
                 .iter()
                 .map(|envelope| (envelope.id(), envelope))
                 .collect();
-            let dag = ClientState::dag_of(&envelopes, channel)?;
+            let dag = crate::state::dag_of(&envelopes, channel)?;
             for id in dag.linearize() {
                 if applied.contains(&id) {
                     continue;
@@ -226,7 +231,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 if !own.contains(&author) {
                     // Never an effect from a non-sibling (§2); ledgered
                     // so a hostile frame isn't re-inspected every drain.
-                    self.state.add_lens_applied(id)?;
+                    self.state.add_lens_applied(id).await?;
                     continue;
                 }
                 // An unopenable body is *not* ledgered: the new-device
@@ -235,21 +240,22 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     continue;
                 };
                 let Some(op) = parse_op(&body) else {
-                    self.state.add_lens_applied(id)?;
+                    self.state.add_lens_applied(id).await?;
                     continue;
                 };
                 if author != me {
                     match op {
                         LensOp::Hello => {}
                         LensOp::LabelPerson { members, label } => {
-                            self.adopt_label(channel, &by_id, id, author, &members, &label, &mine)?;
+                            self.adopt_label(channel, &by_id, id, author, &members, &label, &mine)
+                                .await?;
                         }
                         LensOp::OfferContact { record, petname } => {
-                            self.adopt_offer(author, &record, &petname)?;
+                            self.adopt_offer(author, &record, &petname).await?;
                         }
                     }
                 }
-                self.state.add_lens_applied(id)?;
+                self.state.add_lens_applied(id).await?;
             }
         }
         Ok(())
@@ -263,7 +269,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// collide with an existing one — never forced. Adoption does not
     /// re-emit: the original op reaches every sibling by itself.
     #[allow(clippy::too_many_arguments)]
-    fn adopt_label(
+    async fn adopt_label(
         &self,
         channel: MessageId,
         by_id: &BTreeMap<MessageId, &MessageEnvelope>,
@@ -274,7 +280,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         mine: &[MyLabelOp],
     ) -> Result<(), Error> {
         let Some(person) = self
-            .persons()?
+            .persons()
+            .await?
             .into_iter()
             .find(|person| person.keys().iter().any(|key| members.contains(&key.0)))
         else {
@@ -300,11 +307,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             .iter()
             .filter(|op| !op.members.is_disjoint(&person_keys))
             .all(|op| op.channel == channel && ancestors.contains(&op.id));
-        if saw_all_mine && self.set_person_label(&person, label).is_ok() {
-            self.state.remove_conflict(person.id.to_storage());
+        if saw_all_mine && self.set_person_label(&person, label).await.is_ok() {
+            self.state.remove_conflict(person.id.to_storage()).await;
         } else {
             self.state
-                .save_conflict(person.id.to_storage(), label, &author)?;
+                .save_conflict(person.id.to_storage(), label, &author)
+                .await?;
         }
         Ok(())
     }
@@ -312,32 +320,40 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Store the offer (§6): latest per subject; a record overlapping an
     /// existing contact is dropped — already held, which is also what
     /// breaks the accept→re-offer loop between siblings.
-    fn adopt_offer(&self, author: PublicKey, record: &[u8], petname: &str) -> Result<(), Error> {
+    async fn adopt_offer(
+        &self,
+        author: PublicKey,
+        record: &[u8],
+        petname: &str,
+    ) -> Result<(), Error> {
         let Ok(record) = ContactRecord::try_from_bytes(record) else {
             return Ok(()); // undecodable — hostile or from a newer build
         };
         let Some(&subject) = record.keys.first() else {
             return Ok(());
         };
-        let contacts = self.state.contacts()?;
+        let contacts = self.state.contacts().await?;
         let held = contacts
             .iter()
             .any(|(_, stored)| stored.keys.iter().any(|key| record.keys.contains(key)));
         if held {
             return Ok(());
         }
-        self.state.save_offer(&subject, &author, petname, &record)
+        self.state
+            .save_offer(&subject, &author, petname, &record)
+            .await
     }
 
     /// Pending offers, read-time filtered (§6): the author must still be
     /// a recognized device — a repudiated or un-recognized sibling's
     /// offers void — and subjects meanwhile held drop away.
-    pub fn lens_offers(&self) -> Result<Vec<LensOffer>, Error> {
-        let own = self.own_keys();
-        let contacts = self.state.contacts()?;
+    pub async fn lens_offers(&self) -> Result<Vec<LensOffer>, Error> {
+        let own = self.own_keys().await;
+        let contacts = self.state.contacts().await?;
         Ok(self
             .state
             .offers()
+            .await
             .into_iter()
             .filter_map(|(subject, author, petname, record)| {
                 if !own.contains(&author) {
@@ -362,27 +378,29 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// The explicit accept (§6) — the ordinary `add_contact`, the only
     /// write the contact store ever takes from this path. Returns the
     /// stored petname.
-    pub fn accept_offer(&self, subject: &PublicKey) -> Result<String, Error> {
+    pub async fn accept_offer(&self, subject: &PublicKey) -> Result<String, Error> {
         let offer = self
-            .lens_offers()?
+            .lens_offers()
+            .await?
             .into_iter()
             .find(|offer| offer.subject == *subject)
             .ok_or_else(|| Error::InvalidInput("no pending offer for that key".into()))?;
-        let petname = self.add_contact(&offer.record, Some(offer.petname))?;
-        self.state.remove_offer(subject);
+        let petname = self.add_contact(&offer.record, Some(offer.petname)).await?;
+        self.state.remove_offer(subject).await;
         Ok(petname)
     }
 
     /// Decline an offer — dropped, never a stance (declining to add is
     /// not a disavowal).
-    pub fn decline_offer(&self, subject: &PublicKey) {
-        self.state.remove_offer(subject);
+    pub async fn decline_offer(&self, subject: &PublicKey) {
+        self.state.remove_offer(subject).await;
     }
 
     /// Surfaced label conflicts (§5), with provenance for the edge.
-    pub fn lens_conflicts(&self) -> Vec<LensConflict> {
+    pub async fn lens_conflicts(&self) -> Vec<LensConflict> {
         self.state
             .conflicts()
+            .await
             .into_iter()
             .map(|(person, theirs, author)| LensConflict {
                 person: PersonId::from_storage(person),
@@ -404,15 +422,15 @@ mod tests {
 
     /// Two live clients recognizing each other as own devices — the
     /// paired-phone-and-laptop setup every S6 scenario starts from.
-    fn paired(
+    async fn paired(
         test: &str,
     ) -> (
         crate::client::test_kit::LoopClient,
         crate::client::test_kit::LoopClient,
     ) {
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client(test, "phone", &wire);
-        let (b, _b_net, _b_clock) = loop_client(test, "laptop", &wire);
+        let (a, _a_net, _a_clock) = loop_client(test, "phone", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client(test, "laptop", &wire).await;
         let a_device = keystore::load(&temp_key(test, "phone")).expect("phone key");
         let b_device = keystore::load(&temp_key(test, "laptop")).expect("laptop key");
         a.recognize_device(&signed_record(
@@ -421,6 +439,7 @@ mod tests {
             0,
             mailbox_only("ll@203.0.113.5:5"),
         ))
+        .await
         .expect("phone recognizes laptop");
         b.recognize_device(&signed_record(
             &a_device,
@@ -428,20 +447,26 @@ mod tests {
             0,
             mailbox_only("pp@203.0.113.6:6"),
         ))
+        .await
         .expect("laptop recognizes phone");
         (a, b)
     }
 
     /// Hand one client's lens channel to another, envelope by envelope —
     /// exactly what a drain (or backfill + re-wrap) leaves behind.
-    fn seed_channel(
+    async fn seed_channel(
         from: &crate::client::test_kit::LoopClient,
         to: &crate::client::test_kit::LoopClient,
     ) {
-        let channel = from.state.lens_conversation().expect("channel exists");
-        for envelope in from.state.load_envelopes(channel).expect("load") {
+        let channel = from
+            .state
+            .lens_conversation()
+            .await
+            .expect("channel exists");
+        for envelope in from.state.load_envelopes(channel).await.expect("load") {
             to.state
                 .store_envelope(channel, &envelope)
+                .await
                 .expect("seed envelope");
         }
     }
@@ -455,25 +480,30 @@ mod tests {
     async fn adopt__should_converge_a_rename_made_while_apart() {
         // Given: both devices hold carol; the phone renames her while the
         // laptop is offline
-        let (a, b) = paired("lens-rename");
-        a.add_contact(&carol_record(), None).expect("phone adds");
-        b.add_contact(&carol_record(), None).expect("laptop adds");
-        let person = a.person_by_label("carol").expect("person");
-        a.rename_person(person.id, "carrie").expect("rename");
+        let (a, b) = paired("lens-rename").await;
+        a.add_contact(&carol_record(), None)
+            .await
+            .expect("phone adds");
+        b.add_contact(&carol_record(), None)
+            .await
+            .expect("laptop adds");
+        let person = a.person_by_label("carol").await.expect("person");
+        a.rename_person(person.id, "carrie").await.expect("rename");
 
         // When: the laptop later holds the phone's channel (what a drain
         // leaves behind) and replays
-        seed_channel(&a, &b);
-        b.adopt_lens_ops();
+        seed_channel(&a, &b).await;
+        b.adopt_lens_ops().await;
 
         // Then: the laptop converged — no conflict, and the channel never
         // reaches its inbox
-        let adopted = b.person_by_label("carrie").expect("adopted");
+        let adopted = b.person_by_label("carrie").await.expect("adopted");
         assert_eq!(adopted.label, "carrie");
-        assert!(b.lens_conflicts().is_empty());
-        let channel = a.state.lens_conversation().expect("channel");
+        assert!(b.lens_conflicts().await.is_empty());
+        let channel = a.state.lens_conversation().await.expect("channel");
         assert!(
             b.conversations()
+                .await
                 .expect("inbox")
                 .iter()
                 .all(|summary| summary.id != channel),
@@ -487,29 +517,39 @@ mod tests {
     async fn adopt__should_keep_mine_and_surface_theirs_on_concurrent_renames() {
         // Given: both devices hold carol and rename her while apart —
         // neither op saw the other
-        let (a, b) = paired("lens-conflict");
-        a.add_contact(&carol_record(), None).expect("phone adds");
-        b.add_contact(&carol_record(), None).expect("laptop adds");
-        let on_a = a.person_by_label("carol").expect("person on phone");
-        let on_b = b.person_by_label("carol").expect("person on laptop");
-        a.rename_person(on_a.id, "carrie").expect("phone rename");
-        b.rename_person(on_b.id, "caz").expect("laptop rename");
+        let (a, b) = paired("lens-conflict").await;
+        a.add_contact(&carol_record(), None)
+            .await
+            .expect("phone adds");
+        b.add_contact(&carol_record(), None)
+            .await
+            .expect("laptop adds");
+        let on_a = a.person_by_label("carol").await.expect("person on phone");
+        let on_b = b.person_by_label("carol").await.expect("person on laptop");
+        a.rename_person(on_a.id, "carrie")
+            .await
+            .expect("phone rename");
+        b.rename_person(on_b.id, "caz")
+            .await
+            .expect("laptop rename");
 
         // When
-        seed_channel(&a, &b);
-        b.adopt_lens_ops();
+        seed_channel(&a, &b).await;
+        b.adopt_lens_ops().await;
 
         // Then: manual edits win — the laptop keeps its label and
         // surfaces the phone's with provenance; nothing arbitrates
-        assert!(b.person_by_label("caz").is_ok());
-        let conflicts = b.lens_conflicts();
+        assert!(b.person_by_label("caz").await.is_ok());
+        let conflicts = b.lens_conflicts().await;
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].theirs, "carrie");
         assert_eq!(conflicts[0].author, a.public_key());
 
         // And: my next rename supersedes and clears the surface
-        b.rename_person(on_b.id, "carrie").expect("take theirs");
-        assert!(b.lens_conflicts().is_empty());
+        b.rename_person(on_b.id, "carrie")
+            .await
+            .expect("take theirs");
+        assert!(b.lens_conflicts().await.is_empty());
 
         let _ = std::fs::remove_dir_all(temp_root("lens-conflict"));
     }
@@ -517,33 +557,38 @@ mod tests {
     #[tokio::test]
     async fn adopt__should_offer_a_sibling_contact_add_and_accept_explicitly() {
         // Given: the phone adds carol; the laptop has never met her
-        let (a, b) = paired("lens-offer");
-        a.add_contact(&carol_record(), None).expect("phone adds");
+        let (a, b) = paired("lens-offer").await;
+        a.add_contact(&carol_record(), None)
+            .await
+            .expect("phone adds");
         let carol_key = carol_record().keys[0];
 
         // When: the laptop replays the phone's channel
-        seed_channel(&a, &b);
-        b.adopt_lens_ops();
+        seed_channel(&a, &b).await;
+        b.adopt_lens_ops().await;
 
         // Then: an offer with provenance — and no contact write
-        let offers = b.lens_offers().expect("offers");
+        let offers = b.lens_offers().await.expect("offers");
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].petname, "carol");
         assert_eq!(offers[0].author, a.public_key());
-        assert!(b.person_by_label("carol").is_err(), "nothing wrote itself");
+        assert!(
+            b.person_by_label("carol").await.is_err(),
+            "nothing wrote itself"
+        );
 
         // When: the explicit accept — the only write
-        let petname = b.accept_offer(&carol_key).expect("accept");
+        let petname = b.accept_offer(&carol_key).await.expect("accept");
 
         // Then: stored under the offered petname; the offer is gone; and
         // the accept's own onward offer is a no-op back on the phone
         assert_eq!(petname, "carol");
-        assert!(b.person_by_label("carol").is_ok());
-        assert!(b.lens_offers().expect("offers").is_empty());
-        seed_channel(&b, &a);
-        a.adopt_lens_ops();
+        assert!(b.person_by_label("carol").await.is_ok());
+        assert!(b.lens_offers().await.expect("offers").is_empty());
+        seed_channel(&b, &a).await;
+        a.adopt_lens_ops().await;
         assert!(
-            a.lens_offers().expect("offers").is_empty(),
+            a.lens_offers().await.expect("offers").is_empty(),
             "already held — the re-offer loop breaks"
         );
 
@@ -553,18 +598,23 @@ mod tests {
     #[tokio::test]
     async fn repudiate__should_void_the_siblings_pending_offers() {
         // Given: a pending offer from the phone
-        let (a, b) = paired("lens-void");
-        a.add_contact(&carol_record(), None).expect("phone adds");
-        seed_channel(&a, &b);
-        b.adopt_lens_ops();
-        assert_eq!(b.lens_offers().expect("offers").len(), 1);
+        let (a, b) = paired("lens-void").await;
+        a.add_contact(&carol_record(), None)
+            .await
+            .expect("phone adds");
+        seed_channel(&a, &b).await;
+        b.adopt_lens_ops().await;
+        assert_eq!(b.lens_offers().await.expect("offers").len(), 1);
 
         // When: the laptop repudiates the phone
-        b.repudiate(a.public_key()).expect("repudiate");
+        b.repudiate(a.public_key()).await.expect("repudiate");
 
         // Then: its offers are voided — the offer gates the write surface
-        assert!(b.lens_offers().expect("offers").is_empty());
-        assert!(b.state.offers().is_empty(), "removed, not merely filtered");
+        assert!(b.lens_offers().await.expect("offers").is_empty());
+        assert!(
+            b.state.offers().await.is_empty(),
+            "removed, not merely filtered"
+        );
 
         let _ = std::fs::remove_dir_all(temp_root("lens-void"));
     }
@@ -573,8 +623,10 @@ mod tests {
     async fn adopt__should_ignore_ops_from_non_siblings() {
         // Given: a stranger's conversation whose genesis is a Hello frame
         // and whose follow-up renames b's carol — hostile mimicry
-        let (_, b) = paired("lens-hostile");
-        b.add_contact(&carol_record(), None).expect("laptop adds");
+        let (_, b) = paired("lens-hostile").await;
+        b.add_contact(&carol_record(), None)
+            .await
+            .expect("laptop adds");
         // The bodies never even open: author gating rejects first, which
         // is the property under test.
         let stranger = DeviceKey::from_seed([66; 32]);
@@ -589,17 +641,23 @@ mod tests {
             1,
             1,
         );
-        b.state.store_envelope(genesis_id, &hello).expect("seed");
-        b.state.store_envelope(genesis_id, &rename).expect("seed");
+        b.state
+            .store_envelope(genesis_id, &hello)
+            .await
+            .expect("seed");
+        b.state
+            .store_envelope(genesis_id, &rename)
+            .await
+            .expect("seed");
 
         // When
-        b.adopt_lens_ops();
+        b.adopt_lens_ops().await;
 
         // Then: no effect, no conflict — and the stranger's conversation
         // is NOT classified as a lens channel (it stays an inbox request)
-        assert!(b.person_by_label("carol").is_ok());
-        assert!(b.lens_conflicts().is_empty());
-        assert!(!b.state.lens_channels().contains(&genesis_id));
+        assert!(b.person_by_label("carol").await.is_ok());
+        assert!(b.lens_conflicts().await.is_empty());
+        assert!(!b.state.lens_channels().await.contains(&genesis_id));
 
         let _ = std::fs::remove_dir_all(temp_root("lens-hostile"));
     }

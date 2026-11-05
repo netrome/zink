@@ -78,7 +78,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         self.auto_refresh(received).await;
         // Sibling lens ops adopt after every arrival path (lens-sync.md
         // §5) — store-driven, so it also picks up what auto_sync healed.
-        self.adopt_lens_ops();
+        self.adopt_lens_ops().await;
     }
 
     /// Drain every relay: register, then fetch page-by-page, dedup by
@@ -144,7 +144,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         self.auto_rewrap(&received).await;
         self.auto_refresh(&received).await;
         // Sibling lens ops adopt after every arrival path (lens-sync.md §5).
-        self.adopt_lens_ops();
+        self.adopt_lens_ops().await;
         // Post-drain flush (live-delivery.md §2): we're evidently online,
         // so retry anything still owed. Best-effort — a recv must not fail
         // because a *different* relay is down.
@@ -239,7 +239,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             self.auto_who_is(&received).await;
             self.auto_rewrap(&received).await;
             self.auto_refresh(&received).await;
-            self.adopt_lens_ops();
+            self.adopt_lens_ops().await;
             on_new(received);
         }
         let _ = self.flush_outbox().await;
@@ -269,7 +269,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 self.auto_who_is(&received).await;
                 self.auto_rewrap(&received).await;
                 self.auto_refresh(&received).await;
-                self.adopt_lens_ops();
+                self.adopt_lens_ops().await;
                 on_new(received);
             }
         }
@@ -336,7 +336,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 }
                 let body = item.envelope.open(&self.device);
                 if body.is_ok() {
-                    self.remember(&item.envelope)?;
+                    self.remember(&item.envelope).await?;
                 }
                 received.push(Received {
                     envelope: item.envelope,
@@ -412,7 +412,8 @@ mod tests {
             clock.clone(),
             SystemClock,
             net.clone(),
-        );
+        )
+        .await;
         let sender = DeviceKey::from_seed([93; 32]);
         let mail = sealed_for(&sender, b.public_key(), b"mail on the relay that stayed up");
         net.dial.hold(&dead);

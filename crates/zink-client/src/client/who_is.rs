@@ -169,10 +169,17 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // responders there are.
         let responders: Vec<PublicKey> = self
             .state
-            .contacts()?
+            .contacts()
+            .await?
             .iter()
             .filter_map(|(_, record)| record.keys.first().copied())
-            .chain(self.state.recognized_devices().into_iter().map(|(k, _)| k))
+            .chain(
+                self.state
+                    .recognized_devices()
+                    .await
+                    .into_iter()
+                    .map(|(k, _)| k),
+            )
             .collect();
         self.who_is_among(subject, &responders).await
     }
@@ -193,7 +200,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             Nothing,
             Unreachable,
         }
-        let records = self.state.contacts()?;
+        let records = self.state.contacts().await?;
         let me = self.device.public();
         let mut targets = Vec::new();
         for &responder in responders {
@@ -210,9 +217,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             // device (D3c) — its route lives in the devices store.
             let stored = match named.map(|(_, record)| record.clone()) {
                 Some(record) => Some(record),
-                None => self.trusted_record_for(&responder),
+                None => self.trusted_record_for(&responder).await,
             };
-            match self.peer_addr_for(responder, stored.as_ref()) {
+            match self.peer_addr_for(responder, stored.as_ref()).await {
                 Ok(addr) => targets.push((petname, responder, addr)),
                 // No dialable route — never counted as "asked".
                 Err(_) => tracing::debug!(%petname, "who-is: no dialable route; skipped"),
@@ -265,13 +272,15 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         for outcome in n0_future::join_all(queries).await {
             match outcome {
                 Query::Answer(answer) => {
-                    self.state.save_learned(
-                        &subject,
-                        &answer.responder,
-                        &answer.record,
-                        &answer.endorsements,
-                        self.wall_clock.now_ms(),
-                    )?;
+                    self.state
+                        .save_learned(
+                            &subject,
+                            &answer.responder,
+                            &answer.record,
+                            &answer.endorsements,
+                            self.wall_clock.now_ms(),
+                        )
+                        .await?;
                     answers.push(answer);
                 }
                 Query::Nothing => {}
@@ -292,10 +301,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// stored envelope verified its sender's signature). Presentation and
     /// auto-query policy, never storage: a conversation upgrades
     /// retroactively the moment a contact's message arrives.
-    pub fn has_contributing_contact(&self, conversation: MessageId) -> Result<bool, Error> {
-        let contacts = self.state.contacts()?;
-        let own = self.own_keys();
-        let envelopes = self.state.load_envelopes(conversation)?;
+    pub async fn has_contributing_contact(&self, conversation: MessageId) -> Result<bool, Error> {
+        let contacts = self.state.contacts().await?;
+        let own = self.own_keys().await;
+        let envelopes = self.state.load_envelopes(conversation).await?;
         Ok(self.contributed_to(&envelopes, &contacts, &own))
     }
 
@@ -334,13 +343,13 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// at the next render.
     pub(super) async fn auto_who_is(&self, received: &[Received]) {
         let me = self.device.public();
-        let Ok(records) = self.state.contacts() else {
+        let Ok(records) = self.state.contacts().await else {
             return;
         };
         // Recognized own devices are never "unknown members" (D3c) — and
         // they ARE responders: a fresh device's only route to its
         // contacts' records is asking its siblings (multi-device.md §5).
-        let own = self.own_keys();
+        let own = self.own_keys().await;
         let known = |key: &PublicKey| {
             own.contains(key) || records.iter().any(|(_, record)| record.keys.contains(key))
         };
@@ -355,16 +364,23 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             })
             .collect();
         for conversation in conversations {
-            if !self.has_contributing_contact(conversation).unwrap_or(false) {
+            if !self
+                .has_contributing_contact(conversation)
+                .await
+                .unwrap_or(false)
+            {
                 continue;
             }
-            let Ok(members) = self.membership(conversation) else {
+            let Ok(members) = self.membership(conversation).await else {
                 continue;
             };
             let responders: Vec<PublicKey> =
                 members.iter().copied().filter(|key| *key != me).collect();
             for subject in members.iter().copied() {
-                if subject == me || known(&subject) || !self.state.learned(&subject).is_empty() {
+                if subject == me
+                    || known(&subject)
+                    || !self.state.learned(&subject).await.is_empty()
+                {
                     continue;
                 }
                 if !self.asked.first(subject, conversation) {
@@ -396,10 +412,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// construction: the only party ever asked is the subject, about
     /// themself — the §5 no-third-party stance stands untouched.
     pub(super) async fn auto_refresh(&self, received: &[Received]) {
-        let Ok(contacts) = self.state.contacts() else {
+        let Ok(contacts) = self.state.contacts().await else {
             return;
         };
-        let own = self.own_keys();
+        let own = self.own_keys().await;
         let senders: BTreeSet<PublicKey> = received
             .iter()
             .map(|message| message.envelope.core.sender)
@@ -408,6 +424,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let owed: BTreeSet<String> = self
             .state
             .outbox()
+            .await
             .into_iter()
             .map(|entry| entry.relay)
             .collect();
@@ -433,7 +450,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// stranger's page fires no query on open. `true` = a fresh record
     /// landed (the page re-reads its data).
     pub async fn refresh_contact(&self, subject: PublicKey) -> bool {
-        let Ok(contacts) = self.state.contacts() else {
+        let Ok(contacts) = self.state.contacts().await else {
             return false;
         };
         let Some((_, record)) = contacts
@@ -445,6 +462,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let owed: BTreeSet<String> = self
             .state
             .outbox()
+            .await
             .into_iter()
             .map(|entry| entry.relay)
             .collect();
@@ -466,7 +484,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         if let Ok(bare) = crate::adapters::iroh::validated_peer(subject, Vec::new()) {
             routes.push(bare);
         }
-        if let Ok(routed) = self.peer_addr_for(subject, None) {
+        if let Ok(routed) = self.peer_addr_for(subject, None).await {
             routes.push(routed);
         }
         for addr in routes {
@@ -495,7 +513,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         record: &ContactRecord,
         owed: &BTreeSet<String>,
     ) -> bool {
-        let relays = self.effective_relays(subject, Some(record));
+        let relays = self.effective_relays(subject, Some(record)).await;
         let sick = relays.iter().any(|entry| owed.contains(&entry.mailbox));
         let now = self.wall_clock.now_ms();
         if !self.refreshed.due(&subject, now, sick) {
@@ -506,7 +524,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         if let Ok(bare) = crate::adapters::iroh::validated_peer(subject, Vec::new()) {
             routes.push(bare);
         }
-        if let Ok(routed) = self.peer_addr_for(subject, Some(record)) {
+        if let Ok(routed) = self.peer_addr_for(subject, Some(record)).await {
             routes.push(routed);
         }
         let mut healed = false;
@@ -553,6 +571,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                         &endorsements,
                         self.wall_clock.now_ms(),
                     )
+                    .await
                     .is_ok()
             }
             Ok(_) => false,
@@ -604,8 +623,8 @@ mod tests {
         // actual profile names a fresh one, and she serves bob (mutual).
         // A message from her arrives — the live channel.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("refresh-heal", "anna", &wire);
-        let (b, _b_net, _b_clock) = loop_client("refresh-heal", "bob", &wire);
+        let (a, _a_net, _a_clock) = loop_client("refresh-heal", "anna", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("refresh-heal", "bob", &wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -614,8 +633,9 @@ mod tests {
                     relay_url: Some("http://203.0.113.9:10".to_string()),
                 }],
             )
+            .await
             .expect("profile");
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
         b.add_contact(
             &ContactRecord::new(
                 vec![a.public_key()],
@@ -627,6 +647,7 @@ mod tests {
             ),
             Some("anna".to_string()),
         )
+        .await
         .expect("add anna");
         let received = [Received {
             envelope: message(&a.device, vec![b.public_key()], None, vec![], 0, 0),
@@ -640,10 +661,10 @@ mod tests {
         // Then: relay resolution follows anna's fresh profile — healed by
         // merely receiving from her, no rescan anywhere; her stored record
         // is untouched (the learned store took the answer)
-        let contact = b.resolve_contact("anna").expect("resolve");
+        let contact = b.resolve_contact("anna").await.expect("resolve");
         assert_eq!(contact.relays, vec!["fresh@203.0.113.9:9".to_string()]);
         assert!(matches!(
-            b.relay_status("anna").expect("status").source,
+            b.relay_status("anna").await.expect("status").source,
             RelaySource::SubjectServed { .. }
         ));
 
@@ -654,8 +675,8 @@ mod tests {
     async fn auto_refresh__should_ask_once_and_only_contacts() {
         // Given: the heal setup, plus a stranger among the senders
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("refresh-gate", "anna", &wire);
-        let (b, b_net, _b_clock) = loop_client("refresh-gate", "bob", &wire);
+        let (a, _a_net, _a_clock) = loop_client("refresh-gate", "anna", &wire).await;
+        let (b, b_net, _b_clock) = loop_client("refresh-gate", "bob", &wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -664,8 +685,9 @@ mod tests {
                     relay_url: Some("http://203.0.113.9:10".to_string()),
                 }],
             )
+            .await
             .expect("profile");
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
         b.add_contact(
             &ContactRecord::new(
                 vec![a.public_key()],
@@ -677,6 +699,7 @@ mod tests {
             ),
             Some("anna".to_string()),
         )
+        .await
         .expect("add anna");
         let stranger = DeviceKey::from_seed([77; 32]);
         let received = [
@@ -710,8 +733,8 @@ mod tests {
         // a complete profile; bob holds nothing about anna — the
         // two-fresh-devices onboarding bootstrap
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("ask-subject", "anna", &wire);
-        let (b, _b_net, _b_clock) = loop_client("ask-subject", "bob", &wire);
+        let (a, _a_net, _a_clock) = loop_client("ask-subject", "anna", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("ask-subject", "bob", &wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -720,8 +743,9 @@ mod tests {
                     relay_url: Some("http://203.0.113.9:10".to_string()),
                 }],
             )
+            .await
             .expect("profile");
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
 
         // When: bob deliberately asks anna who she is
         let outcome = b.ask_subject(a.public_key()).await;
@@ -729,10 +753,13 @@ mod tests {
         // Then: her self-served record lands as a promotable candidate —
         // the add button's exact input — and the add completes from it
         assert_eq!(outcome, SubjectAsk::Answered);
-        let candidates = b.learned_candidates(a.public_key()).expect("candidates");
+        let candidates = b
+            .learned_candidates(a.public_key())
+            .await
+            .expect("candidates");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0.name, "anna");
-        let petname = b.add_contact(&candidates[0].1, None).expect("add");
+        let petname = b.add_contact(&candidates[0].1, None).await.expect("add");
         assert_eq!(petname, "anna");
 
         let _ = std::fs::remove_dir_all(temp_root("ask-subject"));
@@ -743,8 +770,8 @@ mod tests {
         // Given: anna has a complete profile but never added bob — her
         // contacts-only gate declines, indistinguishable from not holding
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("ask-subject-gate", "anna", &wire);
-        let (b, _b_net, _b_clock) = loop_client("ask-subject-gate", "bob", &wire);
+        let (a, _a_net, _a_clock) = loop_client("ask-subject-gate", "anna", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("ask-subject-gate", "bob", &wire).await;
         a.state
             .save_profile(
                 "anna",
@@ -753,6 +780,7 @@ mod tests {
                     relay_url: Some("http://203.0.113.9:10".to_string()),
                 }],
             )
+            .await
             .expect("profile");
 
         // When
@@ -762,6 +790,7 @@ mod tests {
         assert_eq!(outcome, SubjectAsk::Nothing);
         assert!(
             b.learned_candidates(a.public_key())
+                .await
                 .expect("candidates")
                 .is_empty()
         );
@@ -773,7 +802,7 @@ mod tests {
     async fn ask_subject__should_report_unreachable_when_no_route_connects() {
         // Given: a subject whose one route (the bare dial) hangs — offline
         let wire = Loopback::new();
-        let (b, b_net, b_clock) = loop_client("ask-subject-offline", "bob", &wire);
+        let (b, b_net, b_clock) = loop_client("ask-subject-offline", "bob", &wire).await;
         let ghost = DeviceKey::from_seed([9; 32]).public();
         b_net.dial.hold(&ghost);
 
@@ -785,7 +814,12 @@ mod tests {
 
         // Then
         assert_eq!(outcome, SubjectAsk::Unreachable);
-        assert!(b.learned_candidates(ghost).expect("candidates").is_empty());
+        assert!(
+            b.learned_candidates(ghost)
+                .await
+                .expect("candidates")
+                .is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(temp_root("ask-subject-offline"));
     }
@@ -813,7 +847,8 @@ mod tests {
             TestClock::new(),
             TestWallClock::new(1_000),
             net.clone(),
-        );
+        )
+        .await;
 
         // When
         let outcome = b.ask_subject(subject).await;
@@ -822,6 +857,7 @@ mod tests {
         assert_eq!(outcome, SubjectAsk::Nothing);
         assert!(
             b.learned_candidates(subject)
+                .await
                 .expect("candidates")
                 .is_empty()
         );
@@ -834,9 +870,9 @@ mod tests {
         // Given: anna sends to bob direct (mutual contacts, bob's real
         // handler stores and acks); bob's profile is fresh
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("refresh-send", "anna", &wire);
-        let (b, _b_net, _b_clock) = loop_client("refresh-send", "bob", &wire);
-        befriend(&b.state, a.public_key());
+        let (a, _a_net, _a_clock) = loop_client("refresh-send", "anna", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("refresh-send", "bob", &wire).await;
+        befriend(&b.state, a.public_key()).await;
         b.state
             .save_profile(
                 "bob",
@@ -845,18 +881,20 @@ mod tests {
                     relay_url: Some("http://203.0.113.2:2".to_string()),
                 }],
             )
+            .await
             .expect("profile");
         let relay = DeviceKey::from_seed([78; 32]).public();
         a.add_contact(
             &routed_record(b.public_key(), &relay),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
 
         // When
         let receipt = a
             .send(
-                &[a.resolve_contact("bob").expect("resolve")],
+                &[a.resolve_contact("bob").await.expect("resolve")],
                 b"hey".to_vec(),
                 vec![],
             )
@@ -866,7 +904,7 @@ mod tests {
         // Then: the ack rode back with bob's self-served record — anna's
         // view of his relays stays current without a rescan
         assert_eq!(receipt.direct_recipients, 1);
-        let learned = a.state.learned(&b.public_key());
+        let learned = a.state.learned(&b.public_key()).await;
         assert_eq!(learned.len(), 1);
         assert_eq!(learned[0].responder, b.public_key());
         assert_eq!(
@@ -883,13 +921,14 @@ mod tests {
         // bob's messages goes through her mailbox (bob's record of alice is
         // mailbox-only), so the scoped auto-query fires inside her drain.
         let wire = Loopback::new();
-        let (a, a_net, _a_clock) = loop_client("autoquery", "alice", &wire);
-        let (b, b_net, _b_clock) = loop_client("autoquery", "bob", &wire);
-        let (c, c_net, _c_clock) = loop_client("autoquery", "carol", &wire);
+        let (a, a_net, _a_clock) = loop_client("autoquery", "alice", &wire).await;
+        let (b, b_net, _b_clock) = loop_client("autoquery", "bob", &wire).await;
+        let (c, c_net, _c_clock) = loop_client("autoquery", "carol", &wire).await;
         let relay_a = DeviceKey::from_seed([111; 32]).public();
         let relay_b = DeviceKey::from_seed([112; 32]).public();
         let relay_c = DeviceKey::from_seed([113; 32]).public();
         a.add_contact(&routed_record(b.public_key(), &relay_b), Some("Bob".into()))
+            .await
             .expect("alice adds bob");
         b.add_contact(
             &ContactRecord::new(
@@ -902,11 +941,13 @@ mod tests {
             ),
             Some("Alice".into()),
         )
+        .await
         .expect("bob adds alice, mailbox-only");
         b.add_contact(
             &routed_record(c.public_key(), &relay_c),
             Some("Carol".into()),
         )
+        .await
         .expect("bob adds carol");
 
         // …bob starts the 1:1 and grows it by replying with carol added
@@ -914,7 +955,7 @@ mod tests {
         ra_hi.reply(deposited_frame());
         let first = b
             .send(
-                &[b.resolve_contact("Alice").expect("resolve")],
+                &[b.resolve_contact("Alice").await.expect("resolve")],
                 b"hi alice".to_vec(),
                 vec![],
             )
@@ -925,8 +966,12 @@ mod tests {
         ra_welcome.reply(deposited_frame());
         let rc_welcome = b_net.dial.connect(&relay_c);
         rc_welcome.reply(deposited_frame());
-        let mut contacts = b.reply_contacts(conv).expect("reply contacts").contacts;
-        contacts.push(b.resolve_contact("Carol").expect("resolve"));
+        let mut contacts = b
+            .reply_contacts(conv)
+            .await
+            .expect("reply contacts")
+            .contacts;
+        contacts.push(b.resolve_contact("Carol").await.expect("resolve"));
         b.send_in(conv, &contacts, b"welcome carol".to_vec(), vec![])
             .await
             .expect("bob grows the group");
@@ -948,14 +993,14 @@ mod tests {
 
         // Then: carol's record was learned with zero manual identity work
         assert!(
-            !a.state.learned(&c.public_key()).is_empty(),
+            !a.state.learned(&c.public_key()).await.is_empty(),
             "the auto-query should have learned carol's record from bob"
         );
 
         // …and reply-to-all reaches carol through the auto-learned route
         let rc_reply = a_net.dial.connect(&relay_c);
         rc_reply.reply(deposited_frame());
-        let reply = a.reply_contacts(conv).expect("alice reply contacts");
+        let reply = a.reply_contacts(conv).await.expect("alice reply contacts");
         assert!(
             reply.unknown.is_empty(),
             "carol resolves via the learned record"
@@ -984,9 +1029,9 @@ mod tests {
         // dialable contact and is in B's contact store. Carol herself is
         // unknown to A and offline — the one-way-add shape (design §1).
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("learn", "asker", &wire);
-        let (b, _b_net, _b_clock) = loop_client("learn", "responder", &wire);
-        befriend(&b.state, a.public_key()); // B's gate serves A
+        let (a, _a_net, _a_clock) = loop_client("learn", "asker", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("learn", "responder", &wire).await;
+        befriend(&b.state, a.public_key()).await; // B's gate serves A
         let carol = DeviceKey::from_seed([21; 32]);
         let carol_record = signed_record(
             &carol,
@@ -997,7 +1042,10 @@ mod tests {
                 relay_url: Some("http://203.0.113.9:10".to_string()),
             }],
         );
-        b.state.save_contact("carol", &carol_record).expect("save");
+        b.state
+            .save_contact("carol", &carol_record)
+            .await
+            .expect("save");
         let b_record = ContactRecord::new(
             vec![b.public_key()],
             vec![],
@@ -1007,6 +1055,7 @@ mod tests {
             }],
         );
         a.add_contact(&b_record, Some("bob".to_string()))
+            .await
             .expect("add bob");
         let contacts_dir =
             std::path::PathBuf::from(format!("{}.state", temp_key("learn", "asker")))
@@ -1024,7 +1073,8 @@ mod tests {
         assert_eq!(answers[0].responder_petname, "bob");
         assert_eq!(answers[0].record, carol_record);
         assert_eq!(dir_bytes(&contacts_dir), before);
-        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).expect("resolve") else {
+        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).await.expect("resolve")
+        else {
             panic!("expected a learned name");
         };
         assert_eq!(names.len(), 1);
@@ -1033,11 +1083,14 @@ mod tests {
         assert!(!names[0].confirmed_by_subject);
 
         // When: promoted by the one explicit act — reply becomes possible
-        let petname = a.add_contact(&answers[0].record, None).expect("promote");
+        let petname = a
+            .add_contact(&answers[0].record, None)
+            .await
+            .expect("promote");
 
         // Then: petname prefilled from the self-claim; keys + relays ready
         assert_eq!(petname, "Carol");
-        let contact = a.resolve_contact("Carol").expect("resolve contact");
+        let contact = a.resolve_contact("Carol").await.expect("resolve contact");
         assert_eq!(contact.keys, vec![carol.public()]);
         assert_eq!(contact.relays, vec!["cc@203.0.113.9:9".to_string()]);
 
@@ -1050,8 +1103,8 @@ mod tests {
         // URL, outdated mailbox); Carol is online with a fresh profile and
         // serves A (the record-freshness case, design §7)
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("fresh", "asker", &wire);
-        let (c, _c_net, _c_clock) = loop_client("fresh", "carol", &wire);
+        let (a, _a_net, _a_clock) = loop_client("fresh", "asker", &wire).await;
+        let (c, _c_net, _c_clock) = loop_client("fresh", "carol", &wire).await;
         // Carol's fresh profile — written straight to state, as `open_homed`
         // did (`build_own_record` reads it when she answers for herself).
         c.state
@@ -1062,8 +1115,9 @@ mod tests {
                     relay_url: Some("http://203.0.113.1:1".to_string()),
                 }],
             )
+            .await
             .expect("save profile");
-        befriend(&c.state, a.public_key());
+        befriend(&c.state, a.public_key()).await;
         let stale = ContactRecord::new(
             vec![c.public_key()],
             vec![],
@@ -1073,6 +1127,7 @@ mod tests {
             }],
         );
         a.add_contact(&stale, Some("carol".to_string()))
+            .await
             .expect("add carol");
 
         // When
@@ -1082,13 +1137,13 @@ mod tests {
         // record is untouched (freshness is read-time, never a mutation)
         assert_eq!(answers.len(), 1);
         assert_eq!(answers[0].responder, c.public_key());
-        let contact = a.resolve_contact("carol").expect("resolve");
+        let contact = a.resolve_contact("carol").await.expect("resolve");
         assert_eq!(
             contact.relays,
             vec!["unused@203.0.113.1:1".to_string()],
             "fresh mailbox from the subject-served answer"
         );
-        assert_eq!(a.contacts().expect("contacts")[0].1, stale);
+        assert_eq!(a.contacts().await.expect("contacts")[0].1, stale);
 
         let _ = std::fs::remove_dir_all(temp_root("fresh"));
     }
@@ -1112,7 +1167,7 @@ mod tests {
             0,
             mailbox_only("ll@203.0.113.5:5"),
         );
-        a.recognize_device(&laptop_record).expect("recognize");
+        a.recognize_device(&laptop_record).await.expect("recognize");
 
         // When: a stranger asks about the laptop's key
         let connection = net::connect_peer(
@@ -1138,7 +1193,7 @@ mod tests {
 
         // When: the same requester asks as a contact (fresh connection —
         // the gate resolves per connection)
-        befriend(&a.state, c.public_key());
+        befriend(&a.state, c.public_key()).await;
         let connection = net::connect_peer(
             &c.transport,
             &a.transport.peer(),
@@ -1211,9 +1266,9 @@ mod tests {
         // Given: B holds Carol's record and A as a contact; A holds B as
         // a dialable contact ("bob")
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("endorse", "asker", &wire);
-        let (b, _b_net, _b_clock) = loop_client("endorse", "responder", &wire);
-        befriend(&b.state, a.public_key());
+        let (a, _a_net, _a_clock) = loop_client("endorse", "asker", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("endorse", "responder", &wire).await;
+        befriend(&b.state, a.public_key()).await;
         let b_record = ContactRecord::new(
             vec![b.public_key()],
             vec![],
@@ -1223,10 +1278,12 @@ mod tests {
             }],
         );
         a.add_contact(&b_record, Some("bob".to_string()))
+            .await
             .expect("add bob");
         let carol = DeviceKey::from_seed([85; 32]);
         let carol_record = signed_record(&carol, "Carol", 0, mailbox_only("cc@203.0.113.9:9"));
         b.add_contact(&carol_record, Some("Carrie".to_string()))
+            .await
             .expect("add carol");
 
         // When: A asks before B has vouched
@@ -1237,13 +1294,16 @@ mod tests {
         assert!(outcome.answers[0].endorsements.is_empty());
 
         // When: B vouches (the explicit act) and A re-asks
-        b.vouch("Carrie").expect("vouch");
+        b.vouch("Carrie").await.expect("vouch");
         let outcome = a.who_is(carol.public()).await.expect("who_is");
 
         // Then: the endorsement rides the answer; the ranking shows the
         // endorsed name with its voucher, below the verified self-claim
         assert_eq!(outcome.answers[0].endorsements.len(), 1);
-        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        let candidates = a
+            .learned_candidates(carol.public())
+            .await
+            .expect("candidates");
         let carrie = candidates
             .iter()
             .find(|(name, _)| name.name == "Carrie")
@@ -1257,11 +1317,14 @@ mod tests {
 
         // When: B withdraws and A re-asks — the per-responder entry
         // replaces wholesale, endorsements included
-        b.unvouch("Carrie").expect("unvouch");
+        b.unvouch("Carrie").await.expect("unvouch");
         let _ = a.who_is(carol.public()).await.expect("who_is");
 
         // Then: the withdrawn vouch is gone from the ranking
-        let candidates = a.learned_candidates(carol.public()).expect("candidates");
+        let candidates = a
+            .learned_candidates(carol.public())
+            .await
+            .expect("candidates");
         assert!(
             candidates
                 .iter()
@@ -1300,7 +1363,8 @@ mod tests {
             clock.clone(),
             SystemClock,
             net.clone(),
-        );
+        )
+        .await;
         let dialable = |key: PublicKey, host: u8| {
             ContactRecord::new(
                 vec![key],
@@ -1312,12 +1376,14 @@ mod tests {
             )
         };
         a.add_contact(&dialable(responder, 1), Some("bob".to_string()))
+            .await
             .expect("add bob");
         for n in 0..3u8 {
             a.add_contact(
                 &dialable(DeviceKey::from_seed([40 + n; 32]).public(), n + 2),
                 Some(format!("offline{n}")),
             )
+            .await
             .expect("add offline contact");
         }
 
@@ -1344,9 +1410,9 @@ mod tests {
         // that includes the unknown key C, and holds C's record. The drain
         // hands A the message — nothing else happens manually.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("autowho", "asker", &wire);
-        let (b, _b_net, _b_clock) = loop_client("autowho", "responder", &wire);
-        befriend(&b.state, a.public_key());
+        let (a, _a_net, _a_clock) = loop_client("autowho", "asker", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("autowho", "responder", &wire).await;
+        befriend(&b.state, a.public_key()).await;
         let carol = DeviceKey::from_seed([31; 32]);
         let carol_record = signed_record(
             &carol,
@@ -1357,7 +1423,10 @@ mod tests {
                 relay_url: Some("http://203.0.113.9:10".to_string()),
             }],
         );
-        b.state.save_contact("carol", &carol_record).expect("save");
+        b.state
+            .save_contact("carol", &carol_record)
+            .await
+            .expect("save");
         a.add_contact(
             &ContactRecord::new(
                 vec![b.public_key()],
@@ -1369,6 +1438,7 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
         let genesis = message(
             &b.device,
@@ -1381,6 +1451,7 @@ mod tests {
         let conversation = genesis.id();
         a.state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
         let received = [Received {
             envelope: genesis.clone(),
@@ -1393,7 +1464,8 @@ mod tests {
 
         // Then: C resolves with provenance — learned from a participant,
         // with zero manual action
-        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).expect("resolve") else {
+        let ResolvedName::Learned(names) = a.resolve_name(carol.public()).await.expect("resolve")
+        else {
             panic!("expected a learned candidate");
         };
         assert_eq!(names[0].name, "Carol");
@@ -1408,7 +1480,7 @@ mod tests {
         a.auto_who_is(&received).await;
         assert!(
             matches!(
-                a.resolve_name(carol.public()).expect("resolve"),
+                a.resolve_name(carol.public()).await.expect("resolve"),
                 ResolvedName::Unknown
             ),
             "a second drain must not re-broadcast the query"
@@ -1430,6 +1502,7 @@ mod tests {
         let conversation = genesis.id();
         a.state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
 
         // When
@@ -1443,7 +1516,7 @@ mod tests {
         // Then: gated before the rate limit — no query was even recorded
         assert!(a.asked.is_empty());
         assert!(matches!(
-            a.resolve_name(carol).expect("resolve"),
+            a.resolve_name(carol).await.expect("resolve"),
             ResolvedName::Unknown
         ));
 
@@ -1470,7 +1543,10 @@ mod tests {
                 relay_url: Some("http://203.0.113.9:10".to_string()),
             }],
         );
-        a.state.save_contact("carol", &carol_record).expect("save");
+        a.state
+            .save_contact("carol", &carol_record)
+            .await
+            .expect("save");
 
         // When: a stranger asks about a key A demonstrably holds
         let connection = net::connect_peer(
@@ -1491,7 +1567,7 @@ mod tests {
 
         // When: the same requester asks as a contact (fresh connection —
         // the gate is resolved per connection)
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
         let connection = net::connect_peer(
             &b.transport,
             &a.transport.peer(),
@@ -1537,7 +1613,7 @@ mod tests {
         let b = Client::open_or_create(&temp_key("whoisself", "client"))
             .await
             .expect("open B");
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
         let connection = net::connect_peer(
             &b.transport,
             &a.transport.peer(),
@@ -1566,6 +1642,7 @@ mod tests {
         let relay = RelayEntry::from_spec("aa@203.0.113.1:1#http://203.0.113.1:2");
         a.state
             .save_profile("alice", std::slice::from_ref(&relay))
+            .await
             .expect("save profile");
         let SyncResult::Known { record, .. } = net::sync_request(
             &connection,

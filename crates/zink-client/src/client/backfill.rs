@@ -52,8 +52,9 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         // fresh paired device backfills its sibling by key.
         let record = self
             .trusted_record_for(&peer)
+            .await
             .ok_or_else(|| Error::NotAContact("no stored record for that key".into()))?;
-        self.backfill_addr(conversation, self.peer_addr_for(peer, Some(&record))?)
+        self.backfill_addr(conversation, self.peer_addr_for(peer, Some(&record)).await?)
             .await
     }
 
@@ -98,7 +99,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     ) -> Result<usize, Error> {
         let mut fetched = 0usize;
         loop {
-            let frontier = self.state.missing_ancestors(conversation);
+            let frontier = self.state.missing_ancestors(conversation).await;
             if frontier.is_empty() {
                 break; // ancestor-closed: the genesis (parents=[]) is reachable
             }
@@ -137,6 +138,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         let mut stored: BTreeSet<MessageId> = self
             .state
             .load_envelopes(conversation)
+            .await
             .unwrap_or_default()
             .iter()
             .map(|envelope| envelope.id())
@@ -199,7 +201,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     tracing::warn!("peer served a message from another conversation; skipping");
                     return Ok(false);
                 }
-                self.remember(&envelope)?;
+                self.remember(&envelope).await?;
                 Ok(true)
             }
             SyncResult::NotHeld => Ok(false), // peer doesn't have it / declined
@@ -231,7 +233,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         }
         let mut healed = 0usize;
         for (conversation, sender) in targets {
-            if self.state.missing_ancestors(conversation).is_empty() {
+            if self.state.missing_ancestors(conversation).await.is_empty() {
                 continue; // ancestor-closed — nothing to heal
             }
             match self.backfill_by_key(conversation, sender).await {
@@ -253,20 +255,20 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// every peer op; returns how many messages became readable.
     pub async fn rewrap_backlog(&self) -> usize {
         let mut healed = 0;
-        for conversation in self.state.conversations() {
+        for conversation in self.state.conversations().await {
             healed += self.rewrap_conversation(conversation).await;
         }
         if healed > 0 {
             // Bodies just became openable — the new-device bootstrap's
             // lens history adopts now (lens-sync.md §5).
-            self.adopt_lens_ops();
+            self.adopt_lens_ops().await;
         }
         healed
     }
 
     async fn rewrap_conversation(&self, conversation: MessageId) -> usize {
         let me = self.device.public();
-        let Ok(envelopes) = self.state.load_envelopes(conversation) else {
+        let Ok(envelopes) = self.state.load_envelopes(conversation).await else {
             return 0;
         };
         let mut unopenable: BTreeMap<MessageId, MessageEnvelope> = envelopes
@@ -278,11 +280,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             return 0;
         }
         let mut healed = 0;
-        for (device_key, record) in self.state.recognized_devices() {
+        for (device_key, record) in self.state.recognized_devices().await {
             if unopenable.is_empty() {
                 break;
             }
-            let Ok(addr) = self.peer_addr_for(device_key, Some(&record)) else {
+            let Ok(addr) = self.peer_addr_for(device_key, Some(&record)).await else {
                 continue;
             };
             let Ok(connection) = net::connect_peer(
@@ -326,7 +328,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                         tracing::warn!("re-wrap does not open the body; dropped");
                         continue;
                     }
-                    if self.state.store_envelope(conversation, &updated).is_err() {
+                    if self
+                        .state
+                        .store_envelope(conversation, &updated)
+                        .await
+                        .is_err()
+                    {
                         continue;
                     }
                     unopenable.remove(&id);
@@ -342,7 +349,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// conversations. Free for single-device clients: no recognized
     /// devices, no scan.
     pub(super) async fn auto_rewrap(&self, received: &[Received]) {
-        if self.state.recognized_devices().is_empty() {
+        if self.state.recognized_devices().await.is_empty() {
             return;
         }
         let conversations: BTreeSet<MessageId> = received
@@ -360,7 +367,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
             if healed > 0 {
                 tracing::info!(healed, "re-wrapped history from a paired device");
                 // Freshly openable bodies may be lens ops (lens-sync.md §5).
-                self.adopt_lens_ops();
+                self.adopt_lens_ops().await;
             }
         }
     }
@@ -384,20 +391,23 @@ mod tests {
         // mid-conversation — holds only the latest message, so it can't even
         // build the DAG (no genesis on disk) and thus can't reply.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("walk", "server", &wire);
-        let (b, _b_net, _b_clock) = loop_client("walk", "client", &wire);
-        befriend(&a.state, b.public_key()); // the D0c gate serves contacts only
+        let (a, _a_net, _a_clock) = loop_client("walk", "server", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("walk", "client", &wire).await;
+        befriend(&a.state, b.public_key()).await; // the D0c gate serves contacts only
 
         let author = DeviceKey::from_seed([9; 32]);
         let msgs = chain(&author, b.public_key(), 3);
         let conversation = msgs[0].id();
         for envelope in &msgs {
-            a.state.store_envelope(conversation, envelope).unwrap();
+            a.state
+                .store_envelope(conversation, envelope)
+                .await
+                .unwrap();
         }
         let latest = msgs.last().unwrap();
-        b.state.store_envelope(conversation, latest).unwrap();
+        b.state.store_envelope(conversation, latest).await.unwrap();
         assert!(
-            b.state.load_dag(conversation).is_err(),
+            b.state.load_dag(conversation).await.is_err(),
             "B lacks the genesis before backfill"
         );
 
@@ -422,6 +432,7 @@ mod tests {
         let dag = b
             .state
             .load_dag(conversation)
+            .await
             .expect("DAG builds after backfill");
         assert_eq!(dag.heads(), vec![latest.id()]);
         assert_eq!(dag.next_logical(), 3);
@@ -439,17 +450,21 @@ mod tests {
         let (_relay_b, url_b) = spawn_test_relay().await;
         let a = open_homed("bykey", "server", &url_a).await;
         let b = open_homed("bykey", "client", &url_b).await;
-        befriend(&a.state, b.public_key()); // the D0c gate serves contacts only
+        befriend(&a.state, b.public_key()).await; // the D0c gate serves contacts only
         a.transport.online().await; // A must be homed before B rendezvouses via its relay
 
         let author = DeviceKey::from_seed([5; 32]);
         let msgs = chain(&author, b.public_key(), 3);
         let conversation = msgs[0].id();
         for envelope in &msgs {
-            a.state.store_envelope(conversation, envelope).unwrap();
+            a.state
+                .store_envelope(conversation, envelope)
+                .await
+                .unwrap();
         }
         b.state
             .store_envelope(conversation, msgs.last().unwrap())
+            .await
             .unwrap();
         let record = ContactRecord::new(
             vec![a.public_key()],
@@ -460,6 +475,7 @@ mod tests {
             }],
         );
         b.add_contact(&record, Some("a".to_string()))
+            .await
             .expect("add contact");
 
         // When: B backfills by key alone — no ip:port anywhere; iroh
@@ -471,7 +487,7 @@ mod tests {
 
         // Then: the missing ancestors arrived and the DAG is reply-ready.
         assert_eq!(fetched, 2, "genesis + the middle message");
-        let dag = b.state.load_dag(conversation).expect("DAG builds");
+        let dag = b.state.load_dag(conversation).await.expect("DAG builds");
         assert_eq!(dag.next_logical(), 3);
 
         let _ = std::fs::remove_dir_all(temp_root("bykey"));
@@ -493,10 +509,14 @@ mod tests {
         let msgs = chain(&author, b.public_key(), 3);
         let conversation = msgs[0].id();
         for envelope in &msgs {
-            a.state.store_envelope(conversation, envelope).unwrap();
+            a.state
+                .store_envelope(conversation, envelope)
+                .await
+                .unwrap();
         }
         b.state
             .store_envelope(conversation, msgs.last().unwrap())
+            .await
             .unwrap();
 
         // When: the stranger backfills — the answers must be
@@ -508,7 +528,7 @@ mod tests {
 
         // Then: nothing served, and the successor view is empty too
         assert_eq!(fetched, 0, "a non-contact is served nothing");
-        assert!(b.state.load_dag(conversation).is_err());
+        assert!(b.state.load_dag(conversation).await.is_err());
         let connection = net::connect_peer(
             &b.transport,
             &a.transport.peer(),
@@ -533,7 +553,7 @@ mod tests {
         );
 
         // When: A stores B's record — B is now a contact and gets served
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
         let fetched = b
             .backfill_addr(conversation, a.transport.peer())
             .await
@@ -541,7 +561,7 @@ mod tests {
 
         // Then: the walk reaches the genesis
         assert_eq!(fetched, 2, "genesis + the middle message");
-        assert!(b.state.load_dag(conversation).is_ok());
+        assert!(b.state.load_dag(conversation).await.is_ok());
 
         let _ = std::fs::remove_dir_all(temp_root("gate"));
     }
@@ -557,14 +577,20 @@ mod tests {
         let b = Client::open_or_create(&temp_key("forward", "client"))
             .await
             .expect("open B");
-        befriend(&a.state, b.public_key());
+        befriend(&a.state, b.public_key()).await;
         let author = DeviceKey::from_seed([4; 32]);
         let msgs = chain(&author, b.public_key(), 5);
         let conversation = msgs[0].id();
         for envelope in &msgs {
-            a.state.store_envelope(conversation, envelope).unwrap();
+            a.state
+                .store_envelope(conversation, envelope)
+                .await
+                .unwrap();
         }
-        b.state.store_envelope(conversation, &msgs[2]).unwrap();
+        b.state
+            .store_envelope(conversation, &msgs[2])
+            .await
+            .unwrap();
 
         // When
         let fetched = b
@@ -574,7 +600,7 @@ mod tests {
 
         // Then: 2 ancestors + 2 successors, and the DAG ends on the true head
         assert_eq!(fetched, 4);
-        let dag = b.state.load_dag(conversation).expect("DAG builds");
+        let dag = b.state.load_dag(conversation).await.expect("DAG builds");
         assert_eq!(dag.heads(), vec![msgs[4].id()]);
         assert_eq!(dag.next_logical(), 5);
 
@@ -588,17 +614,20 @@ mod tests {
         // the latest message, as a mid-conversation joiner would. B holds
         // A's record (key + relay URL), as any messageable contact does.
         let wire = Loopback::new();
-        let (a, _a_net, _a_clock) = loop_client("autosync", "server", &wire);
-        let (b, _b_net, _b_clock) = loop_client("autosync", "client", &wire);
-        befriend(&a.state, b.public_key());
+        let (a, _a_net, _a_clock) = loop_client("autosync", "server", &wire).await;
+        let (b, _b_net, _b_clock) = loop_client("autosync", "client", &wire).await;
+        befriend(&a.state, b.public_key()).await;
 
         let msgs = chain(&a.device, b.public_key(), 3);
         let conversation = msgs[0].id();
         for envelope in &msgs {
-            a.state.store_envelope(conversation, envelope).unwrap();
+            a.state
+                .store_envelope(conversation, envelope)
+                .await
+                .unwrap();
         }
         let latest = msgs.last().unwrap();
-        b.state.store_envelope(conversation, latest).unwrap();
+        b.state.store_envelope(conversation, latest).await.unwrap();
         let record = ContactRecord::new(
             vec![a.public_key()],
             vec![],
@@ -608,8 +637,12 @@ mod tests {
             }],
         );
         b.add_contact(&record, Some("a".to_string()))
+            .await
             .expect("add contact");
-        assert!(b.state.load_dag(conversation).is_err(), "orphaned before");
+        assert!(
+            b.state.load_dag(conversation).await.is_err(),
+            "orphaned before"
+        );
 
         // When: the drain hands the orphan to auto-sync (what recv and the
         // subscription loops now do) — the sender is dialed by key
@@ -623,7 +656,7 @@ mod tests {
 
         // Then: the conversation is whole with zero explicit action
         assert_eq!(healed, 2, "genesis + the middle message");
-        assert!(b.state.load_dag(conversation).is_ok());
+        assert!(b.state.load_dag(conversation).await.is_ok());
 
         let _ = std::fs::remove_dir_all(temp_root("autosync"));
     }
@@ -633,14 +666,18 @@ mod tests {
         // Given: the phone holds a fully-sealed conversation from before
         // the laptop's key existed; both home to a relay for dial-by-key
         let wire = Loopback::new();
-        let (phone, _p_net, _p_clock) = loop_client("rewrap", "phone", &wire);
-        let (laptop, _l_net, _l_clock) = loop_client("rewrap", "laptop", &wire);
+        let (phone, _p_net, _p_clock) = loop_client("rewrap", "phone", &wire).await;
+        let (laptop, _l_net, _l_clock) = loop_client("rewrap", "laptop", &wire).await;
         let author = DeviceKey::from_seed([60; 32]);
         let msgs = sealed_chain(&author, phone.public_key(), &[b"one", b"two", b"three"]);
         let conversation = msgs[0].id();
         let ids: BTreeSet<MessageId> = msgs.iter().map(|m| m.id()).collect();
         for envelope in &msgs {
-            phone.state.store_envelope(conversation, envelope).unwrap();
+            phone
+                .state
+                .store_envelope(conversation, envelope)
+                .await
+                .unwrap();
         }
         // The pair: the phone recognizes the laptop (what authorizes
         // GetKeys), the laptop recognizes the phone with its homed record
@@ -651,6 +688,7 @@ mod tests {
                 vec![],
                 mailbox_only("ll@203.0.113.5:5"),
             ))
+            .await
             .expect("recognize");
         laptop
             .recognize_device(&ContactRecord::new(
@@ -661,6 +699,7 @@ mod tests {
                     relay_url: Some("http://203.0.113.1:1".to_string()),
                 }],
             ))
+            .await
             .expect("recognize back");
 
         // When: the D2a-style full flow — the laptop holds only the tip,
@@ -668,6 +707,7 @@ mod tests {
         laptop
             .state
             .store_envelope(conversation, msgs.last().unwrap())
+            .await
             .unwrap();
         let fetched = laptop
             .backfill_by_key(conversation, phone.public_key())
@@ -676,6 +716,7 @@ mod tests {
         assert_eq!(fetched, 2, "genesis + middle");
         let unreadable = laptop
             .history(conversation)
+            .await
             .expect("history")
             .iter()
             .filter(|message| message.body.is_err())
@@ -685,7 +726,7 @@ mod tests {
 
         // Then: every body opens, and no id moved
         assert_eq!(healed, 3);
-        let history = laptop.history(conversation).expect("history");
+        let history = laptop.history(conversation).await.expect("history");
         let bodies: Vec<Vec<u8>> = history
             .iter()
             .map(|message| message.body.as_ref().expect("opens").clone())
@@ -719,8 +760,8 @@ mod tests {
         let author = DeviceKey::from_seed([61; 32]);
         let msgs = sealed_chain(&author, phone.public_key(), &[b"secret"]);
         let id = msgs[0].id();
-        phone.state.store_envelope(id, &msgs[0]).unwrap();
-        befriend(&phone.state, alice.public_key());
+        phone.state.store_envelope(id, &msgs[0]).await.unwrap();
+        befriend(&phone.state, alice.public_key()).await;
 
         // When: the contact asks for re-wraps
         let connection = net::connect_peer(
@@ -747,6 +788,7 @@ mod tests {
                 vec![],
                 mailbox_only("ll@203.0.113.5:5"),
             ))
+            .await
             .expect("recognize");
         let connection = net::connect_peer(
             &laptop.transport,
@@ -788,6 +830,7 @@ mod tests {
             }],
         );
         b.add_contact(&record, Some("peer".to_string()))
+            .await
             .expect("add contact");
 
         // When / Then: dial-by-key is impossible and says so — no fabricated
@@ -815,6 +858,7 @@ mod tests {
         let conversation = msgs[0].id();
         b.state
             .store_envelope(conversation, msgs.last().unwrap())
+            .await
             .unwrap();
 
         // When: B backfills from a peer that serves nothing
@@ -826,7 +870,7 @@ mod tests {
         // Then: it fetches nothing and gives up rather than looping — honesty
         // over a fabricated root (the genesis is still missing).
         assert_eq!(fetched, 0);
-        assert!(b.state.load_dag(conversation).is_err());
+        assert!(b.state.load_dag(conversation).await.is_err());
 
         let _ = std::fs::remove_dir_all(temp_root("stuck"));
     }

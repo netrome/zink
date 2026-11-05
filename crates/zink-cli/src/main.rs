@@ -144,13 +144,16 @@ async fn my_record(args: &[String]) -> Result<(), String> {
         .collect();
     let (flags, _) = parse_flags(&args)?;
     let client = open_client(&flags).await?;
-    let name = optional(&flags, "--name")?.or_else(|| client.profile_name());
+    let name = match optional(&flags, "--name")? {
+        Some(name) => Some(name),
+        None => client.profile_name().await,
+    };
     let relays = {
         let given = values(&flags, "--relay");
         if given.is_empty() {
             // Full specs, not bare dial strings — re-saving the profile must
             // not silently drop the relay URLs (D0b).
-            client.home_relay_specs()
+            client.home_relay_specs().await
         } else {
             given
         }
@@ -163,9 +166,9 @@ async fn my_record(args: &[String]) -> Result<(), String> {
     // The device label (S1): optional, kept when not re-passed, like the
     // name. `Name` is the person, `DeviceLabel` the device (SPEC §3.2).
     if let Some(label) = optional(&flags, "--device")? {
-        client.set_device_label(&label)?;
+        client.set_device_label(&label).await?;
     }
-    match client.device_label() {
+    match client.device_label().await {
         Some(label) => eprintln!("profile: {name} · {label}"),
         None => eprintln!("profile: {name}"),
     }
@@ -173,7 +176,7 @@ async fn my_record(args: &[String]) -> Result<(), String> {
     // a user whose relay just died must still be able to produce the very
     // record/QR that re-homes them — failing before the print walled off
     // the recovery artifact.
-    let payload = client.my_record()?.to_qr_string();
+    let payload = client.my_record().await?.to_qr_string();
     println!("{payload}");
     if let Err(error) = client.register_at_home_relays().await {
         eprintln!(
@@ -199,7 +202,9 @@ async fn contact_add(args: &[String]) -> Result<(), String> {
     };
     let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
     let client = open_client(&flags).await?;
-    let petname = client.add_contact(&record, optional(&flags, "--name")?)?;
+    let petname = client
+        .add_contact(&record, optional(&flags, "--name")?)
+        .await?;
     println!("added contact {petname:?}");
     client.close().await;
     Ok(())
@@ -215,7 +220,7 @@ async fn contact_update(args: &[String]) -> Result<(), String> {
     };
     let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
     let client = open_client(&flags).await?;
-    let petname = client.update_contact(&record)?;
+    let petname = client.update_contact(&record).await?;
     println!("updated contact {petname:?}");
     client.close().await;
     Ok(())
@@ -226,7 +231,7 @@ async fn contact_update(args: &[String]) -> Result<(), String> {
 async fn persons(args: &[String]) -> Result<(), String> {
     let (flags, _) = parse_flags(args)?;
     let client = open_client(&flags).await?;
-    let persons = client.persons()?;
+    let persons = client.persons().await?;
     if persons.is_empty() {
         println!("no persons");
     }
@@ -252,14 +257,14 @@ async fn persons(args: &[String]) -> Result<(), String> {
 /// Resolve a person act's argument at the human boundary: a label first,
 /// else an id as `persons` prints them — the acts themselves key on ids
 /// (labels rename; ids identify).
-fn person_arg(client: &Client, arg: &str) -> Result<PersonId, String> {
-    match client.person_by_label(arg) {
+async fn person_arg(client: &Client, arg: &str) -> Result<PersonId, String> {
+    match client.person_by_label(arg).await {
         Ok(person) => Ok(person.id),
         Err(zink_client::Error::NotAContact(_)) => {
             let id: PersonId = arg
                 .parse()
                 .map_err(|_| format!("no person labeled (or with id) {arg:?}"))?;
-            Ok(client.person_by_id(id)?.id)
+            Ok(client.person_by_id(id).await?.id)
         }
         Err(error) => Err(error.into()),
     }
@@ -272,7 +277,12 @@ async fn person_merge(args: &[String]) -> Result<(), String> {
         return Err(format!("expected <into-label> <from-label>\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    let merged = client.merge_persons(person_arg(&client, into)?, person_arg(&client, from)?)?;
+    let merged = client
+        .merge_persons(
+            person_arg(&client, into).await?,
+            person_arg(&client, from).await?,
+        )
+        .await?;
     println!(
         "{} now spans {} device(s)",
         merged.label,
@@ -289,7 +299,7 @@ async fn person_split(args: &[String]) -> Result<(), String> {
         return Err(format!("expected <member-petname>\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    let split = client.split_person(member)?;
+    let split = client.split_person(member).await?;
     println!("{} is its own person again", split.label);
     client.close().await;
     Ok(())
@@ -302,7 +312,9 @@ async fn person_rename(args: &[String]) -> Result<(), String> {
         return Err(format!("expected <label> <new-label>\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    client.rename_person(person_arg(&client, current)?, new)?;
+    client
+        .rename_person(person_arg(&client, current).await?, new)
+        .await?;
     println!("renamed {current:?} to {new:?}");
     client.close().await;
     Ok(())
@@ -318,7 +330,7 @@ async fn recognize(args: &[String]) -> Result<(), String> {
     };
     let record = ContactRecord::from_qr_string(payload).map_err(|e| format!("record: {e}"))?;
     let client = open_client(&flags).await?;
-    let key = client.recognize_device(&record)?;
+    let key = client.recognize_device(&record).await?;
     println!(
         "recognized {} ({}) as this person's device",
         record.self_claimed_name().unwrap_or("<unnamed>"),
@@ -336,7 +348,7 @@ async fn vouch(args: &[String]) -> Result<(), String> {
         return Err(format!("exactly one petname expected\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    client.vouch(petname)?;
+    client.vouch(petname).await?;
     println!("vouching for {petname:?} — served to anyone who asks you about them");
     client.close().await;
     Ok(())
@@ -351,8 +363,8 @@ async fn repudiate(args: &[String]) -> Result<(), String> {
         return Err(format!("exactly one petname or key hex expected\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    let key = resolve_peer_key(&client, target)?;
-    client.repudiate(key)?;
+    let key = resolve_peer_key(&client, target).await?;
+    client.repudiate(key).await?;
     println!(
         "repudiated {} — published in your record; contacts learn it from \
          their next pull",
@@ -369,7 +381,7 @@ async fn unvouch(args: &[String]) -> Result<(), String> {
         return Err(format!("exactly one petname expected\n{USAGE}"));
     };
     let client = open_client(&flags).await?;
-    client.unvouch(petname)?;
+    client.unvouch(petname).await?;
     println!("no longer vouching for {petname:?}");
     client.close().await;
     Ok(())
@@ -390,7 +402,7 @@ async fn rewrap(args: &[String]) -> Result<(), String> {
 async fn devices(args: &[String]) -> Result<(), String> {
     let (flags, _) = parse_flags(args)?;
     let client = open_client(&flags).await?;
-    let devices = client.recognized_devices();
+    let devices = client.recognized_devices().await;
     if devices.is_empty() {
         println!("no recognized devices");
     }
@@ -412,7 +424,7 @@ async fn devices(args: &[String]) -> Result<(), String> {
 async fn contacts(args: &[String]) -> Result<(), String> {
     let (flags, _) = parse_flags(args)?;
     let client = open_client(&flags).await?;
-    let contacts = client.contacts()?;
+    let contacts = client.contacts().await?;
     if contacts.is_empty() {
         println!("no contacts");
     }
@@ -445,7 +457,7 @@ async fn send(args: &[String]) -> Result<(), String> {
         if spec.contains('@') {
             contacts.push(Contact::parse(&spec)?);
         } else {
-            contacts.extend(client.resolve_person(&spec)?);
+            contacts.extend(client.resolve_person(&spec).await?);
         }
     }
     if contacts.is_empty() {
@@ -506,7 +518,7 @@ async fn recv(args: &[String]) -> Result<(), String> {
     let relays = {
         let given = values(&flags, "--relay");
         if given.is_empty() {
-            client.home_relays()
+            client.home_relays().await
         } else {
             given
         }
@@ -567,14 +579,14 @@ async fn conversations(args: &[String]) -> Result<(), String> {
     let client = open_client(&flags).await?;
     // Unknown senders are quarantined into a bounded requests queue
     // (groups.md §6) rather than mixed into the main list.
-    let inbox = zink_client::triage(client.conversations()?);
+    let inbox = zink_client::triage(client.conversations().await?);
     if inbox.conversations.is_empty() && inbox.requests.is_empty() {
         println!("no conversations");
     }
     // The whole own cluster is "me" (D3c): a conversation is never
     // "with mårten laptop".
-    let own = client.own_keys();
-    let line = |summary: &zink_client::ConversationSummary| -> Result<(), String> {
+    let own = client.own_keys().await;
+    let line = async |summary: &zink_client::ConversationSummary| -> Result<(), String> {
         let other_keys: Vec<_> = summary
             .participants
             .iter()
@@ -583,7 +595,7 @@ async fn conversations(args: &[String]) -> Result<(), String> {
             .collect();
         // Deduped per person (multi-device.md §7): a two-device contact
         // labels once.
-        let others = client.participant_labels(&other_keys)?;
+        let others = client.participant_labels(&other_keys).await?;
         println!(
             "{}  {} message(s)  with {}",
             hex::encode(&summary.id.0),
@@ -597,12 +609,12 @@ async fn conversations(args: &[String]) -> Result<(), String> {
         Ok(())
     };
     for summary in &inbox.conversations {
-        line(summary)?;
+        line(summary).await?;
     }
     if !inbox.requests.is_empty() {
         println!("\nmessage requests (nobody you know has written here yet):");
         for summary in &inbox.requests {
-            line(summary)?;
+            line(summary).await?;
         }
         if inbox.dropped > 0 {
             println!("  … and {} more beyond the cap", inbox.dropped);
@@ -622,10 +634,10 @@ async fn history(args: &[String]) -> Result<(), String> {
     };
     let blobs_dir = optional(&flags, "--blobs-dir")?;
     let client = open_client(&flags).await?;
-    let conversation = resolve_conversation(&client, wanted)?;
-    let contacts = client.contacts()?;
+    let conversation = resolve_conversation(&client, wanted).await?;
+    let contacts = client.contacts().await?;
     let me = client.public_key();
-    for message in client.history(conversation)? {
+    for message in client.history(conversation).await? {
         let from = if message.sender == me {
             "me".to_string()
         } else {
@@ -655,7 +667,10 @@ async fn history(args: &[String]) -> Result<(), String> {
         } else {
             format!(
                 " [✓ delivered to {}]",
-                client.participant_labels(&message.confirmed)?.join(", ")
+                client
+                    .participant_labels(&message.confirmed)
+                    .await?
+                    .join(", ")
             )
         };
         // Concurrency markers (D4d, tenet 7): real data the linear
@@ -707,8 +722,8 @@ async fn reply(args: &[String]) -> Result<(), String> {
         ));
     };
     let client = open_client(&flags).await?;
-    let conversation = resolve_conversation(&client, wanted)?;
-    let resolved = client.reply_contacts(conversation)?;
+    let conversation = resolve_conversation(&client, wanted).await?;
+    let resolved = client.reply_contacts(conversation).await?;
     for key in &resolved.unknown {
         eprintln!(
             "warning: no route for participant {} — they stay a recipient \
@@ -721,7 +736,7 @@ async fn reply(args: &[String]) -> Result<(), String> {
     // person label adds the whole cluster; a petname one device (S2).
     let mut contacts = resolved.contacts;
     for name in values(&flags, "--add") {
-        contacts.extend(client.resolve_person(&name)?);
+        contacts.extend(client.resolve_person(&name).await?);
     }
     if contacts.iter().all(|contact| contact.relays.is_empty()) {
         return Err("no routable participants — add or learn their records first".into());
@@ -754,11 +769,11 @@ async fn backfill(args: &[String]) -> Result<(), String> {
         ));
     };
     let client = open_client(&flags).await?;
-    let conversation = resolve_conversation(&client, wanted)?;
+    let conversation = resolve_conversation(&client, wanted).await?;
     let fetched = if peer.contains('@') {
         client.backfill(conversation, peer).await?
     } else {
-        let key = resolve_peer_key(&client, peer)?;
+        let key = resolve_peer_key(&client, peer).await?;
         client.backfill_by_key(conversation, key).await?
     };
     println!("backfilled {fetched} message(s) from {peer}");
@@ -769,8 +784,8 @@ async fn backfill(args: &[String]) -> Result<(), String> {
 /// A peer named on the command line: a contact petname, or a device-key hex.
 /// (Contact identity is keyed on the record's first key — the C2 convention,
 /// revisited at D3.)
-fn resolve_peer_key(client: &Client, peer: &str) -> Result<zink_protocol::PublicKey, String> {
-    for (petname, record) in client.contacts()? {
+async fn resolve_peer_key(client: &Client, peer: &str) -> Result<zink_protocol::PublicKey, String> {
+    for (petname, record) in client.contacts().await? {
         if petname == *peer {
             return record
                 .keys
@@ -795,7 +810,7 @@ async fn who_is(args: &[String]) -> Result<(), String> {
         ));
     };
     let client = open_client(&flags).await?;
-    let key = resolve_peer_key(&client, subject)?;
+    let key = resolve_peer_key(&client, subject).await?;
     let outcome = client.who_is(key).await?;
     println!(
         "asked {} contact(s), {} unreachable",
@@ -823,7 +838,7 @@ async fn who_is(args: &[String]) -> Result<(), String> {
     }
     // Disavowals (D4b): every valid negative renders with WHO says it;
     // only same-person ones exclude from addressing.
-    for disavowal in client.disavowals(key)? {
+    for disavowal in client.disavowals(key).await? {
         println!(
             "disavowed by {}{}",
             disavowal.attester_label,
@@ -836,7 +851,7 @@ async fn who_is(args: &[String]) -> Result<(), String> {
     }
     // Link evidence (D3c, multi-device.md §7): says WHO claims, tiered —
     // the one-way tier is a claim, the mutual one is consent-proof.
-    for evidence in client.device_evidence(key)? {
+    for evidence in client.device_evidence(key).await? {
         match evidence.tier {
             zink_protocol::LinkTier::MutuallyConfirmed => println!(
                 "device evidence: {} and this key vouch each other (mutually confirmed)",
@@ -848,7 +863,7 @@ async fn who_is(args: &[String]) -> Result<(), String> {
             ),
         }
     }
-    match client.resolve_name(key)? {
+    match client.resolve_name(key).await? {
         ResolvedName::Petname(petname) => println!("resolved: contact {petname:?}"),
         ResolvedName::Learned(names) => {
             for name in names {
@@ -910,7 +925,7 @@ async fn avatar(args: &[String]) -> Result<(), String> {
         ));
     };
     let client = open_client(&flags).await?;
-    let key = resolve_peer_key(&client, subject)?;
+    let key = resolve_peer_key(&client, subject).await?;
     match client.avatar(key).await? {
         Some(bytes) => {
             match optional(&flags, "--out")? {
@@ -939,7 +954,7 @@ async fn listen(args: &[String]) -> Result<(), String> {
     let relays = {
         let given = values(&flags, "--relay");
         if given.is_empty() {
-            client.home_relays()
+            client.home_relays().await
         } else {
             given
         }
@@ -949,7 +964,7 @@ async fn listen(args: &[String]) -> Result<(), String> {
             "no relays: pass --relay or set home relays via my-record\n{USAGE}"
         ));
     }
-    let contacts = std::sync::Arc::new(client.contacts()?);
+    let contacts = std::sync::Arc::new(client.contacts().await?);
     if let Ok(addr) = client.sync_address() {
         // What a peer dials to backfill history from this device (D0 sync).
         println!("peer sync address: {addr}");
@@ -1032,9 +1047,10 @@ fn print_arrivals(contacts: &[(String, ContactRecord)], messages: &[Received], d
 }
 
 /// A full conversation id, or any unambiguous hex prefix of one.
-fn resolve_conversation(client: &Client, prefix: &str) -> Result<MessageId, String> {
+async fn resolve_conversation(client: &Client, prefix: &str) -> Result<MessageId, String> {
     let matching: Vec<MessageId> = client
-        .conversations()?
+        .conversations()
+        .await?
         .into_iter()
         .map(|summary| summary.id)
         .filter(|id| hex::encode(&id.0).starts_with(prefix))

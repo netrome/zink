@@ -11,7 +11,6 @@ use crate::error::Error;
 use crate::ports::clock::{Clock, WallClock};
 use crate::ports::rng::{Draw, Mint};
 use crate::ports::transport::Transport;
-use crate::state::ClientState;
 use crate::{blobs, hex};
 
 use super::persons::PersonId;
@@ -198,7 +197,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     pub async fn fetch_blob(&self, received: &Received, hash: &BlobHash) -> Result<Vec<u8>, Error> {
         let relays = match &received.relay {
             Some(relay) => std::slice::from_ref(relay).to_vec(),
-            None => self.state.home_relays(),
+            None => self.state.home_relays().await,
         };
         self.open_cached_or_fetch(&received.envelope, hash, &relays)
             .await
@@ -213,8 +212,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         message: MessageId,
         hash: &BlobHash,
     ) -> Result<Vec<u8>, Error> {
-        let envelope = self.state.load_envelope(conversation, message)?;
-        self.open_cached_or_fetch(&envelope, hash, &self.state.home_relays())
+        let envelope = self.state.load_envelope(conversation, message).await?;
+        self.open_cached_or_fetch(&envelope, hash, &self.state.home_relays().await)
             .await
     }
 
@@ -229,7 +228,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         hash: &BlobHash,
         relays: &[String],
     ) -> Result<Vec<u8>, Error> {
-        if let Some(bytes) = self.state.load_blob(hash)
+        if let Some(bytes) = self.state.load_blob(hash).await
             && let Ok(plaintext) = envelope.open_blob(&self.device, hash, &bytes)
         {
             return Ok(plaintext);
@@ -249,7 +248,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                     let plaintext = envelope
                         .open_blob(&self.device, hash, &bytes)
                         .map_err(Error::Open)?;
-                    self.state.save_blob(hash, &bytes)?;
+                    self.state.save_blob(hash, &bytes).await?;
                     return Ok(plaintext);
                 }
                 Err(error) => last_error = error.to_string(),
@@ -264,8 +263,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// that includes them (the next heads carry them); stop-including
     /// shrinks it; concurrent heads union — honest over-inclusion that
     /// converges when the fork merges.
-    pub fn membership(&self, conversation: MessageId) -> Result<BTreeSet<PublicKey>, Error> {
-        Ok(self.membership_of(conversation, &self.state.load_envelopes(conversation)?))
+    pub async fn membership(&self, conversation: MessageId) -> Result<BTreeSet<PublicKey>, Error> {
+        Ok(self.membership_of(
+            conversation,
+            &self.state.load_envelopes(conversation).await?,
+        ))
     }
 
     /// `membership` over already-loaded envelopes. When the DAG can't
@@ -276,7 +278,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
         conversation: MessageId,
         envelopes: &[MessageEnvelope],
     ) -> BTreeSet<PublicKey> {
-        let heads = ClientState::dag_of(envelopes, conversation)
+        let heads = crate::state::dag_of(envelopes, conversation)
             .ok()
             .map(|dag| dag.heads());
         envelopes
@@ -292,20 +294,20 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
 
     /// Every stored conversation, newest first (by wall-clock hint — a
     /// display ordering, like everything timestamp-based).
-    pub fn conversations(&self) -> Result<Vec<ConversationSummary>, Error> {
+    pub async fn conversations(&self) -> Result<Vec<ConversationSummary>, Error> {
         // Loaded once for the whole pass, not once per conversation.
-        let contacts = self.state.contacts()?;
-        let own = self.own_keys();
+        let contacts = self.state.contacts().await?;
+        let own = self.own_keys().await;
         // Lens channels leave the inbox here (lens-sync.md §7), so the
         // CLI and the app inherit the filter. Stored, never deleted —
         // the DAG stays inspectable history.
-        let lens = self.state.lens_channels();
+        let lens = self.state.lens_channels().await;
         let mut summaries = Vec::new();
-        for id in self.state.conversations() {
+        for id in self.state.conversations().await {
             if lens.contains(&id) {
                 continue;
             }
-            let envelopes = self.state.load_envelopes(id)?;
+            let envelopes = self.state.load_envelopes(id).await?;
             if envelopes.is_empty() {
                 continue;
             }
@@ -323,7 +325,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 // `has_contributing_contact` here would re-read the whole
                 // conversation from disk, once per conversation, per render.
                 known: self.contributed_to(&envelopes, &contacts, &own),
-                first_seen_ms: self.state.first_seen_ms(id),
+                first_seen_ms: self.state.first_seen_ms(id).await,
                 last: envelopes
                     .iter()
                     .max_by_key(|envelope| envelope.core.timestamp_ms)
@@ -332,8 +334,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                         body: envelope.open(&self.device).ok(),
                         has_blobs: !envelope.core.blob_refs.is_empty(),
                     }),
-                local_name: self.state.conversation_name(id),
-                unread: envelopes.len().saturating_sub(self.state.read_count(id)),
+                local_name: self.state.conversation_name(id).await,
+                unread: envelopes
+                    .len()
+                    .saturating_sub(self.state.read_count(id).await),
             });
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_timestamp_ms));
@@ -343,27 +347,27 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// Name a conversation — my lens, this device only, never transmitted
     /// (project 6 S6; the petname's conversation-shaped sibling). `None`
     /// clears back to whatever default the edge derives.
-    pub fn set_conversation_name(
+    pub async fn set_conversation_name(
         &self,
         conversation: MessageId,
         name: Option<&str>,
     ) -> Result<(), Error> {
-        self.state.set_conversation_name(conversation, name)
+        self.state.set_conversation_name(conversation, name).await
     }
 
     /// My local name for a conversation, if set — see
     /// [`Self::set_conversation_name`].
-    pub fn conversation_name(&self, conversation: MessageId) -> Option<String> {
-        self.state.conversation_name(conversation)
+    pub async fn conversation_name(&self, conversation: MessageId) -> Option<String> {
+        self.state.conversation_name(conversation).await
     }
 
     /// Mark a conversation read: the unread baseline becomes everything
     /// currently stored (project 6 S7). The edge calls this when it
     /// renders the conversation — local presentation state, never
     /// transmitted; nothing here is a receipt to anyone.
-    pub fn mark_conversation_read(&self, conversation: MessageId) -> Result<(), Error> {
-        let count = self.state.load_envelopes(conversation)?.len();
-        self.state.set_read_count(conversation, count)
+    pub async fn mark_conversation_read(&self, conversation: MessageId) -> Result<(), Error> {
+        let count = self.state.load_envelopes(conversation).await?.len();
+        self.state.set_read_count(conversation, count).await
     }
 
     /// Display rows for a participant set, deduped per *person* (S2,
@@ -374,9 +378,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// hex. Order follows the input; a cluster's row sits at its first key,
     /// which is also the row's navigation handle (S4: any member key lands
     /// on the person's page).
-    pub fn participant_rows(&self, keys: &[PublicKey]) -> Result<Vec<(PublicKey, String)>, Error> {
-        let persons = self.persons()?;
-        let devices = self.state.recognized_devices();
+    pub async fn participant_rows(
+        &self,
+        keys: &[PublicKey],
+    ) -> Result<Vec<(PublicKey, String)>, Error> {
+        let persons = self.persons().await?;
+        let devices = self.state.recognized_devices().await;
         let mut rows = Vec::new();
         let mut seen_persons: BTreeSet<PersonId> = BTreeSet::new();
         let mut seen_labels: BTreeSet<String> = BTreeSet::new();
@@ -415,9 +422,10 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     }
 
     /// `participant_rows`, labels only — the list and header form.
-    pub fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
+    pub async fn participant_labels(&self, keys: &[PublicKey]) -> Result<Vec<String>, Error> {
         Ok(self
-            .participant_rows(keys)?
+            .participant_rows(keys)
+            .await?
             .into_iter()
             .map(|(_, label)| label)
             .collect())
@@ -426,16 +434,16 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
     /// One conversation's stored messages in the DAG's linearized order.
     /// Bodies are opened per message and never fail the whole history — an
     /// envelope this device cannot open (e.g. sealed before the self-wrap
-    /// convention) surfaces as `Err`, honestly, like `Received` does.
-    pub fn history(&self, conversation: MessageId) -> Result<Vec<HistoryMessage>, Error> {
-        let envelopes = self.state.load_envelopes(conversation)?;
+    /// convention).await surfaces as `Err`, honestly, like `Received` does.
+    pub async fn history(&self, conversation: MessageId) -> Result<Vec<HistoryMessage>, Error> {
+        let envelopes = self.state.load_envelopes(conversation).await?;
         let by_id: BTreeMap<MessageId, &MessageEnvelope> = envelopes
             .iter()
             .map(|envelope| (envelope.id(), envelope))
             .collect();
-        let dag = ClientState::dag_of(&envelopes, conversation)?;
-        let owed = self.state.pending_since();
-        let confirmed = self.state.acks_in(conversation);
+        let dag = crate::state::dag_of(&envelopes, conversation)?;
+        let owed = self.state.pending_since().await;
+        let confirmed = self.state.acks_in(conversation).await;
         let crossed = dag.crossed_in_flight();
         Ok(dag
             .linearize()
@@ -509,11 +517,12 @@ mod tests {
             client
                 .state
                 .store_envelope(conversation, envelope)
+                .await
                 .expect("store");
         }
 
         // When: listing conversations
-        let summaries = client.conversations().expect("list");
+        let summaries = client.conversations().await.expect("list");
 
         // Then: the summary previews the newest message, body opened
         let last = summaries[0].last.as_ref().expect("preview");
@@ -545,17 +554,19 @@ mod tests {
             client
                 .state
                 .store_envelope(conversation, envelope)
+                .await
                 .expect("store");
         }
-        assert_eq!(client.conversations().expect("list")[0].unread, 2);
+        assert_eq!(client.conversations().await.expect("list")[0].unread, 2);
 
         // When: rendered (marked read)
         client
             .mark_conversation_read(conversation)
+            .await
             .expect("mark read");
 
         // Then: nothing unread…
-        assert_eq!(client.conversations().expect("list")[0].unread, 0);
+        assert_eq!(client.conversations().await.expect("list")[0].unread, 0);
 
         // …until the next arrival
         let more = message(
@@ -569,8 +580,9 @@ mod tests {
         client
             .state
             .store_envelope(conversation, &more)
+            .await
             .expect("store");
-        assert_eq!(client.conversations().expect("list")[0].unread, 1);
+        assert_eq!(client.conversations().await.expect("list")[0].unread, 1);
 
         let _ = std::fs::remove_dir_all(temp_root("unread"));
     }
@@ -587,22 +599,28 @@ mod tests {
         client
             .state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
 
         // When: naming it (my lens, local only)
         client
             .set_conversation_name(conversation, Some("besties"))
+            .await
             .expect("name");
 
         // Then: the summary carries the name…
-        let summaries = client.conversations().expect("list");
+        let summaries = client.conversations().await.expect("list");
         assert_eq!(summaries[0].local_name.as_deref(), Some("besties"));
 
         // …and clearing falls back to none
         client
             .set_conversation_name(conversation, None)
+            .await
             .expect("clear");
-        assert_eq!(client.conversations().expect("list")[0].local_name, None);
+        assert_eq!(
+            client.conversations().await.expect("list")[0].local_name,
+            None
+        );
 
         let _ = std::fs::remove_dir_all(temp_root("convname"));
     }
@@ -632,13 +650,14 @@ mod tests {
             client
                 .state
                 .store_envelope(conversation, envelope)
+                .await
                 .expect("store");
         }
 
         // Then: the sole head excludes C — membership shrank (a full-
         // history union could never)
         assert_eq!(
-            client.membership(conversation).expect("membership"),
+            client.membership(conversation).await.expect("membership"),
             BTreeSet::from([pa, pb])
         );
 
@@ -647,11 +666,12 @@ mod tests {
         client
             .state
             .store_envelope(conversation, &fork)
+            .await
             .expect("store fork");
 
         // Then: heads union — honest over-inclusion until the fork merges
         assert_eq!(
-            client.membership(conversation).expect("membership"),
+            client.membership(conversation).await.expect("membership"),
             BTreeSet::from([pa, pb, pc])
         );
 
@@ -682,11 +702,12 @@ mod tests {
             client
                 .state
                 .store_envelope(conversation, envelope)
+                .await
                 .expect("store");
         }
 
         // When
-        let history = client.history(conversation).expect("history");
+        let history = client.history(conversation).await.expect("history");
 
         // Then: deltas derive per message — genesis has none, the add
         // joined C, the stop-include left C
@@ -764,11 +785,12 @@ mod tests {
         client
             .state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
 
         // Then: it is a request, not a conversation — presence in
         // `recipients` is attacker-controlled, authorship is not.
-        let inbox = triage(client.conversations().expect("conversations"));
+        let inbox = triage(client.conversations().await.expect("conversations"));
         assert!(inbox.conversations.is_empty());
         assert_eq!(inbox.requests.len(), 1);
 
@@ -785,15 +807,16 @@ mod tests {
                 ),
                 Some("stranger".to_string()),
             )
+            .await
             .expect("add");
 
         // Then: it promotes with nothing migrated and nothing lost —
         // triage is at presentation only (groups.md §6).
-        let inbox = triage(client.conversations().expect("conversations"));
+        let inbox = triage(client.conversations().await.expect("conversations"));
         assert_eq!(inbox.conversations.len(), 1);
         assert!(inbox.requests.is_empty());
         assert_eq!(
-            client.history(conversation).expect("history").len(),
+            client.history(conversation).await.expect("history").len(),
             1,
             "the message was never withheld from storage"
         );
@@ -828,12 +851,13 @@ mod tests {
         // When
         let staged = a
             .stage_send(&[contact], b"into the void".to_vec(), vec![])
+            .await
             .expect("stage");
         let _ = a.deliver(&staged).await; // every path fails; queued, not lost
 
         // Then: no confirmation is claimed, and `owed_since_ms` — not the
         // empty confirmation — carries the honest "we still owe a relay".
-        let history = a.history(staged.conversation).expect("history");
+        let history = a.history(staged.conversation).await.expect("history");
         assert!(
             history[0].confirmed.is_empty(),
             "nothing acked, so nothing is claimed"
@@ -867,10 +891,12 @@ mod tests {
         client
             .state
             .store_envelope(conversation, &genesis)
+            .await
             .expect("store");
         client
             .state
             .add_acks(conversation, genesis.id(), &BTreeSet::from([first]))
+            .await
             .expect("first ack");
 
         // When: a later delivery pass reaches the *other* recipient, and
@@ -878,16 +904,18 @@ mod tests {
         client
             .state
             .add_acks(conversation, genesis.id(), &BTreeSet::from([second]))
+            .await
             .expect("second ack");
         client
             .state
             .add_acks(conversation, genesis.id(), &BTreeSet::new())
+            .await
             .expect("empty pass");
 
         // Then: both are held — confirmations accumulate, and a pass that
         // earned nothing takes nothing away. (Stored key-sorted, so compare
         // as a set: the order is the store's, not the acks' arrival order.)
-        let held = client.state.acks_in(conversation);
+        let held = client.state.acks_in(conversation).await;
         assert_eq!(
             held.get(&genesis.id())
                 .map(|keys| keys.iter().copied().collect::<BTreeSet<_>>()),
@@ -905,23 +933,26 @@ mod tests {
         // only way in, and the test shuttles it visibly). All three run real
         // handlers over the loopback.
         let wire = Loopback::new();
-        let (a, a_net, _a_clock) = loop_client("groups", "alice", &wire);
-        let (b, b_net, _b_clock) = loop_client("groups", "bob", &wire);
-        let (c, c_net, _c_clock) = loop_client("groups", "carol", &wire);
+        let (a, a_net, _a_clock) = loop_client("groups", "alice", &wire).await;
+        let (b, b_net, _b_clock) = loop_client("groups", "bob", &wire).await;
+        let (c, c_net, _c_clock) = loop_client("groups", "carol", &wire).await;
         let relay_b = DeviceKey::from_seed([101; 32]).public();
         let relay_c = DeviceKey::from_seed([102; 32]).public();
         let relay_a = DeviceKey::from_seed([103; 32]).public();
         a.add_contact(&routed_record(b.public_key(), &relay_b), Some("Bob".into()))
+            .await
             .expect("alice adds bob");
         a.add_contact(
             &routed_record(c.public_key(), &relay_c),
             Some("Carol".into()),
         )
+        .await
         .expect("alice adds carol");
         b.add_contact(
             &routed_record(a.public_key(), &relay_a),
             Some("Alice".into()),
         )
+        .await
         .expect("bob adds alice");
 
         // When: a 1:1 becomes a group — alice replies with carol added.
@@ -929,7 +960,7 @@ mod tests {
         // stranger's push, so her copy goes through her mailbox.
         let first = a
             .send(
-                &[a.resolve_contact("Bob").expect("resolve")],
+                &[a.resolve_contact("Bob").await.expect("resolve")],
                 b"hi bob".to_vec(),
                 vec![],
             )
@@ -938,15 +969,19 @@ mod tests {
         let conv = first.conversation;
         let rc_welcome = a_net.dial.connect(&relay_c);
         rc_welcome.reply(deposited_frame());
-        let mut contacts = a.reply_contacts(conv).expect("reply contacts").contacts;
-        contacts.push(a.resolve_contact("Carol").expect("resolve"));
+        let mut contacts = a
+            .reply_contacts(conv)
+            .await
+            .expect("reply contacts")
+            .contacts;
+        contacts.push(a.resolve_contact("Carol").await.expect("resolve"));
         a.send_in(conv, &contacts, b"welcome carol".to_vec(), vec![])
             .await
             .expect("grow the group");
 
         // Then: bob has it (direct), carol drains it, and the derived join
         // delta names carol
-        let bob_history = b.history(conv).expect("bob history");
+        let bob_history = b.history(conv).await.expect("bob history");
         assert_eq!(bob_history.len(), 2);
         assert_eq!(
             bob_history[1].body.as_deref(),
@@ -966,8 +1001,8 @@ mod tests {
         rc_thread.reply(deposited_frame());
         a.send(
             &[
-                a.resolve_contact("Bob").expect("resolve"),
-                a.resolve_contact("Carol").expect("resolve"),
+                a.resolve_contact("Bob").await.expect("resolve"),
+                a.resolve_contact("Carol").await.expect("resolve"),
             ],
             b"threading check".to_vec(),
             vec![],
@@ -976,15 +1011,15 @@ mod tests {
         .expect("send by name");
 
         // Then: still exactly one conversation on both ends
-        let a_convs = a.conversations().expect("alice conversations");
+        let a_convs = a.conversations().await.expect("alice conversations");
         assert_eq!((a_convs.len(), a_convs[0].id), (1, conv));
-        let b_convs = b.conversations().expect("bob conversations");
+        let b_convs = b.conversations().await.expect("bob conversations");
         assert_eq!((b_convs.len(), b_convs[0].id), (1, conv));
 
         // When: bob replies with no record for carol — she has no route yet
         // (membership holds; nothing is deposited anywhere: alice acks
         // directly and an unscripted dial to carol's relay would panic)
-        let pre_route = b.reply_contacts(conv).expect("bob reply contacts");
+        let pre_route = b.reply_contacts(conv).await.expect("bob reply contacts");
         assert_eq!(pre_route.unknown, vec![c.public_key()]);
         b.send_in(
             conv,
@@ -1004,7 +1039,7 @@ mod tests {
         // learned route — address, don't trust (groups.md §2)
         let rc_learned = b_net.dial.connect(&relay_c);
         rc_learned.reply(deposited_frame());
-        let via_learned = b.reply_contacts(conv).expect("bob reply contacts");
+        let via_learned = b.reply_contacts(conv).await.expect("bob reply contacts");
         assert!(via_learned.unknown.is_empty(), "carol resolves now");
         b.send_in(
             conv,
@@ -1028,6 +1063,7 @@ mod tests {
         assert!(
             !b.state
                 .contacts()
+                .await
                 .expect("bob contacts")
                 .iter()
                 .any(|(_, record)| record.keys.contains(&c.public_key())),
@@ -1038,13 +1074,13 @@ mod tests {
         // (the {alice,bob} mapping predates the group) and its head shrinks
         // membership, so the next reply-all no longer reaches carol
         a.send(
-            &[a.resolve_contact("Bob").expect("resolve")],
+            &[a.resolve_contact("Bob").await.expect("resolve")],
             b"just us".to_vec(),
             vec![],
         )
         .await
         .expect("stop-include send");
-        let shrunk = a.reply_contacts(conv).expect("alice reply contacts");
+        let shrunk = a.reply_contacts(conv).await.expect("alice reply contacts");
         a.send_in(
             conv,
             &shrunk.contacts,
@@ -1056,16 +1092,17 @@ mod tests {
 
         // Then: membership shrank through the DAG; bob got both, carol got
         // neither (her relay took no new deposit — unscripted dials panic)
-        let members = a.membership(conv).expect("membership");
+        let members = a.membership(conv).await.expect("membership");
         assert_eq!(
             members,
             BTreeSet::from([a.public_key(), b.public_key()]),
             "stop-include must shrink membership"
         );
-        let a_convs = a.conversations().expect("alice conversations");
+        let a_convs = a.conversations().await.expect("alice conversations");
         assert_eq!((a_convs.len(), a_convs[0].id), (1, conv), "no fork");
         let bob_bodies: Vec<_> = b
             .history(conv)
+            .await
             .expect("bob history")
             .into_iter()
             .filter_map(|message| message.body.ok())
@@ -1093,11 +1130,13 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
 
         // When
         let labels = a
             .participant_labels(&[phone.public(), laptop.public(), unknown])
+            .await
             .expect("labels");
 
         // Then: both device keys collapse to one petname; the unknown key
@@ -1126,11 +1165,13 @@ mod tests {
             ),
             Some("bob".to_string()),
         )
+        .await
         .expect("add bob");
 
         // When: the laptop key comes first in the participant order
         let rows = a
             .participant_rows(&[laptop.public(), phone.public()])
+            .await
             .expect("rows");
 
         // Then: one row, keyed by the first key seen — the row's tap
@@ -1153,16 +1194,19 @@ mod tests {
             0,
             mailbox_only("ll@203.0.113.5:5"),
         ))
+        .await
         .expect("recognize");
 
         // When / Then: the device labels by its self-claim, and the own
         // cluster covers both keys (what edges filter "others" with)
         assert_eq!(
-            a.participant_labels(&[laptop.public()]).expect("labels"),
+            a.participant_labels(&[laptop.public()])
+                .await
+                .expect("labels"),
             vec!["mårten laptop".to_string()]
         );
-        assert!(a.own_keys().contains(&laptop.public()));
-        assert!(a.own_keys().contains(&a.public_key()));
+        assert!(a.own_keys().await.contains(&laptop.public()));
+        assert!(a.own_keys().await.contains(&a.public_key()));
 
         let _ = std::fs::remove_dir_all(temp_root("labels-device"));
     }
@@ -1173,7 +1217,7 @@ mod tests {
         // each deposit is taken by a scripted relay, and the copies cross by
         // direct state transfer (the crossing is what the flag is about; the
         // dial strings' endpoint ids double as the recipient keys)
-        let open = |name: &'static str| {
+        let open = async |name: &'static str| {
             let key = temp_key("crossed", name);
             keystore::create(&key).expect("key");
             let net = TestTransport::new();
@@ -1184,11 +1228,12 @@ mod tests {
                 TestClock::new(),
                 SystemClock,
                 net.clone(),
-            );
+            )
+            .await;
             (client, net)
         };
-        let (alice, a_net) = open("alice");
-        let (bob, b_net) = open("bob");
+        let (alice, a_net) = open("alice").await;
+        let (bob, b_net) = open("bob").await;
         let contact = |key: PublicKey| {
             vec![Contact {
                 keys: vec![key],
@@ -1209,16 +1254,17 @@ mod tests {
             .send(&contact(bob.public_key()), b"genesis".to_vec(), vec![])
             .await
             .expect("send");
-        let conversation = alice.state.conversations()[0];
+        let conversation = alice.state.conversations().await[0];
         type LoopClient = Client<TestClock, SystemClock, TestTransport>;
-        let copy = |from: &LoopClient, to: &LoopClient| {
-            for envelope in from.state.load_envelopes(conversation).expect("load") {
+        let copy = async |from: &LoopClient, to: &LoopClient| {
+            for envelope in from.state.load_envelopes(conversation).await.expect("load") {
                 to.state
                     .store_envelope(conversation, &envelope)
+                    .await
                     .expect("copy");
             }
         };
-        copy(&alice, &bob);
+        copy(&alice, &bob).await;
 
         // When: concurrent replies, then cross-delivery
         let _ = alice
@@ -1237,13 +1283,13 @@ mod tests {
                 vec![],
             )
             .await;
-        copy(&alice, &bob);
-        copy(&bob, &alice);
+        copy(&alice, &bob).await;
+        copy(&bob, &alice).await;
 
         // Then: identical linear order on both sides — and both mark the
         // linearized-second of the concurrent pair, nothing else
-        let history_a = alice.history(conversation).expect("history");
-        let history_b = bob.history(conversation).expect("history");
+        let history_a = alice.history(conversation).await.expect("history");
+        let history_b = bob.history(conversation).await.expect("history");
         let order_a: Vec<MessageId> = history_a.iter().map(|m| m.id).collect();
         let order_b: Vec<MessageId> = history_b.iter().map(|m| m.id).collect();
         assert_eq!(order_a, order_b, "the linear default is unchanged");
@@ -1264,7 +1310,7 @@ mod tests {
                 vec![],
             )
             .await;
-        let history_a = alice.history(conversation).expect("history");
+        let history_a = alice.history(conversation).await.expect("history");
         assert!(history_a[3].merged && !history_a[3].crossed);
 
         let _ = std::fs::remove_dir_all(temp_root("crossed"));

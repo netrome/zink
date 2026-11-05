@@ -64,15 +64,15 @@ impl BlobGate {
 
     pub(crate) async fn handle<A: Admit>(&self, event: BlobEvent<A>) {
         match event {
-            BlobEvent::Connected { peer, admit } => admit.admit(self.admits(peer)).await,
-            BlobEvent::Pushed { peer, blob } => self.take(peer, &blob),
+            BlobEvent::Connected { peer, admit } => admit.admit(self.admits(peer).await).await,
+            BlobEvent::Pushed { peer, blob } => self.take(peer, &blob).await,
             BlobEvent::Closed { peer } => self.closed(peer),
         }
     }
 
     /// The admission decision, counted when positive.
-    fn admits(&self, peer: PublicKey) -> bool {
-        if !crate::sync::serves(&self.state, self.me, peer) {
+    async fn admits(&self, peer: PublicKey) -> bool {
+        if !crate::sync::serves(&self.state, self.me, peer).await {
             tracing::debug!("declining a blob push from a non-contact");
             return false;
         }
@@ -86,7 +86,7 @@ impl BlobGate {
         true
     }
 
-    fn take(&self, peer: PublicKey, blob: &EncryptedBlob) {
+    async fn take(&self, peer: PublicKey, blob: &EncryptedBlob) {
         if blob.bytes.len() > self.limits.max_blob_bytes {
             tracing::warn!(
                 peer = %crate::hex::encode(&peer.0),
@@ -99,7 +99,7 @@ impl BlobGate {
             tracing::warn!("dropping a pushed blob whose bytes do not hash as claimed");
             return;
         }
-        if let Err(error) = self.state.save_blob(&blob.hash, &blob.bytes) {
+        if let Err(error) = self.state.save_blob(&blob.hash, &blob.bytes).await {
             tracing::warn!(%error, "could not cache a pushed blob");
         }
     }
@@ -238,13 +238,14 @@ mod tests {
         (gate, state, me, TestTransport::new())
     }
 
-    fn contact(state: &ClientState, seed: u8) -> PublicKey {
+    async fn contact(state: &ClientState, seed: u8) -> PublicKey {
         let key = DeviceKey::from_seed([seed; 32]).public();
         state
             .save_contact(
                 &format!("friend-{seed}"),
                 &ContactRecord::new(vec![key], vec![], vec![]),
             )
+            .await
             .expect("save contact");
         key
     }
@@ -281,7 +282,7 @@ mod tests {
     async fn gate__should_admit_contacts_and_self_and_decline_strangers() {
         // Given
         let (gate, state, me, net) = fresh("admit", BlobLimits::default());
-        let friend = contact(&state, 2);
+        let friend = contact(&state, 2).await;
         let stranger = DeviceKey::from_seed([3; 32]).public();
 
         // When / Then: the serving gate, verbatim
@@ -301,7 +302,7 @@ mod tests {
             ..BlobLimits::default()
         };
         let (gate, state, _me, net) = fresh("cap", limits);
-        let friend = contact(&state, 4);
+        let friend = contact(&state, 4).await;
 
         // When: a second knock while the first is open
         assert!(knock(&net, &gate, friend).await);
@@ -323,7 +324,7 @@ mod tests {
             ..BlobLimits::default()
         };
         let (gate, state, _me, net) = fresh("size", limits);
-        let friend = contact(&state, 5);
+        let friend = contact(&state, 5).await;
         assert!(knock(&net, &gate, friend).await);
 
         // When
@@ -331,15 +332,18 @@ mod tests {
         let large = push(&net, &gate, friend, vec![8; 1025]).await;
 
         // Then: the cache took exactly the one under the cap
-        assert_eq!(state.load_blob(&small), Some(vec![7; 1024]));
-        assert!(state.load_blob(&large).is_none(), "over the cap: dropped");
+        assert_eq!(state.load_blob(&small).await, Some(vec![7; 1024]));
+        assert!(
+            state.load_blob(&large).await.is_none(),
+            "over the cap: dropped"
+        );
     }
 
     #[tokio::test]
     async fn gate__should_drop_a_pushed_blob_whose_bytes_do_not_hash_as_claimed() {
         // Given: an admitted peer whose transport "verified" a lie
         let (gate, state, _me, net) = fresh("hash", BlobLimits::default());
-        let friend = contact(&state, 6);
+        let friend = contact(&state, 6).await;
         assert!(knock(&net, &gate, friend).await);
         let claimed = BlobHash([9; 32]);
 
@@ -355,6 +359,6 @@ mod tests {
         gate.handle(event).await;
 
         // Then: verify before trusting — nothing under the claimed hash
-        assert!(state.load_blob(&claimed).is_none());
+        assert!(state.load_blob(&claimed).await.is_none());
     }
 }

@@ -72,10 +72,25 @@ across it — the edits are mechanical.
   by `store_contract!` against both implementations. Nothing calls the
   port yet — the module declarations carry an
   `expect(dead_code)` that S2 must remove.
-- **S2 · `ClientState` over the port.** `ClientState<S: Store = FsStore>`,
-  every method async, every `Client` call site `.await`s. A golden-layout
-  test pins the fs adapter's on-disk paths and bytes against today's.
-  The client test kit moves onto the memory double.
+- **S2a · `ClientState` over the port — done (2026-11-05).**
+  `ClientState<S = FsStore>` holds the store (bound on the impls); every
+  method is async and builds keys from layout strings
+  (`Key::parse("contacts/<hex>.record")`); `dag_of` became a free fn. The
+  async ripple reached every `Client` read path and both edges: the CLI,
+  and the Tauri app, whose arrival notifications (now store reads) run
+  on a spawned task from the sync drain / direct-delivery callbacks.
+  `Client`, `BlobGate`, and the sync server stay on `FsStore` — the store
+  parameter arrives with S2b, which needs it. A golden test runs every
+  writer once and pins all 35 resulting paths and their BLAKE3s, generated
+  from the pre-port code: the layout is byte-identical, no migration.
+  Deliberate deltas: `load_envelopes` on a conversation with nothing
+  stored errors (was: errors only when the directory is missing);
+  `save_relay_override` writes atomically and creates its parent (was a
+  bare `std::fs::write`); storage error messages now name op + key.
+- **S2b · The test kit onto the double.** `Client` gains the fifth
+  parameter (`S = FsStore`, bound on the impls); the client test kit and
+  `BlobGate`/sync tests move from temp dirs onto `TestStore`, leaving the
+  temp-dir tier to the fs adapter's own suite and the golden test.
 - **S3 · Crash-ordering tests.** Fault controls on the double (fail the
   n-th put, stop persisting after a point) and the tests the comments
   promise: `replace_contact`'s write-then-drop, contact-add + person row,
@@ -88,6 +103,6 @@ across it — the edits are mechanical.
 ## Follow-ups
 
 - `note_first_seen` reads the real clock inside `state.rs`
-  (`system_clock::now_ms()`) — an ADR 0004 audit-line violation that S2
-  surfaces; fix there by passing wall time in from `Client`'s
-  `WallClock`.
+  (`system_clock::now_ms()`) — an ADR 0004 audit-line violation, still
+  open after S2a; fix in S2b by passing wall time in from `Client`'s
+  `WallClock` (the sync server's `note_seen` stamp has the same shape).

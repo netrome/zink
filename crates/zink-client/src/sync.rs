@@ -82,8 +82,8 @@ impl SyncHandler {
     /// extends to recognized own devices (D3b, multi-device.md §6) — and
     /// only to the *vouched* key of each: extra keys a device record lists
     /// never widen the gate. Local state only; nothing wire-borne.
-    fn serves(&self, caller: PublicKey) -> bool {
-        serves(&self.state, self.device.public(), caller)
+    async fn serves(&self, caller: PublicKey) -> bool {
+        serves(&self.state, self.device.public(), caller).await
     }
 
     /// The record served for `WhoIs { subject }` (who-is-this.md §4): the
@@ -95,13 +95,14 @@ impl SyncHandler {
     /// stored record, as stored. Learned records (D1b) are never re-served
     /// — hop limit 1 is structural — and a contact-store read error fails
     /// closed, like the gate.
-    fn who_is(&self, subject: PublicKey) -> Option<ContactRecord> {
+    async fn who_is(&self, subject: PublicKey) -> Option<ContactRecord> {
         if subject == self.device.public() {
-            return crate::client::build_own_record(&self.device, &self.state);
+            return crate::client::build_own_record(&self.device, &self.state).await;
         }
         if let Some((_, record)) = self
             .state
             .recognized_devices()
+            .await
             .into_iter()
             .find(|(key, _)| *key == subject)
         {
@@ -109,6 +110,7 @@ impl SyncHandler {
         }
         self.state
             .contacts()
+            .await
             .ok()?
             .into_iter()
             .find(|(_, record)| record.keys.contains(&subject))
@@ -122,24 +124,25 @@ impl SyncHandler {
     /// narrowest until the recovery flows need more). Per id, capped: held
     /// envelope + a wrap this device can open → a fresh wrap sealed to the
     /// caller's connection key; misses are simply absent.
-    fn get_keys(&self, caller: PublicKey, ids: &[MessageId]) -> SyncResult {
+    async fn get_keys(&self, caller: PublicKey, ids: &[MessageId]) -> SyncResult {
         let own_device = self
             .state
             .recognized_devices()
+            .await
             .iter()
             .any(|(key, _)| *key == caller);
         if !own_device {
             return SyncResult::NotHeld;
         }
-        let wraps = ids
-            .iter()
-            .take(MAX_GET_KEYS_IDS)
-            .filter_map(|&id| {
-                let envelope = self.state.find_envelope(id)?;
-                let wrap = envelope.rewrap(&self.device, caller, &mut OsRng).ok()?;
-                Some((id, wrap))
-            })
-            .collect();
+        let mut wraps = Vec::new();
+        for &id in ids.iter().take(MAX_GET_KEYS_IDS) {
+            let Some(envelope) = self.state.find_envelope(id).await else {
+                continue;
+            };
+            if let Ok(wrap) = envelope.rewrap(&self.device, caller, &mut OsRng) {
+                wraps.push((id, wrap));
+            }
+        }
         SyncResult::Wraps { wraps }
     }
 
@@ -158,7 +161,7 @@ impl SyncHandler {
     /// would lose the message with no fallback copy. Every decline is a bare
     /// `NotHeld` — the sender only needs "not stored", and a peer's reasons
     /// are nobody else's business (SPEC §5.2).
-    fn accept_delivery(&self, serves: bool, envelope: MessageEnvelope) -> SyncResult {
+    async fn accept_delivery(&self, serves: bool, envelope: MessageEnvelope) -> SyncResult {
         if !serves {
             // Gate as for history (D0c): a stranger's push falls back to
             // their mailbox deposit, where the relay's caps (C0) and the
@@ -185,7 +188,7 @@ impl SyncHandler {
         }
         // Idempotent: a re-delivery of something already held rewrites the
         // same bytes and acks again, exactly like a repeated deposit.
-        if let Err(error) = crate::client::remember(&self.state, &envelope) {
+        if let Err(error) = crate::client::remember(&self.state, &envelope).await {
             tracing::warn!(%error, "direct delivery failed to store; declining");
             return SyncResult::NotHeld;
         }
@@ -209,7 +212,7 @@ impl SyncHandler {
     /// it per request, so a peer added as a contact is served immediately.
     async fn handle<R: Respond>(&self, inbound: Inbound<R>) {
         let caller = inbound.peer;
-        let serves = self.serves(caller);
+        let serves = self.serves(caller).await;
         if !serves {
             tracing::debug!("sync request from a non-contact; serving nothing");
         } else {
@@ -221,37 +224,50 @@ impl SyncHandler {
         }
         let request = SyncRequest::try_from_bytes(&inbound.frame).ok();
         let result = match request.map(|r| r.op) {
-            Some(SyncOp::Get { id }) => match serves.then(|| self.state.find_envelope(id)) {
-                Some(Some(envelope)) => SyncResult::Envelope {
-                    envelope: Box::new(envelope),
-                },
-                _ => SyncResult::NotHeld,
-            },
+            Some(SyncOp::Get { id }) => {
+                let held = match serves {
+                    true => self.state.find_envelope(id).await,
+                    false => None,
+                };
+                match held {
+                    Some(envelope) => SyncResult::Envelope {
+                        envelope: Box::new(envelope),
+                    },
+                    None => SyncResult::NotHeld,
+                }
+            }
             Some(SyncOp::GetSuccessors { id }) => SyncResult::Successors {
                 ids: if serves {
-                    self.state.successors(id)
+                    self.state.successors(id).await
                 } else {
                     Vec::new()
                 },
             },
-            Some(SyncOp::WhoIs { key }) => match serves.then(|| self.who_is(key)).flatten() {
-                Some(record) => SyncResult::Known {
-                    record: Box::new(record),
-                    // This device's OWN issued claims about the
-                    // subject (D4a) — the name vouch and the avatar
-                    // share (S5) — never anything learned or
-                    // relayed: hop limit 1 is structural.
-                    endorsements: self
-                        .state
-                        .vouch_for(&key)
-                        .into_iter()
-                        .chain(self.state.avatar_share_for(&key))
-                        .collect(),
-                },
-                None => SyncResult::NotHeld,
-            },
-            Some(SyncOp::GetKeys { ids }) => self.get_keys(caller, &ids),
-            Some(SyncOp::Deliver { envelope }) => self.accept_delivery(serves, *envelope),
+            Some(SyncOp::WhoIs { key }) => {
+                let record = match serves {
+                    true => self.who_is(key).await,
+                    false => None,
+                };
+                match record {
+                    Some(record) => SyncResult::Known {
+                        record: Box::new(record),
+                        // This device's OWN issued claims about the
+                        // subject (D4a) — the name vouch and the avatar
+                        // share (S5) — never anything learned or
+                        // relayed: hop limit 1 is structural.
+                        endorsements: self
+                            .state
+                            .vouch_for(&key)
+                            .await
+                            .into_iter()
+                            .chain(self.state.avatar_share_for(&key).await)
+                            .collect(),
+                    },
+                    None => SyncResult::NotHeld,
+                }
+            }
+            Some(SyncOp::GetKeys { ids }) => self.get_keys(caller, &ids).await,
+            Some(SyncOp::Deliver { envelope }) => self.accept_delivery(serves, *envelope).await,
             None => SyncResult::Error {
                 code: SyncErrorCode::Malformed,
             },
@@ -269,14 +285,16 @@ impl SyncHandler {
 /// The serving gate (D0c), shared with the blob side (project 10): us, a
 /// recognized own device's vouched key, or any key of a user-added contact.
 /// A contact-store read error fails closed.
-pub(crate) fn serves(state: &ClientState, me: PublicKey, caller: PublicKey) -> bool {
+pub(crate) async fn serves(state: &ClientState, me: PublicKey, caller: PublicKey) -> bool {
     caller == me
         || state
             .recognized_devices()
+            .await
             .iter()
             .any(|(key, _)| *key == caller)
         || state
             .contacts()
+            .await
             .unwrap_or_default()
             .iter()
             .any(|(_, record)| record.keys.contains(&caller))
