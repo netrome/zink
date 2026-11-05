@@ -622,10 +622,21 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint> Client<C, W, N, R> {
                 }
             };
             for blob in blobs {
-                if let Err(error) = connection.push(blob).await {
-                    tracing::debug!(%error, "blobs direct: recipient did not take the blobs");
-                    self.reach.note_seen(&key, now);
-                    return None;
+                let deadline = blobs::push_deadline(blob.bytes.len(), self.config.connect_timeout);
+                match self.clock.timeout(deadline, connection.push(blob)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "blobs direct: recipient did not take the blobs");
+                        self.reach.note_seen(&key, now);
+                        return None;
+                    }
+                    // Admitted, then stalled: the relay cache carries it.
+                    // Reached all the same — no cooldown.
+                    Err(_) => {
+                        tracing::debug!("blobs direct: transfer stalled past its budget");
+                        self.reach.note_seen(&key, now);
+                        return None;
+                    }
                 }
             }
             self.reach.note_seen(&key, now);
@@ -1259,6 +1270,51 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(temp_root("blobs-declined"));
+    }
+
+    #[tokio::test]
+    async fn send__should_fall_back_to_the_relay_cache_when_the_recipient_stalls_the_push() {
+        // Given: B trusts A, but B's blob side admits the connection and
+        // then never completes a transfer (a phone that slept mid-push);
+        // B's relay answers on both ALPNs
+        let wire = Loopback::new();
+        let relay_b = DeviceKey::from_seed([142; 32]).public();
+        let (a, a_net, clock, b) = wired_pair("blobs-stall", &wire, &relay_b, true, true).await;
+        a_net.blobs.stall(&b.public_key());
+        a_net.blobs.cache(&relay_b);
+        a_net.dial.connect(&relay_b).reply(deposited_frame());
+
+        // When: the send, with the clock run past the stalled push's budget
+        let to = [a.resolve_contact("b").expect("resolve")];
+        let (result, ()) = tokio::join!(a.send(&to, b"look at this".to_vec(), an_image()), async {
+            clock.wait_for_sleepers(1).await;
+            clock.advance(Duration::from_secs(3600));
+        });
+
+        // Then: the send returned; the relay cache carries the blobs,
+        // before the deposit and before the handoff — which still lands
+        // directly, since a peer that answered is reachable
+        let receipt = result.expect("send");
+        assert_eq!(receipt.direct_recipients, 1, "the envelope went direct");
+        assert_eq!(receipt.skipped_relays, 0, "but the relay carried the blobs");
+        assert_eq!(receipt.pending_relays, 0);
+        assert_eq!(a_net.blobs.held(&relay_b).len(), 2);
+        let events = a_net.log.events();
+        let last_relay_push = events
+            .iter()
+            .rposition(|event| matches!(event, WireEvent::Pushed { to, .. } if *to == relay_b))
+            .expect("relay pushes");
+        let handoff = first_reference_to(&events, b.public_key()).expect("the handoff");
+        let deposit = first_reference_to(&events, relay_b).expect("the deposit");
+        assert!(
+            last_relay_push < handoff && last_relay_push < deposit,
+            "{events:?}"
+        );
+        for hash in a_net.blobs.held(&relay_b) {
+            assert!(b.state.load_blob(&hash).is_none(), "nothing landed on B");
+        }
+
+        let _ = std::fs::remove_dir_all(temp_root("blobs-stall"));
     }
 
     #[tokio::test]

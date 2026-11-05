@@ -138,13 +138,22 @@ its blobs are fetchable there.**
   touched it when both peers were online; and the desktop/Android shells
   rebuilt (no app-layer change in phase B, but `ClientConfig` grew).
 
+- **S8 · A deadline over every transfer — done (2026-11-05).** The port
+  already said "may not assume bounded time"; the callers never raced it.
+  `blobs::push_deadline` = `connect_timeout` + the blob's bytes at a
+  32 KiB/s floor, and both `push_blobs` (relay caches, avatar pushes, the
+  outbox flush) and `push_blobs_direct` race each push on the clock. A
+  relay-path timeout is an error (owed, the flush re-pushes); a peer-path
+  timeout drops that recipient from "took the blobs" (its relay cache
+  carries them) with no cooldown — it answered. `TestBlobs::stall` pins
+  both: the bare `push_blobs` error, and a send whose stalled peer push
+  falls back to the relay cache with the handoff still direct.
+
 ## Follow-ups
 
 - The unreferenced-blob sweep (above).
-- `PushBlob::push` runs under no clock deadline — on the relay path since
-  C3, now on the peer path too. A peer that admits and then stalls holds
-  the send. The connect is bounded; the transfer is not. Worth a
-  domain-side `clock.timeout` sized to the blob, in a small slice.
+- *(Resolved as S8.)* `PushBlob::push` ran under no clock deadline — on
+  the relay path since C3, and on the peer path too.
 - The inbound store's GC interval is iroh-blobs' own timer inside the
   adapter (as the relay cache's is) — the one timer ADR 0004 tolerates,
   but note it.

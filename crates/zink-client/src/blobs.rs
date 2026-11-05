@@ -125,7 +125,29 @@ pub(crate) async fn serve_pushes<A: AcceptBlobs>(accept: A, gate: BlobGate) {
     }
 }
 
-/// Push each encrypted blob to one relay's cache, confirming every transfer.
+/// The slowest transfer still worth waiting for. A push budget is the
+/// connect deadline plus the blob's bytes at this floor rate — generous,
+/// because a false timeout costs a re-push (relay path: the entry stays
+/// owed, the flush re-pushes, idempotent by hash) or a relay-cache
+/// fallback (peer path), while no deadline at all hangs the send on a
+/// remote that admitted the push and then stalled.
+const MIN_PUSH_BYTES_PER_SEC: u64 = 32 * 1024;
+
+/// How long one blob's transfer may take: the one wait in the send path
+/// that had no clock over it (project 10 S8). Derived from
+/// `connect_timeout`, so an edge that tightens one tightens both.
+pub(crate) fn push_deadline(
+    bytes: usize,
+    connect_timeout: std::time::Duration,
+) -> std::time::Duration {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    connect_timeout.saturating_add(std::time::Duration::from_secs(
+        bytes / MIN_PUSH_BYTES_PER_SEC,
+    ))
+}
+
+/// Push each encrypted blob to one relay's cache, confirming every transfer
+/// — each under its own `push_deadline`, raced on the caller's clock.
 pub(crate) async fn push_blobs<B: DialBlobs>(
     net: &B,
     relay: &str,
@@ -135,9 +157,13 @@ pub(crate) async fn push_blobs<B: DialBlobs>(
 ) -> Result<(), Error> {
     let connection = net::connect_blobs(net, relay, timeout, clock).await?;
     for blob in blobs {
-        connection
-            .push(blob)
+        clock
+            .timeout(
+                push_deadline(blob.bytes.len(), timeout),
+                connection.push(blob),
+            )
             .await
+            .map_err(|_| Error::Transport(format!("blob to {relay}: transfer timed out")))?
             .map_err(|e| Error::Transport(format!("blob to {relay}: {e}")))?;
     }
     Ok(())
@@ -165,8 +191,42 @@ pub(crate) async fn fetch_encrypted<B: DialBlobs>(
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use crate::ports::clock::TestClock;
     use crate::ports::transport::{AcceptBlobs, TestTransport};
     use zink_protocol::{ContactRecord, DeviceKey};
+
+    #[tokio::test]
+    async fn push_blobs__should_give_up_on_a_transfer_stalled_past_its_budget() {
+        // Given: a cache that admits the connection and then never
+        // completes the transfer — the one wait no clock covered
+        let relay = DeviceKey::from_seed([42; 32]).public();
+        let spec = format!("{}@203.0.113.1:1", crate::hex::encode(&relay.0));
+        let net = TestTransport::new();
+        net.blobs.stall(&relay);
+        let clock = TestClock::new();
+        let connect = std::time::Duration::from_secs(10);
+        let blob = EncryptedBlob {
+            hash: BlobHash([1; 32]),
+            bytes: vec![0; 64 * 1024],
+        };
+
+        // When: the push, with the clock run past the blob's budget
+        let (result, ()) = tokio::join!(
+            push_blobs(&net, &spec, std::slice::from_ref(&blob), connect, &clock),
+            async {
+                clock.wait_for_sleepers(1).await;
+                clock.advance(push_deadline(blob.bytes.len(), connect));
+            }
+        );
+
+        // Then: an error, not a hang — the relay path's "owed, retry later"
+        assert!(matches!(result, Err(Error::Transport(ref e)) if e.contains("timed out")));
+        assert_eq!(
+            push_deadline(blob.bytes.len(), connect),
+            connect + std::time::Duration::from_secs(2),
+            "64 KiB at the 32 KiB/s floor"
+        );
+    }
 
     fn fresh(test: &str, limits: BlobLimits) -> (BlobGate, ClientState, DeviceKey, TestTransport) {
         let root = std::env::temp_dir().join(format!("zink-test-gate-{test}"));

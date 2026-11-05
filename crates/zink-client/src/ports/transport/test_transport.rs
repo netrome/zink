@@ -452,6 +452,8 @@ pub(crate) struct TestBlobs {
     /// Caches that connect but take nothing — full, or declining us; on
     /// the wire the two look the same.
     refusing: Arc<Mutex<std::collections::BTreeSet<[u8; 32]>>>,
+    /// Caches that connect, start taking a push, and never finish it.
+    stalling: Arc<Mutex<std::collections::BTreeSet<[u8; 32]>>>,
     log: WireLog,
 }
 
@@ -462,8 +464,17 @@ impl TestBlobs {
         Self {
             caches: Arc::new(Mutex::new(BTreeMap::new())),
             refusing: Arc::new(Mutex::new(Default::default())),
+            stalling: Arc::new(Mutex::new(Default::default())),
             log,
         }
+    }
+
+    /// A reachable blob cache at `key` whose pushes never complete — the
+    /// remote that admitted us and then stalled.
+    pub(crate) fn stall(&self, key: &PublicKey) -> &Self {
+        self.cache(key);
+        self.stalling.lock().expect("stalling lock").insert(key.0);
+        self
     }
 
     /// A reachable blob cache at `key` that refuses every push — a full
@@ -523,11 +534,17 @@ impl DialBlobs for TestBlobs {
             .lock()
             .expect("refusing lock")
             .contains(&to.key.0);
+        let stalling = self
+            .stalling
+            .lock()
+            .expect("stalling lock")
+            .contains(&to.key.0);
         match held {
             Some(held) => Ok(TestBlobConn::Cache(CacheConn {
                 to: to.key,
                 held,
                 refusing,
+                stalling,
                 log: self.log.clone(),
             })),
             None => panic!("unscripted blob dial to {}", hex::encode(&to.key.0)),
@@ -565,6 +582,7 @@ pub(crate) struct CacheConn {
     to: PublicKey,
     held: Held,
     refusing: bool,
+    stalling: bool,
     log: WireLog,
 }
 
@@ -572,6 +590,9 @@ impl PushBlob for CacheConn {
     async fn push(&self, blob: &EncryptedBlob) -> Result<(), ConnError> {
         if self.refusing {
             return Err(ConnError("cache refused the push".to_string()));
+        }
+        if self.stalling {
+            return std::future::pending().await;
         }
         self.held
             .lock()
