@@ -43,9 +43,9 @@ portability half that project 3 deliberately didn't buy.
 | Decision | Resolution |
 |---|---|
 | Sync or async | **Async.** The browser's backends are async (IndexedDB; OPFS sync handles live only in workers), and a sync port now would mean paying the migration twice at the PWA. The edges are already async, so asyncifying today's sync reads (`contacts()`, `persons()`, …) is wide but mechanical. |
-| Port shape | Verb traits composed under one umbrella, the transport.rs pattern: `Get`, `Put`, `Delete`, `List` → `Store`. Injected by generics with a default (`ClientState<S: Store = FsStore>`), never `dyn`. Futures are `+ Send`, like every transport port. |
-| Keys | A typed `Key`: a non-empty sequence of validated segments (`[A-Za-z0-9_.-]`, non-empty, no leading `.`), so a key is a well-formed relative path by construction — no `..`, no separators, no hidden files. The fs adapter maps it 1:1 onto today's paths, which is what keeps the layout byte-identical. |
-| Contract | `get` → `Ok(None)` when absent, `Err` only on a real failure. `put` replaces atomically (a reader sees the old bytes or the new, never a torn write) and creates parents implicitly. `delete` is idempotent. `list(dir)` returns the immediate children's names, sorted; a missing dir lists empty; the adapter's own temp files are invisible. **No multi-key atomicity and no durability promise** (no fsync today, none promised) — ordering across keys is the typed layer's job, and exactly what the fault double tests. |
+| Port shape | Verb traits composed under one umbrella, the transport.rs pattern: `Get`, `Put`, `Delete`, `List` → `Store`. Injected by a defaulted generic (`ClientState<S = FsStore>`, the `S: Store` bound on the impl blocks, not the type), never `dyn`. Futures are `+ Send`, like every transport port. |
+| Keys | A typed `Key`: a non-empty sequence of `Segment`s (1–255 bytes of `[A-Za-z0-9_.-]`, never `.`/`..`), so a key is a well-formed relative path by construction — no traversal, no separators. Leading dots stay legal: the legacy `persons/.next` counter must stay deletable through the port. The fs adapter maps it 1:1 onto today's paths, which is what keeps the layout byte-identical. |
+| Contract | `get` → `Ok(None)` when absent, `Err` only on a real failure. `put` replaces atomically (a reader sees the old bytes or the new, never a torn write) and creates parents implicitly. `delete` is idempotent. `list(dir)` returns the immediate children's names, sorted; a missing dir lists empty; the adapter's own scratch files are invisible (they carry a `~`, outside the segment alphabet, so they can neither list nor collide with a key). A key names a value or a directory, never both: a put under a value or onto a directory fails, in the double too. **No multi-key atomicity and no durability promise** (no fsync today, none promised) — ordering across keys is the typed layer's job, and exactly what the fault double tests. |
 | Failure typing | The port returns its own `StorageError`; `ClientState` maps it to `Error::Storage` where it surfaces today, and keeps today's collapse-to-absent on the advisory reads. No behavior change. |
 | What stays out | The keystore (`keystore.rs`): private-key storage has its own at-rest-encryption concerns and is not a file-per-fact store — its own follow-up. Wasm `Send` bounds: shared with the transport ports, settled by the PWA project, not here. |
 
@@ -64,11 +64,14 @@ S1 touches nothing it touches; S2 is the one slice that edits the same
 call sites (`send.rs` and friends) and lands after phase B, or rebases
 across it — the edits are mechanical.
 
-- **S1 · The port, alone.** `ports/store.rs` (the traits, `Key`,
-  `StorageError`), `adapters/fs_store.rs` (today's `write_atomic`
-  mechanics, moved), the memory double, and **one contract suite run
-  against both** — the trait plus its contract is the stable artifact,
-  not any implementation (ADR 0004). Nothing calls the port yet.
+- **S1 · The port, alone — done (2026-11-05).** `ports/store.rs` (the
+  four verbs + `Store`, `Key`/`Segment`, `StorageError`),
+  `adapters/fs_store.rs` (`write_atomic` mechanics, scratch names now
+  `<name>~<pid>.<seq>`), the `TestStore` double, and
+  `ports/store/contract.rs`: one suite of 12 contract clauses, expanded
+  by `store_contract!` against both implementations. Nothing calls the
+  port yet — the module declarations carry an
+  `expect(dead_code)` that S2 must remove.
 - **S2 · `ClientState` over the port.** `ClientState<S: Store = FsStore>`,
   every method async, every `Client` call site `.await`s. A golden-layout
   test pins the fs adapter's on-disk paths and bytes against today's.
