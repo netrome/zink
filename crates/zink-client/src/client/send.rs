@@ -332,25 +332,20 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W
             MessageEnvelope::seal(draft, &self.device, &mut OsRng).map_err(Error::Crypto)?;
         let id = sealed.envelope.id();
         let conversation = existing.unwrap_or(id);
-        self.state
-            .store_envelope(conversation, &sealed.envelope, self.wall_clock.now_ms())
-            .await?;
-        // The participant-set index (groups.md §3): every send maps its
-        // message's set -> conversation, exactly like `remember` does on
-        // receipt -- sender and receivers agree by construction, so adding
-        // a member via a reply can't artifact-fork the adder's next
-        // send-by-name. Latest writer wins per set.
-        let participants: BTreeSet<PublicKey> = participants_of(&sealed.envelope).collect();
-        self.state
-            .record_conversation(&participants, conversation)
-            .await?;
+        // Write order is the crash story (pinned by
+        // `stage_send__should_lose_no_message_at_any_crash_point`): what
+        // the message needs, then the ledger, then the message itself. A
+        // crash before the envelope leaves orphan blobs or entries a flush
+        // drops as unfulfillable — the message never existed here; a crash
+        // after it leaves a message the ledger still owes. Never a message
+        // in history that nothing will deliver.
+        //
         // Own blobs go straight into the local cache: they get pushed to the
         // *recipients'* relays, so this is the only place we can refetch
         // them from when rendering our own history.
         for blob in &sealed.blobs {
             self.state.save_blob(&blob.hash, &blob.bytes).await?;
         }
-
         // Ledger before network (live-delivery.md §2): a crash or failure
         // from here on leaves entries a later flush retries idempotently.
         // This is also what makes handing delivery off safe (`stage_send`).
@@ -364,6 +359,18 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W
         for relay in &relays {
             self.state.add_outbox(id, relay, conversation, now).await?;
         }
+        self.state
+            .store_envelope(conversation, &sealed.envelope, now)
+            .await?;
+        // The participant-set index (groups.md §3): every send maps its
+        // message's set -> conversation, exactly like `remember` does on
+        // receipt -- sender and receivers agree by construction, so adding
+        // a member via a reply can't artifact-fork the adder's next
+        // send-by-name. Latest writer wins per set.
+        let participants: BTreeSet<PublicKey> = participants_of(&sealed.envelope).collect();
+        self.state
+            .record_conversation(&participants, conversation)
+            .await?;
         Ok(StagedSend {
             id,
             conversation,
@@ -841,10 +848,10 @@ mod tests {
     use super::*;
     use crate::adapters::system_clock::SystemClock;
     use crate::client::test_kit::{
-        LoopClient, deposited_envelopes, deposited_frame, loop_client, loop_client_with,
-        mailbox_only, mailbox_spec, message, open_homed, open_homed_with, record_with_dead_mailbox,
-        routed_record, script_drain, sealed_for, spawn_test_relay, temp_key, temp_root,
-        test_device,
+        LoopClient, crash_states, deposited_envelopes, deposited_frame, loop_client,
+        loop_client_with, mailbox_only, mailbox_spec, message, open_homed, open_homed_with,
+        record_with_dead_mailbox, routed_record, script_drain, sealed_for, spawn_test_relay,
+        temp_key, temp_root, test_device,
     };
     use crate::client::{ClientConfig, Received};
     use crate::ports::clock::{TestClock, TestWallClock};
@@ -2139,5 +2146,35 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_root("sendself"));
+    }
+
+    #[tokio::test]
+    async fn stage_send__should_lose_no_message_at_any_crash_point() {
+        // Given
+        let (a, _net, _clock) = loop_client(&Loopback::new()).await;
+        let absent = DeviceKey::from_seed([62; 32]).public();
+        let contact = Contact {
+            keys: vec![absent],
+            relays: vec![format!("{}@203.0.113.9:1", hex::encode(&absent.0))],
+        };
+        let since = a.state.store().writes();
+
+        // When
+        a.stage_send(&[contact], b"keep me".to_vec(), vec![])
+            .await
+            .expect("stage");
+
+        // Then: whatever a crash leaves, a message the history shows is a
+        // message the ledger still owes — never one silently undelivered
+        for (landed, crashed) in crash_states(&a, since).await {
+            for conversation in crashed.state.conversations().await {
+                for message in crashed.history(conversation).await.expect("history") {
+                    assert!(
+                        message.owed_since_ms.is_some(),
+                        "after {landed} write(s): in history, owed to nobody"
+                    );
+                }
+            }
+        }
     }
 }

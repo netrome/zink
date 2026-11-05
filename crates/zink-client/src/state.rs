@@ -701,8 +701,9 @@ impl<S: Store> ClientState<S> {
     /// Replace a stored contact's record — the explicit key-overlap update
     /// (multi-device.md §4). The stem derives from the record's first key,
     /// so a reordered/re-keyed record lands under a new stem: write the new
-    /// entry first, then drop the old one — a crash in between leaves a
-    /// duplicate to clean up, never a lost contact.
+    /// entry, re-point its person membership, and only then drop the old
+    /// one — a crash in between leaves a duplicate to clean up, never a
+    /// lost contact and never a member fallen out of its cluster.
     pub async fn replace_contact(
         &self,
         old: &ContactRecord,
@@ -716,15 +717,19 @@ impl<S: Store> ClientState<S> {
         // An explicit record update supersedes any manual relay patch (R5):
         // the override was set against the *old* anchor, and keeping it
         // would silently shadow the truth the user just adopted.
+        if old_key != new_key {
+            // A re-keyed entry keeps its clustering (S2): person members
+            // reference the stem, so the stem move must follow — before the
+            // old stem goes, or a crash between strands the new entry
+            // outside its person.
+            self.move_person_member(old_key, new_key).await;
+        }
         self.clear_relay_override(old_key).await;
         self.clear_relay_override(new_key).await;
         if old_key != new_key {
             let stem = contact_stem(old_key);
             self.remove(&format!("{stem}.record")).await;
             self.remove(&format!("{stem}.name")).await;
-            // A re-keyed entry keeps its clustering (S2): person members
-            // reference the stem, so the stem move must follow.
-            self.move_person_member(old_key, new_key).await;
         }
         Ok(())
     }

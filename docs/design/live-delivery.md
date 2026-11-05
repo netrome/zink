@@ -39,9 +39,13 @@ mailbox exists because that can't be assumed).
 
 - On send, *before* any network work, persist an outbox entry per distinct
   relay: `outbox/<relay-fingerprint>/<msg-id>` under the client state dir,
-  holding the relay dial string + conversation id. (The envelope itself is
-  already stored under its conversation; the entry is a pointer, not a copy.
-  Blob ciphertext is already in the local blob cache — C3a — and a retry
+  holding the relay dial string + conversation id. (The entry is a pointer,
+  not a copy: the envelope is stored under its conversation *right after*
+  the entries. Ledger first is the crash story — project 9 S3 checks it at
+  every write — so a crash between can never leave a message in history
+  that nothing owes; an entry whose envelope never landed is dropped by the
+  flush as unfulfillable. Blob ciphertext lands in the local blob cache
+  first of all — C3a — and a retry
   unconditionally re-pushes all of the message's blobs, idempotent by hash,
   so the entry needs no per-blob "owed" bookkeeping.)
 - Per relay, **blob push, then deposit** (project 10 S1 — referent before

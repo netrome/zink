@@ -387,10 +387,12 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use zink_protocol::{DeviceKey, RelayEntry};
+    use zink_protocol::{DeviceKey, PublicKey, RelayEntry};
 
     use super::super::Client;
-    use super::super::test_kit::{signed_record, temp_key, temp_root};
+    use super::super::test_kit::{
+        LoopClient, crash_states, loop_client, signed_record, temp_key, temp_root,
+    };
     use super::PersonId;
     use crate::error::Error;
     use crate::hex;
@@ -408,12 +410,13 @@ mod tests {
 
     /// The label→id hop the acts no longer do themselves — tests speak
     /// labels (readable), acts take ids.
-    async fn id_of<C, W, N, R>(client: &Client<C, W, N, R>, label: &str) -> PersonId
+    async fn id_of<C, W, N, R, S>(client: &Client<C, W, N, R, S>, label: &str) -> PersonId
     where
         C: crate::ports::clock::Clock,
         W: crate::ports::clock::WallClock,
         N: crate::ports::transport::Transport,
         R: crate::ports::rng::Draw + crate::ports::rng::Mint,
+        S: crate::ports::store::Store,
     {
         client
             .person_by_label(label)
@@ -728,5 +731,168 @@ mod tests {
         assert!(persons[0].keys().contains(&fresh.public()));
 
         let _ = std::fs::remove_dir_all(temp_root("pdangle"));
+    }
+
+    // ===== crash ordering (project 9 S3): every write prefix of an act =====
+
+    /// The eager invariant as `persons()` presents it, self-heal included:
+    /// every stored contact entry renders in exactly one person.
+    async fn assert_each_entry_renders_once(client: &LoopClient, landed: usize) {
+        let persons = client.persons().await.expect("persons");
+        for (petname, record) in client.state.contacts().await.expect("contacts") {
+            let stem = record.keys.first().copied();
+            let renders = persons
+                .iter()
+                .flat_map(|person| &person.members)
+                .filter(|(_, member)| member.keys.first().copied() == stem)
+                .count();
+            assert_eq!(
+                renders, 1,
+                "after {landed} write(s): {petname} renders {renders}×"
+            );
+        }
+    }
+
+    /// Whether the person labeled `label` holds an entry for any of `keys`.
+    async fn clusters(client: &LoopClient, label: &str, keys: &[PublicKey]) -> bool {
+        client
+            .persons()
+            .await
+            .expect("persons")
+            .iter()
+            .any(|person| {
+                person.label == label && person.keys().iter().any(|key| keys.contains(key))
+            })
+    }
+
+    /// Alice's phone and laptop entries, merged under "Alice".
+    async fn merged_alice() -> LoopClient {
+        let (a, _net, _clock) = loop_client(&crate::ports::transport::Loopback::new()).await;
+        a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
+            .await
+            .expect("add phone");
+        a.add_contact(
+            &signed_record(&device_key(2), "alice-laptop", 0, relay(2)),
+            None,
+        )
+        .await
+        .expect("add laptop");
+        a.merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
+            .expect("merge");
+        a
+    }
+
+    #[tokio::test]
+    async fn add_contact__should_render_the_entry_once_at_every_crash_point() {
+        // Given
+        let (a, _net, _clock) = loop_client(&crate::ports::transport::Loopback::new()).await;
+        let since = a.state.store().writes();
+
+        // When
+        a.add_contact(&signed_record(&device_key(1), "alice", 0, relay(1)), None)
+            .await
+            .expect("add");
+
+        // Then
+        for (landed, crashed) in crash_states(&a, since).await {
+            assert_each_entry_renders_once(&crashed, landed).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_persons__should_lose_no_entry_at_any_crash_point() {
+        // Given
+        let (a, _net, _clock) = loop_client(&crate::ports::transport::Loopback::new()).await;
+        a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
+            .await
+            .expect("add phone");
+        a.add_contact(
+            &signed_record(&device_key(2), "alice-laptop", 0, relay(2)),
+            None,
+        )
+        .await
+        .expect("add laptop");
+        let since = a.state.store().writes();
+
+        // When
+        a.merge_persons(id_of(&a, "Alice").await, id_of(&a, "alice-laptop").await)
+            .await
+            .expect("merge");
+
+        // Then
+        for (landed, crashed) in crash_states(&a, since).await {
+            assert_eq!(crashed.state.contacts().await.expect("contacts").len(), 2);
+            assert_each_entry_renders_once(&crashed, landed).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn split_person__should_lose_no_entry_at_any_crash_point() {
+        // Given
+        let a = merged_alice().await;
+        let since = a.state.store().writes();
+
+        // When
+        a.split_person("alice-laptop").await.expect("split");
+
+        // Then
+        for (landed, crashed) in crash_states(&a, since).await {
+            assert_eq!(crashed.state.contacts().await.expect("contacts").len(), 2);
+            assert_each_entry_renders_once(&crashed, landed).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn update_contact__should_never_lose_a_rekeyed_entry_at_any_crash_point() {
+        // Given: the laptop entry about to re-key (multi-device.md §4)
+        let a = merged_alice().await;
+        let (laptop, fresh) = (device_key(2).public(), device_key(3).public());
+        let mut rekeyed = signed_record(&device_key(3), "alice laptop", 1, relay(2));
+        rekeyed.keys.push(laptop);
+        let since = a.state.store().writes();
+
+        // When
+        a.update_contact(&rekeyed).await.expect("update");
+
+        // Then: a duplicate is allowed mid-way, a missing laptop never
+        for (landed, crashed) in crash_states(&a, since).await {
+            let contacts = crashed.state.contacts().await.expect("contacts");
+            assert!(
+                contacts.iter().any(|(_, record)| {
+                    record.keys.first() == Some(&laptop) || record.keys.first() == Some(&fresh)
+                }),
+                "after {landed} write(s): the laptop entry is gone"
+            );
+            assert_each_entry_renders_once(&crashed, landed).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn update_contact__should_keep_a_rekeyed_member_clustered_at_every_crash_point() {
+        // Given
+        let a = merged_alice().await;
+        let (laptop, fresh) = (device_key(2).public(), device_key(3).public());
+        let mut rekeyed = signed_record(&device_key(3), "alice laptop", 1, relay(2));
+        rekeyed.keys.push(laptop);
+        let since = a.state.store().writes();
+
+        // When
+        a.update_contact(&rekeyed).await.expect("update");
+
+        // Then: under its old key or its new one, the laptop stays Alice's
+        for (landed, crashed) in crash_states(&a, since).await {
+            assert!(
+                clusters(&crashed, "Alice", &[laptop, fresh]).await,
+                "after {landed} write(s): the laptop fell out of Alice's cluster: {:?}",
+                crashed
+                    .persons()
+                    .await
+                    .expect("persons")
+                    .iter()
+                    .map(|person| (person.label.clone(), person.members.len()))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }

@@ -99,11 +99,27 @@ across it — the edits are mechanical.
   sync server holds a clone of the client's, which also stamps its reach
   evidence — `system_clock::now_ms()`, the last ambient wall-clock read in
   the core, is gone.
-- **S3 · Crash-ordering tests.** Fault controls on the double (fail the
-  n-th put, stop persisting after a point) and the tests the comments
-  promise: `replace_contact`'s write-then-drop, contact-add + person row,
-  merge/split ordering, the `persons()` self-heal, the lens applied-ops
-  ledger's mark-after-effect.
+- **S3 · Crash-ordering tests — done (2026-11-05).** `TestStore`
+  journals every completed write; `crashed_after(n)` is the store a crash
+  right after the n-th leaves (the port promises no multi-key atomicity,
+  so a prefix is all a crash can assume). The kit's `crash_states` reopens
+  a client on *every* prefix an act spans — exhaustive, not the one point
+  a comment names — and refuses an act that wrote nothing (vacuous). No
+  fail-the-n-th control: no claim needed one. Pinned: contact add (each
+  entry renders once), merge and split (no entry lost, none twice),
+  re-key (never lost; stays clustered), the lens replay (a crash anywhere,
+  then the next replay converges — ledger-after-effect holds), and
+  staging (a message in history is always owed). Two claims failed and
+  were fixed by reordering writes, no new mechanism:
+  - **Staging stored the envelope before its outbox entries**, so a crash
+    between left a message in history that nothing would ever deliver,
+    rendered as sent. Now blobs → ledger → envelope → index; an entry
+    whose envelope never landed is dropped by the flush as unfulfillable
+    (live-delivery.md §2 updated).
+  - **A re-key dropped the old entry before re-pointing its person
+    membership**, so a crash between stranded the new entry outside its
+    cluster (the S2 no-dangle rule). Now new entry → re-point → drop old;
+    the in-between state is the duplicate the comment always accepted.
 - **S3b · Local-logic tests onto the doubles.** Of the tests on the
   production constructors (`Client::open_or_create` / `open_homed` — real
   iroh endpoint, real key file), a rough classification (2026-11-05) puts

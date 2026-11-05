@@ -416,7 +416,7 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::client::test_kit::{loop_client, mailbox_only, signed_record};
+    use crate::client::test_kit::{crash_states, loop_client, mailbox_only, signed_record};
 
     use crate::ports::transport::Loopback;
     use zink_protocol::DeviceKey;
@@ -647,5 +647,34 @@ mod tests {
         assert!(b.person_by_label("carol").await.is_ok());
         assert!(b.lens_conflicts().await.is_empty());
         assert!(!b.state.lens_channels().await.contains(&genesis_id));
+    }
+
+    #[tokio::test]
+    async fn adopt__should_converge_after_a_crash_at_any_point_of_a_replay() {
+        // Given: the laptop holds the phone's rename op, unreplayed
+        let (a, b) = paired().await;
+        a.add_contact(&carol_record(), None)
+            .await
+            .expect("phone adds");
+        b.add_contact(&carol_record(), None)
+            .await
+            .expect("laptop adds");
+        let person = a.person_by_label("carol").await.expect("person");
+        a.rename_person(person.id, "carrie").await.expect("rename");
+        seed_channel(&a, &b).await;
+        let since = b.state.store().writes();
+
+        // When: the replay runs — and is cut short at every possible write
+        b.adopt_lens_ops().await;
+
+        // Then: the next replay (the next drain) finishes the job — an op
+        // is ledgered only after its effect, so none is skipped half-done
+        for (landed, crashed) in crash_states(&b, since).await {
+            crashed.adopt_lens_ops().await;
+            assert!(
+                crashed.person_by_label("carrie").await.is_ok(),
+                "after {landed} write(s): the rename was lost"
+            );
+        }
     }
 }

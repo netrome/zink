@@ -385,6 +385,33 @@ pub(crate) async fn loop_client_with(
     (client, net, clock)
 }
 
+/// Every state a crash during an act could leave `client` in — one client
+/// reopened on each, paired with how many of the act's writes landed:
+/// from none (`0`) to all of them. `since` is the store's write count
+/// before the act. Same device; fresh doubles otherwise (a reopen is a
+/// new process).
+pub(crate) async fn crash_states(client: &LoopClient, since: usize) -> Vec<(usize, LoopClient)> {
+    let store = client.state.store();
+    assert!(
+        store.writes() > since,
+        "the act wrote nothing — a crash test over it proves nothing"
+    );
+    let mut states = Vec::new();
+    for writes in since..=store.writes() {
+        let reopened = Client::with_transport(
+            DeviceKey::from_seed(client.device.seed()),
+            store.crashed_after(writes),
+            ClientConfig::default(),
+            TestClock::new(),
+            SystemClock,
+            TestTransport::new(),
+        )
+        .await;
+        states.push((writes - since, reopened));
+    }
+    states
+}
+
 /// A fresh device key, held in memory only — doubles-wired clients need
 /// no key file.
 pub(crate) fn test_device() -> DeviceKey {
