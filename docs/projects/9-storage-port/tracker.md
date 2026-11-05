@@ -1,9 +1,14 @@
 # Storage port: state I/O joins time and transport
 
-> **Status: 🚧 in progress — scoped 2026-11-05.** Trigger: project 7 S2
-> grew the file-per-fact store again (`persons/`), and reading `state.rs`
-> means reading layout, encoding, and fs mechanics at once. ADR 0004's
-> port discipline stops at time / transport / timing-entropy today.
+> **Status: ✅ done — closed 2026-11-05** (scoped the same day; branch
+> `9-storage-port`). Trigger: project 7 S2 grew the file-per-fact store
+> again (`persons/`), and reading `state.rs` meant reading layout,
+> encoding, and fs mechanics at once; ADR 0004's port discipline stopped
+> at time / transport / timing-entropy. All slices landed; the durable
+> decision is ADR 0004's storage addendum. Verified by the suite — the
+> golden layout test, the exhaustive crash tests, and the real iroh +
+> `FsStore` smoke tier — but not live-run on a device from here (headless
+> build host).
 
 ## TL;DR
 
@@ -22,21 +27,19 @@ deterministic under temp dirs and already concentrated in one seam
 (`state.rs`). This project is the readability / testability /
 portability half that project 3 deliberately didn't buy.
 
-## What it buys
+## What it bought
 
-- **Readability**: `state.rs` methods become layout + encoding only; the
-  I/O mechanics (`write_atomic`, `create_parent`, warn-and-skip) live
-  once, in the port contract and adapter.
-- **Testability**: the crash-ordering claims code comments currently
-  assert untested ("a crash between these writes leaves a duplicate,
-  never a lost contact") become tests against a fault-injecting double;
-  temp-dir plumbing leaves the test kit. Project 7's eager person rows
-  added more of these: the contact-add's paired writes (entry + person
-  row), merge/split write ordering, and the `persons()` crash-gap
-  self-heal are all crash-ordering contracts waiting for that double.
-- **The PWA client**: `std::fs` compiles on wasm32 and fails at runtime —
-  the browser client cannot exist without this port.
-- The audit line grows: "no `std::fs` outside `adapters/`".
+- **Readability**: `state.rs` methods are layout + encoding only; the
+  I/O mechanics (`write_atomic`, `create_parent`) live once, in the
+  fs adapter.
+- **Testability**: the crash-ordering claims in code comments are
+  tests now, checked at every write prefix — and two of them turned out
+  false (S3, both fixed). Most client tests run on the doubles: no temp
+  dir, no key file, no real endpoint (S2b, S3b).
+- **The PWA client** is unblocked: `std::fs` compiles on wasm32 and fails
+  at runtime, so the browser client could not exist without this port.
+- The audit line grew: no filesystem access outside `adapters/`, the
+  keystore aside.
 
 ## Decisions (scoped 2026-11-05)
 
@@ -53,8 +56,10 @@ portability half that project 3 deliberately didn't buy.
 
 - No schema, no database, no caching layer — the file-per-fact layout
   and formats stay exactly as they are.
-- No behavior change anywhere; `ClientState`'s methods keep their
-  names, arguments, and results (only `async` is added).
+- No behavior change on any path that doesn't crash: `ClientState`'s
+  methods keep their names and results (now `async`; `store_envelope`
+  takes the caller's time). The deliberate deltas — the S2a edge cases
+  and S3's two crash-path reorderings — are recorded in their slices.
 - Not the PWA client itself — this unblocks it, nothing more.
 
 ## Slices
@@ -136,6 +141,10 @@ across it — the edits are mechanical.
   labelled smokes (`open_homed` / `spawn_test_relay`) plus the three
   dead-relay deliveries, which a later pass could script on the
   doubles (`dial.hold` + the test clock).
-- **S4 · Close.** The audit line ("no `std::fs` outside `adapters/`") —
-  the CLI/app edges' own fs use is theirs; this is about the client core.
-  ADR 0004 addendum (storage joins the ports), client-core.md, docs.
+- **S4 · Close — done (2026-11-05).** The audit line holds: outside
+  tests, `std::fs` in the client core lives in `adapters/fs_store.rs` and
+  the keystore (the named exception), stated in `adapters.rs`'s header.
+  ADR 0004 gained its storage addendum (index updated); `client-core.md`
+  carries the storage decision since S2a; STYLE's test-isolation rule now
+  defaults to the store double, the filesystem only for the real-adapter
+  tier.

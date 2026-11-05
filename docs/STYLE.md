@@ -163,8 +163,11 @@ with such inputs explicitly.
 
 ### Isolation
 
-Tests that touch the filesystem use a shared temp-dir helper for a unique directory,
-and clean up (`remove_dir_all`) at the end.
+Tests construct state on the store double (`TestStore`), not on disk: in the client,
+the loopback kit (`loop_client`) gives a client with no temp dir and no key file. Only
+the real-adapter tier touches the filesystem — the fs adapter's contract suite and the
+named smoke tests — and it uses a per-test temp dir, namespaced by test name, cleaned
+up (`remove_dir_all`) at the end.
 
 ### Test imports
 
