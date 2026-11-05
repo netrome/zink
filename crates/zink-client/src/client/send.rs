@@ -920,11 +920,8 @@ mod tests {
     async fn stage_send_new__should_start_a_second_conversation_with_the_same_people() {
         // Given: an existing conversation for {A, B}, indexed — the set a
         // plain `send` would thread into
-        let key_path = temp_key("newchat", "a");
-        keystore::create(&key_path).expect("key");
-        let a = Client::open_with(&key_path, ClientConfig::default())
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let b = DeviceKey::from_seed([23; 32]).public();
         let genesis = message(&a.device, vec![b], None, vec![], 0, 0);
         let conversation = genesis.id();
@@ -960,8 +957,6 @@ mod tests {
             Some(staged.conversation),
             "the index re-points to the latest writer, like any send"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("newchat"));
     }
 
     #[tokio::test]
@@ -2085,15 +2080,16 @@ mod tests {
         // what carries the assertions.
         let key = temp_key("sendself", "phone");
         keystore::create(&key).expect("key");
-        let phone = Client::open_with(
-            &key,
+        let wire = Loopback::new();
+        let phone = loop_client_with(
+            &wire,
             ClientConfig {
                 connect_timeout: Duration::from_millis(300),
                 ..Default::default()
             },
         )
         .await
-        .expect("open");
+        .0;
         let laptop = DeviceKey::from_seed([50; 32]).public();
         let alice = DeviceKey::from_seed([51; 32]).public();
         phone

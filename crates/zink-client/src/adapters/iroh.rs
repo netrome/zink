@@ -131,19 +131,6 @@ impl IrohTransport {
         Ok(format!("{}@{}", self.endpoint.id(), sock))
     }
 
-    /// This endpoint as a `Peer` — every bound socket plus any homed relay,
-    /// the full multi-address another local endpoint can dial (a bare public
-    /// socket isn't reliably self-reachable on one host).
-    #[cfg(test)]
-    pub(crate) fn peer(&self) -> Peer {
-        let addr = self.endpoint.addr();
-        Peer {
-            key: PublicKey(*self.endpoint.id().as_bytes()),
-            relays: addr.relay_urls().map(|url| url.to_string()).collect(),
-            sockets: addr.ip_addrs().copied().collect(),
-        }
-    }
-
     /// Wait until a connection to `to` holds a holepunched direct (non-relay)
     /// path. A delivery ack alone doesn't prove one — acks ride relay-routed
     /// QUIC just as happily — so a smoke whose premise is "a direct path

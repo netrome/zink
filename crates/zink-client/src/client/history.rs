@@ -494,9 +494,8 @@ mod tests {
     async fn conversations__should_carry_the_newest_message_as_the_preview() {
         // Given: a stored conversation — an old genesis and a newer sealed
         // reply this device can open
-        let client = Client::open_or_create(&temp_key("preview", "viewer"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let sender = DeviceKey::from_seed([4; 32]);
         let genesis = message(&sender, vec![client.public_key()], None, vec![], 0, 0);
         let conversation = genesis.id();
@@ -532,16 +531,13 @@ mod tests {
         assert_eq!(last.sender, sender.public());
         assert_eq!(last.body.as_deref(), Some(b"the newest words".as_slice()));
         assert!(!last.has_blobs);
-
-        let _ = std::fs::remove_dir_all(temp_root("preview"));
     }
 
     #[tokio::test]
     async fn conversations__should_count_unread_until_marked_read() {
         // Given: two stored messages, never rendered
-        let client = Client::open_or_create(&temp_key("unread", "viewer"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let author = DeviceKey::from_seed([7; 32]);
         let genesis = message(&author, vec![client.public_key()], None, vec![], 0, 0);
         let conversation = genesis.id();
@@ -586,16 +582,13 @@ mod tests {
             .await
             .expect("store");
         assert_eq!(client.conversations().await.expect("list")[0].unread, 1);
-
-        let _ = std::fs::remove_dir_all(temp_root("unread"));
     }
 
     #[tokio::test]
     async fn conversations__should_carry_my_local_name() {
         // Given: a stored conversation
-        let client = Client::open_or_create(&temp_key("convname", "viewer"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let author = DeviceKey::from_seed([6; 32]);
         let genesis = message(&author, vec![client.public_key()], None, vec![], 0, 0);
         let conversation = genesis.id();
@@ -624,16 +617,13 @@ mod tests {
             client.conversations().await.expect("list")[0].local_name,
             None
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("convname"));
     }
 
     #[tokio::test]
     async fn membership__should_follow_the_heads_not_the_full_history() {
         // Given: A→{B}; A adds C; A stops including C
-        let client = Client::open_or_create(&temp_key("members", "viewer"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let a = DeviceKey::from_seed([1; 32]);
         let b = DeviceKey::from_seed([2; 32]);
         let (pa, pb) = (a.public(), b.public());
@@ -677,16 +667,13 @@ mod tests {
             client.membership(conversation).await.expect("membership"),
             BTreeSet::from([pa, pb, pc])
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("members"));
     }
 
     #[tokio::test]
     async fn history__should_derive_membership_deltas_from_signed_cores() {
         // Given: A→{B}, then C added, then C stop-included
-        let client = Client::open_or_create(&temp_key("deltas", "viewer"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let a = DeviceKey::from_seed([1; 32]);
         let pb = DeviceKey::from_seed([2; 32]).public();
         let pc = DeviceKey::from_seed([3; 32]).public();
@@ -719,8 +706,6 @@ mod tests {
         assert!(history[1].left.is_empty());
         assert_eq!(history[2].left, vec![pc]);
         assert!(history[2].joined.is_empty());
-
-        let _ = std::fs::remove_dir_all(temp_root("deltas"));
     }
 
     #[test]
@@ -778,9 +763,8 @@ mod tests {
     #[tokio::test]
     async fn conversations__should_quarantine_a_stranger_until_a_contact_speaks() {
         // Given: a message from a key we have never heard of
-        let client = Client::open_or_create(&temp_key("quarantine", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let stranger = DeviceKey::from_seed([81; 32]);
         let me = client.public_key();
         let genesis = message(&stranger, vec![me], None, vec![], 0, 0);
@@ -823,8 +807,6 @@ mod tests {
             1,
             "the message was never withheld from storage"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("quarantine"));
     }
 
     #[tokio::test]
@@ -881,9 +863,8 @@ mod tests {
     #[tokio::test]
     async fn add_acks__should_union_so_a_later_pass_cannot_erase_a_confirmation() {
         // Given: a stored message confirmed by one of two recipients
-        let client = Client::open_or_create(&temp_key("acks", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let client = loop_client(&wire).await.0;
         let author = DeviceKey::from_seed([71; 32]);
         let (first, second) = (
             DeviceKey::from_seed([72; 32]).public(),
@@ -924,8 +905,6 @@ mod tests {
                 .map(|keys| keys.iter().copied().collect::<BTreeSet<_>>()),
             Some(BTreeSet::from([first, second]))
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("acks"));
     }
 
     #[tokio::test]
@@ -1117,9 +1096,8 @@ mod tests {
     #[tokio::test]
     async fn participant_labels__should_collapse_a_contacts_device_keys_to_one_label() {
         // Given: bob's record holds two device keys; one unknown key
-        let a = Client::open_or_create(&temp_key("labels-dedup", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let phone = DeviceKey::from_seed([39; 32]);
         let laptop = DeviceKey::from_seed([40; 32]);
         let unknown = DeviceKey::from_seed([41; 32]).public();
@@ -1146,16 +1124,13 @@ mod tests {
             labels,
             vec!["bob".to_string(), hex::encode(&unknown.0[..4])]
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("labels-dedup"));
     }
 
     #[tokio::test]
     async fn participant_rows__should_carry_the_clusters_first_key_as_the_handle() {
         // Given: bob's record holds two device keys
-        let a = Client::open_or_create(&temp_key("rows-handle", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let phone = DeviceKey::from_seed([39; 32]);
         let laptop = DeviceKey::from_seed([40; 32]);
         a.add_contact(
@@ -1178,16 +1153,13 @@ mod tests {
         // Then: one row, keyed by the first key seen — the row's tap
         // target (any member key lands on the person's page)
         assert_eq!(rows, vec![(laptop.public(), "bob".to_string())]);
-
-        let _ = std::fs::remove_dir_all(temp_root("rows-handle"));
     }
 
     #[tokio::test]
     async fn participant_labels__should_label_a_recognized_device_by_its_self_claim() {
         // Given
-        let a = Client::open_or_create(&temp_key("labels-device", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let laptop = DeviceKey::from_seed([55; 32]);
         a.recognize_device(&signed_record(
             &laptop,
@@ -1208,8 +1180,6 @@ mod tests {
         );
         assert!(a.own_keys().await.contains(&laptop.public()));
         assert!(a.own_keys().await.contains(&a.public_key()));
-
-        let _ = std::fs::remove_dir_all(temp_root("labels-device"));
     }
 
     #[tokio::test]

@@ -120,17 +120,22 @@ across it — the edits are mechanical.
     membership**, so a crash between stranded the new entry outside its
     cluster (the S2 no-dangle rule). Now new entry → re-point → drop old;
     the in-between state is the duplicate the comment always accepted.
-- **S3b · Local-logic tests onto the doubles.** Of the tests on the
-  production constructors (`Client::open_or_create` / `open_homed` — real
-  iroh endpoint, real key file), a rough classification (2026-11-05) puts
-  ~57 as local logic only (contact overlap, petname collisions, persons,
-  vouches) and ~16 as genuinely networked. The local ones move to
-  `loop_client`; their `dir_bytes` probes become store assertions. The
-  networked ones — including the labelled real-network smoke tier
-  (transport.md §8) — stay on the production constructors: they are the
-  integration check that real iroh and `FsStore` work together. Self-
-  checking: a misclassified test makes an unscripted dial, which
-  `TestTransport` turns into a loud panic.
+- **S3b · Local-logic tests onto the doubles — done (2026-11-05).** 62
+  tests moved off the production constructors onto the loopback kit;
+  the client suite is now 99 on doubles, 11 on real iroh + `FsStore`.
+  The split was self-checked rather than trusted: every candidate
+  outside the smoke tier was converted, and the three that then made an
+  unscripted dial (they deliver to dead relays) went back — no test was
+  classified by hand. Multi-client tests share one `Loopback` wire and
+  dial by key (`loop_peer`); reopen tests restart on the same store and
+  device (`reopen`). The `dir_bytes` "store untouched" probes became
+  `stored_under` store snapshots, which refuse an empty probe — one of
+  them (`who_is__should_learn_…without_touching_the_contact_store`) had
+  been vacuous since S2b, comparing two empty maps for a directory the
+  double never wrote. The 11 remaining are the real-network tier: the
+  labelled smokes (`open_homed` / `spawn_test_relay`) plus the three
+  dead-relay deliveries, which a later pass could script on the
+  doubles (`dial.hold` + the test clock).
 - **S4 · Close.** The audit line ("no `std::fs` outside `adapters/`") —
   the CLI/app edges' own fs use is theirs; this is about the client core.
   ADR 0004 addendum (storage joins the ports), client-core.md, docs.

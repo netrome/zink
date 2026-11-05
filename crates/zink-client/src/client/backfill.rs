@@ -380,8 +380,8 @@ mod tests {
     use super::*;
     use crate::adapters::system_clock::SystemClock;
     use crate::client::test_kit::{
-        befriend, chain, loop_client, mailbox_only, open_homed, sealed_chain, spawn_test_relay,
-        temp_key, temp_root,
+        befriend, chain, loop_client, loop_peer, mailbox_only, open_homed, sealed_chain,
+        spawn_test_relay, temp_root,
     };
     use crate::ports::transport::{Home, Loopback};
     use zink_protocol::{ContactRecord, DeviceKey, RelayEntry};
@@ -501,12 +501,9 @@ mod tests {
         // holds only the latest message. D0b made peers dialable by anyone
         // holding key + relay URL; the D0c gate is what keeps "dialable"
         // from meaning "served".
-        let a = Client::open_or_create(&temp_key("gate", "server"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("gate", "client"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         let author = DeviceKey::from_seed([8; 32]);
         let msgs = chain(&author, b.public_key(), 3);
         let conversation = msgs[0].id();
@@ -524,7 +521,7 @@ mod tests {
         // When: the stranger backfills — the answers must be
         // indistinguishable from a peer that holds nothing
         let fetched = b
-            .backfill_addr(conversation, a.transport.peer())
+            .backfill_addr(conversation, loop_peer(&a))
             .await
             .expect("gate declines, not errors");
 
@@ -533,7 +530,7 @@ mod tests {
         assert!(b.state.load_dag(conversation).await.is_err());
         let connection = net::connect_peer(
             &b.transport,
-            &a.transport.peer(),
+            &loop_peer(&a),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -557,15 +554,13 @@ mod tests {
         // When: A stores B's record — B is now a contact and gets served
         befriend(&a.state, b.public_key()).await;
         let fetched = b
-            .backfill_addr(conversation, a.transport.peer())
+            .backfill_addr(conversation, loop_peer(&a))
             .await
             .expect("backfill as a contact");
 
         // Then: the walk reaches the genesis
         assert_eq!(fetched, 2, "genesis + the middle message");
         assert!(b.state.load_dag(conversation).await.is_ok());
-
-        let _ = std::fs::remove_dir_all(temp_root("gate"));
     }
 
     #[tokio::test]
@@ -573,12 +568,9 @@ mod tests {
         // Given: A holds a 5-message chain; B holds only the MIDDLE message —
         // missing both its ancestors (backward) and everything sent after it
         // (forward — e.g. expired from B's mailbox before B fetched).
-        let a = Client::open_or_create(&temp_key("forward", "server"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("forward", "client"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         befriend(&a.state, b.public_key()).await;
         let author = DeviceKey::from_seed([4; 32]);
         let msgs = chain(&author, b.public_key(), 5);
@@ -596,7 +588,7 @@ mod tests {
 
         // When
         let fetched = b
-            .backfill_addr(conversation, a.transport.peer())
+            .backfill_addr(conversation, loop_peer(&a))
             .await
             .expect("sync");
 
@@ -605,8 +597,6 @@ mod tests {
         let dag = b.state.load_dag(conversation).await.expect("DAG builds");
         assert_eq!(dag.heads(), vec![msgs[4].id()]);
         assert_eq!(dag.next_logical(), 5);
-
-        let _ = std::fs::remove_dir_all(temp_root("forward"));
     }
 
     #[tokio::test]
@@ -749,15 +739,10 @@ mod tests {
     async fn get_keys__should_decline_anyone_but_a_recognized_device() {
         // Given: the phone holds a sealed message; alice is a full
         // contact — served history by the gate — but not a device
-        let phone = Client::open_or_create(&temp_key("getkeys", "phone"))
-            .await
-            .expect("open phone");
-        let alice = Client::open_or_create(&temp_key("getkeys", "alice"))
-            .await
-            .expect("open alice");
-        let laptop = Client::open_or_create(&temp_key("getkeys", "laptop"))
-            .await
-            .expect("open laptop");
+        let wire = Loopback::new();
+        let phone = loop_client(&wire).await.0;
+        let alice = loop_client(&wire).await.0;
+        let laptop = loop_client(&wire).await.0;
         let author = DeviceKey::from_seed([61; 32]);
         let msgs = sealed_chain(&author, phone.public_key(), &[b"secret"]);
         let id = msgs[0].id();
@@ -767,7 +752,7 @@ mod tests {
         // When: the contact asks for re-wraps
         let connection = net::connect_peer(
             &alice.transport,
-            &phone.transport.peer(),
+            &loop_peer(&phone),
             SYNC_ALPN,
             alice.config.connect_timeout,
             &SystemClock,
@@ -793,7 +778,7 @@ mod tests {
             .expect("recognize");
         let connection = net::connect_peer(
             &laptop.transport,
-            &phone.transport.peer(),
+            &loop_peer(&phone),
             SYNC_ALPN,
             laptop.config.connect_timeout,
             &SystemClock,
@@ -811,16 +796,13 @@ mod tests {
         assert_eq!(wraps.len(), 1);
         assert_eq!(wraps[0].0, id);
         assert_eq!(wraps[0].1.recipient, laptop.public_key());
-
-        let _ = std::fs::remove_dir_all(temp_root("getkeys"));
     }
 
     #[tokio::test]
     async fn backfill_by_key__should_fail_plainly_without_a_relay_url_in_the_record() {
         // Given: a stored record that is mailbox-only (raw-contact shape)
-        let b = Client::open_or_create(&temp_key("nourl", "client"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let b = loop_client(&wire).await.0;
         let peer = DeviceKey::from_seed([6; 32]).public();
         let record = ContactRecord::new(
             vec![peer],
@@ -841,19 +823,14 @@ mod tests {
             .await
             .expect_err("no relay url to rendezvous through");
         assert!(matches!(err, Error::NoRelayUrl), "got: {err}");
-
-        let _ = std::fs::remove_dir_all(temp_root("nourl"));
     }
 
     #[tokio::test]
     async fn backfill__should_stop_when_the_peer_lacks_the_ancestors() {
         // Given: B holds only the latest message; A (the peer) holds nothing.
-        let a = Client::open_or_create(&temp_key("stuck", "server"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("stuck", "client"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         let author = DeviceKey::from_seed([7; 32]);
         let msgs = chain(&author, b.public_key(), 3);
         let conversation = msgs[0].id();
@@ -864,7 +841,7 @@ mod tests {
 
         // When: B backfills from a peer that serves nothing
         let fetched = b
-            .backfill_addr(conversation, a.transport.peer())
+            .backfill_addr(conversation, loop_peer(&a))
             .await
             .expect("backfill returns Ok even with nothing to fetch");
 
@@ -872,7 +849,5 @@ mod tests {
         // over a fabricated root (the genesis is still missing).
         assert_eq!(fetched, 0);
         assert!(b.state.load_dag(conversation).await.is_err());
-
-        let _ = std::fs::remove_dir_all(temp_root("stuck"));
     }
 }

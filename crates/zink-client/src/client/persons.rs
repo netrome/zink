@@ -387,12 +387,11 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
+    use crate::ports::transport::Loopback;
     use zink_protocol::{DeviceKey, PublicKey, RelayEntry};
 
     use super::super::Client;
-    use super::super::test_kit::{
-        LoopClient, crash_states, loop_client, signed_record, temp_key, temp_root,
-    };
+    use super::super::test_kit::{LoopClient, crash_states, loop_client, signed_record};
     use super::PersonId;
     use crate::error::Error;
     use crate::hex;
@@ -455,9 +454,8 @@ mod tests {
     #[tokio::test]
     async fn add_contact__should_create_one_person_per_entry() {
         // Given / When: two ordinary contact adds — the eager invariant
-        let a = Client::open_or_create(&temp_key("pmat", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         a.add_contact(
             &signed_record(&device_key(1), "alice-phone", 0, relay(1)),
             None,
@@ -485,17 +483,14 @@ mod tests {
             labels,
             vec![("alice-phone".to_string(), 1), ("bob".to_string(), 1)]
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("pmat"));
     }
 
     #[tokio::test]
     async fn persons__should_claim_an_entry_that_bypassed_the_add_act() {
         // Given: an entry written below the add act (a crash gap, or a
         // store from before the eager invariant) — no person row
-        let a = Client::open_or_create(&temp_key("pheal", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         a.state
             .save_contact(
                 "carol",
@@ -512,17 +507,14 @@ mod tests {
         assert_eq!(persons.len(), 1);
         assert_eq!(persons[0].label, "carol");
         assert_eq!(a.state.persons().await.len(), 1);
-
-        let _ = std::fs::remove_dir_all(temp_root("pheal"));
     }
 
     #[tokio::test]
     async fn merge_persons__should_cluster_and_resolve_per_entry_relays() {
         // Given: Alice's two devices as two contact entries with distinct
         // relay sets
-        let a = Client::open_or_create(&temp_key("pmerge", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let (phone, laptop) = (device_key(1), device_key(2));
         a.add_contact(&signed_record(&phone, "Alice", 0, relay(1)), None)
             .await
@@ -551,16 +543,13 @@ mod tests {
         let device_only = a.resolve_person("alice-laptop").await.expect("member");
         assert_eq!(device_only.len(), 1);
         assert_eq!(device_only[0].keys, vec![laptop.public()]);
-
-        let _ = std::fs::remove_dir_all(temp_root("pmerge"));
     }
 
     #[tokio::test]
     async fn stage_send__to_a_merged_person_should_reach_both_keys() {
         // Given: a merged two-device person
-        let a = Client::open_or_create(&temp_key("psend", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let (phone, laptop) = (device_key(1), device_key(2));
         a.add_contact(&signed_record(&phone, "Alice", 0, relay(1)), None)
             .await
@@ -592,16 +581,13 @@ mod tests {
             .recipients;
         assert!(recipients.contains(&phone.public()));
         assert!(recipients.contains(&laptop.public()));
-
-        let _ = std::fs::remove_dir_all(temp_root("psend"));
     }
 
     #[tokio::test]
     async fn split_person__should_return_a_member_to_its_own_person() {
         // Given
-        let a = Client::open_or_create(&temp_key("psplit", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
             .await
             .expect("add");
@@ -624,17 +610,14 @@ mod tests {
         let persons = a.persons().await.expect("persons");
         assert_eq!(persons.len(), 2);
         assert!(persons.iter().all(|person| !person.members.is_empty()));
-
-        let _ = std::fs::remove_dir_all(temp_root("psplit"));
     }
 
     #[tokio::test]
     async fn split_person__should_refuse_a_split_that_would_twin_the_source_label() {
         // Given: a merged person labeled by one member's petname — the
         // shape merge_persons produces
-        let a = Client::open_or_create(&temp_key("ptwin", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         a.add_contact(&signed_record(&device_key(1), "Alice", 0, relay(1)), None)
             .await
             .expect("add");
@@ -656,16 +639,13 @@ mod tests {
         let persons = a.persons().await.expect("persons");
         assert_eq!(persons.len(), 1);
         assert_eq!(persons[0].members.len(), 2);
-
-        let _ = std::fs::remove_dir_all(temp_root("ptwin"));
     }
 
     #[tokio::test]
     async fn rename_person__should_move_the_label_and_refuse_collisions() {
         // Given
-        let a = Client::open_or_create(&temp_key("prename", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         a.add_contact(
             &signed_record(&device_key(1), "alice-phone", 0, relay(1)),
             None,
@@ -695,8 +675,6 @@ mod tests {
                 .await,
             Err(Error::PetnameCollision(_))
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("prename"));
     }
 
     #[tokio::test]
@@ -704,9 +682,8 @@ mod tests {
         // Given: a merged person whose laptop entry is about to re-key —
         // the fresh record leads with the new key, listing the old one
         // (the multi-device.md §4 re-scan shape)
-        let a = Client::open_or_create(&temp_key("pdangle", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let (phone, laptop, fresh) = (device_key(1), device_key(2), device_key(3));
         a.add_contact(&signed_record(&phone, "Alice", 0, relay(1)), None)
             .await
@@ -729,8 +706,6 @@ mod tests {
         assert_eq!(persons[0].label, "Alice");
         assert_eq!(persons[0].members.len(), 2);
         assert!(persons[0].keys().contains(&fresh.public()));
-
-        let _ = std::fs::remove_dir_all(temp_root("pdangle"));
     }
 
     // ===== crash ordering (project 9 S3): every write prefix of an act =====

@@ -590,8 +590,8 @@ mod tests {
     use super::*;
     use crate::adapters::system_clock::SystemClock;
     use crate::client::test_kit::{
-        befriend, deposited_envelopes, deposited_frame, dir_bytes, loop_client, mailbox_only,
-        mailbox_spec, message, routed_record, script_drain, signed_record, temp_key, temp_root,
+        befriend, deposited_envelopes, deposited_frame, loop_client, loop_peer, mailbox_only,
+        mailbox_spec, message, routed_record, script_drain, signed_record, stored_under, temp_root,
         test_device,
     };
     use crate::client::{ClientConfig, RelaySource, ResolvedName};
@@ -1042,10 +1042,7 @@ mod tests {
         a.add_contact(&b_record, Some("bob".to_string()))
             .await
             .expect("add bob");
-        let contacts_dir =
-            std::path::PathBuf::from(format!("{}.state", temp_key("learn", "asker")))
-                .join("contacts");
-        let before = dir_bytes(&contacts_dir);
+        let before = stored_under(&a, "contacts");
 
         // When
         let outcome = a.who_is(carol.public()).await.expect("who_is");
@@ -1057,7 +1054,7 @@ mod tests {
         assert_eq!((outcome.asked, outcome.unreachable), (1, 0));
         assert_eq!(answers[0].responder_petname, "bob");
         assert_eq!(answers[0].record, carol_record);
-        assert_eq!(dir_bytes(&contacts_dir), before);
+        assert_eq!(stored_under(&a, "contacts"), before);
         let ResolvedName::Learned(names) = a.resolve_name(carol.public()).await.expect("resolve")
         else {
             panic!("expected a learned name");
@@ -1078,8 +1075,6 @@ mod tests {
         let contact = a.resolve_contact("Carol").await.expect("resolve contact");
         assert_eq!(contact.keys, vec![carol.public()]);
         assert_eq!(contact.relays, vec!["cc@203.0.113.9:9".to_string()]);
-
-        let _ = std::fs::remove_dir_all(temp_root("learn"));
     }
 
     #[tokio::test]
@@ -1139,12 +1134,9 @@ mod tests {
         // servable by nobody else — its own contact store is empty and A
         // holds it in the own-devices store, not the contact store — so
         // the §6 mirror rule is the only path an observer has to it.
-        let a = Client::open_or_create(&temp_key("recognize-whois", "a"))
-            .await
-            .expect("open A");
-        let c = Client::open_or_create(&temp_key("recognize-whois", "c"))
-            .await
-            .expect("open C");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let c = loop_client(&wire).await.0;
         let laptop = DeviceKey::from_seed([44; 32]);
         let laptop_record = signed_record(
             &laptop,
@@ -1157,7 +1149,7 @@ mod tests {
         // When: a stranger asks about the laptop's key
         let connection = net::connect_peer(
             &c.transport,
-            &a.transport.peer(),
+            &loop_peer(&a),
             SYNC_ALPN,
             c.config.connect_timeout,
             &SystemClock,
@@ -1181,7 +1173,7 @@ mod tests {
         befriend(&a.state, c.public_key()).await;
         let connection = net::connect_peer(
             &c.transport,
-            &a.transport.peer(),
+            &loop_peer(&a),
             SYNC_ALPN,
             c.config.connect_timeout,
             &SystemClock,
@@ -1205,8 +1197,6 @@ mod tests {
                 endorsements: vec![],
             }
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("recognize-whois"));
     }
 
     #[test]
@@ -1469,9 +1459,8 @@ mod tests {
     async fn auto_who_is__should_stay_silent_without_a_contributing_contact() {
         // Given: a conversation authored only by a stranger — presence of
         // A in `recipients` is the spammer-controlled part (groups.md §6)
-        let a = Client::open_or_create(&temp_key("nogate", "asker"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let stranger = DeviceKey::from_seed([32; 32]);
         let carol = DeviceKey::from_seed([33; 32]).public();
         let genesis = message(&stranger, vec![a.public_key(), carol], None, vec![], 0, 0);
@@ -1495,8 +1484,6 @@ mod tests {
             a.resolve_name(carol).await.expect("resolve"),
             ResolvedName::Unknown
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("nogate"));
     }
 
     #[tokio::test]
@@ -1504,12 +1491,9 @@ mod tests {
         // Given: A holds C's record as a user-added contact — the server
         // side of the one-way-add flow (who-is-this.md §1). B asks about
         // C's key, first as a stranger.
-        let a = Client::open_or_create(&temp_key("whois", "server"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("whois", "client"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([7; 32]).public();
         let carol_record = ContactRecord::new(
             vec![carol],
@@ -1527,7 +1511,7 @@ mod tests {
         // When: a stranger asks about a key A demonstrably holds
         let connection = net::connect_peer(
             &b.transport,
-            &a.transport.peer(),
+            &loop_peer(&a),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -1546,7 +1530,7 @@ mod tests {
         befriend(&a.state, b.public_key()).await;
         let connection = net::connect_peer(
             &b.transport,
-            &a.transport.peer(),
+            &loop_peer(&a),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -1576,23 +1560,18 @@ mod tests {
             }
         );
         assert_eq!(unknown, SyncResult::NotHeld);
-
-        let _ = std::fs::remove_dir_all(temp_root("whois"));
     }
 
     #[tokio::test]
     async fn who_is__should_serve_the_fresh_self_record_for_the_own_key() {
         // Given: B is A's contact; A's profile is not yet complete
-        let a = Client::open_or_create(&temp_key("whoisself", "server"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("whoisself", "client"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         befriend(&a.state, b.public_key()).await;
         let connection = net::connect_peer(
             &b.transport,
-            &a.transport.peer(),
+            &loop_peer(&a),
             SYNC_ALPN,
             b.config.connect_timeout,
             &SystemClock,
@@ -1635,7 +1614,5 @@ mod tests {
         assert_eq!(record.keys, vec![a.public_key()]);
         assert_eq!(record.self_claimed_name(), Some("alice"));
         assert_eq!(record.relays, vec![relay]);
-
-        let _ = std::fs::remove_dir_all(temp_root("whoisself"));
     }
 }

@@ -1197,8 +1197,8 @@ impl<C: Clock, W: WallClock, N: Transport, R: Draw + Mint, S: Store> Client<C, W
 mod tests {
     use super::*;
     use crate::client::test_kit::{
-        befriend, chain, dir_bytes, loop_client, mailbox_only, mailbox_spec, signed_record,
-        temp_key, temp_root,
+        befriend, chain, loop_client, loop_peer, mailbox_only, mailbox_spec, reopen, signed_record,
+        stored_under, temp_root,
     };
     use crate::ports::transport::Loopback;
     use zink_protocol::DeviceKey;
@@ -1208,9 +1208,8 @@ mod tests {
         // Given: carol stored with relay X; a subject-served learned record
         // with relay Y and a smuggled extra key; *newer* contact-served
         // hearsay with relay Z
-        let a = Client::open_or_create(&temp_key("keys", "asker"))
-            .await
-            .expect("open A");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([22; 32]);
         let extra = DeviceKey::from_seed([23; 32]).public();
         let stored = ContactRecord::new(
@@ -1262,16 +1261,13 @@ mod tests {
         // strictly from the user-added record — the smuggled key is inert
         assert_eq!(contact.relays, vec!["yy@203.0.113.2:2".to_string()]);
         assert_eq!(contact.keys, vec![carol.public()]);
-
-        let _ = std::fs::remove_dir_all(temp_root("keys"));
     }
 
     #[tokio::test]
     async fn add_contact__should_update_the_overlapping_contact_under_its_own_petname() {
         // Given: bob stored under his original single-key record
-        let a = Client::open_or_create(&temp_key("overlap-update", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([31; 32]);
         let laptop = DeviceKey::from_seed([32; 32]);
         let original =
@@ -1296,17 +1292,14 @@ mod tests {
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].0, "bob");
         assert_eq!(contacts[0].1, rescanned);
-
-        let _ = std::fs::remove_dir_all(temp_root("overlap-update"));
     }
 
     #[tokio::test]
     async fn add_contact__should_surface_an_overlap_under_a_different_petname() {
         // Given: bob stored; a hostile record smuggling bob's key into its
         // own key list (multi-device.md §4 — the trust-anchor hijack)
-        let a = Client::open_or_create(&temp_key("overlap-confirm", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([33; 32]);
         let mallory = DeviceKey::from_seed([34; 32]);
         a.add_contact(
@@ -1315,10 +1308,7 @@ mod tests {
         )
         .await
         .expect("add bob");
-        let contacts_dir =
-            std::path::PathBuf::from(format!("{}.state", temp_key("overlap-confirm", "a")))
-                .join("contacts");
-        let before = dir_bytes(&contacts_dir);
+        let before = stored_under(&a, "contacts");
         let smuggling = ContactRecord::new(
             vec![mallory.public(), bob.public()],
             vec![],
@@ -1333,7 +1323,7 @@ mod tests {
             result,
             Err(Error::ContactOverlap { ref existing }) if existing == "bob"
         ));
-        assert_eq!(dir_bytes(&contacts_dir), before);
+        assert_eq!(stored_under(&a, "contacts"), before);
 
         // And: the same add under the matched petname is the explicit
         // confirm — it updates bob's entry, keeping one contact
@@ -1343,16 +1333,13 @@ mod tests {
         let contacts = a.contacts().await.expect("contacts");
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].0, "bob");
-
-        let _ = std::fs::remove_dir_all(temp_root("overlap-confirm"));
     }
 
     #[tokio::test]
     async fn add_contact__should_refuse_a_record_overlapping_two_contacts() {
         // Given: bob and carol stored as distinct contacts
-        let a = Client::open_or_create(&temp_key("overlap-ambiguous", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([35; 32]);
         let carol = DeviceKey::from_seed([36; 32]);
         for (device, name, mailbox) in [
@@ -1366,10 +1353,7 @@ mod tests {
             .await
             .expect("add");
         }
-        let contacts_dir =
-            std::path::PathBuf::from(format!("{}.state", temp_key("overlap-ambiguous", "a")))
-                .join("contacts");
-        let before = dir_bytes(&contacts_dir);
+        let before = stored_under(&a, "contacts");
         let spanning = ContactRecord::new(
             vec![bob.public(), carol.public()],
             vec![],
@@ -1384,17 +1368,14 @@ mod tests {
                 Err(Error::AmbiguousOverlap(_))
             ));
         }
-        assert_eq!(dir_bytes(&contacts_dir), before);
-
-        let _ = std::fs::remove_dir_all(temp_root("overlap-ambiguous"));
+        assert_eq!(stored_under(&a, "contacts"), before);
     }
 
     #[tokio::test]
     async fn add_contact__should_reject_a_petname_collision_without_key_overlap() {
         // Given: bob stored; an unrelated record wanting the same petname
-        let a = Client::open_or_create(&temp_key("overlap-collision", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([37; 32]);
         let other = DeviceKey::from_seed([38; 32]);
         a.add_contact(
@@ -1417,17 +1398,14 @@ mod tests {
             .await,
             Err(Error::PetnameCollision(_))
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("overlap-collision"));
     }
 
     #[tokio::test]
     async fn set_relay_override__should_win_until_cleared() {
         // Given: carol stored with relay X and a *newer* subject-served
         // answer naming relay Y — the strongest non-manual class
-        let a = Client::open_or_create(&temp_key("override-wins", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([50; 32]);
         let relay_z = DeviceKey::from_seed([51; 32]).public();
         let stored = ContactRecord::new(
@@ -1467,16 +1445,13 @@ mod tests {
             a.relay_status("carol").await.expect("status").source,
             RelaySource::SubjectServed { received_ms: 1 }
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("override-wins"));
     }
 
     #[tokio::test]
     async fn set_relay_override__should_reject_an_invalid_spec() {
         // Given: bob stored
-        let a = Client::open_or_create(&temp_key("override-invalid", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([52; 32]);
         a.add_contact(
             &ContactRecord::new(vec![bob.public()], vec![], mailbox_only("bb@203.0.113.1:1")),
@@ -1496,16 +1471,13 @@ mod tests {
             RelaySource::Scanned,
             "no override took effect"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("override-invalid"));
     }
 
     #[tokio::test]
     async fn update_contact__should_clear_a_relay_override() {
         // Given: bob stored with an override patching his relay
-        let a = Client::open_or_create(&temp_key("override-super", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([53; 32]);
         let relay = DeviceKey::from_seed([54; 32]).public();
         a.add_contact(
@@ -1530,16 +1502,13 @@ mod tests {
             a.resolve_contact("bob").await.expect("resolve").relays,
             vec!["cc@203.0.113.7:7".to_string()]
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("override-super"));
     }
 
     #[tokio::test]
     async fn relay_status__should_report_provenance_and_debt() {
         // Given: bob stored on relay A, with one outbox entry owed to A
-        let a = Client::open_or_create(&temp_key("relay-status", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([55; 32]);
         let relay = DeviceKey::from_seed([56; 32]).public();
         a.add_contact(
@@ -1567,17 +1536,14 @@ mod tests {
         assert_eq!(status.relays[0].spec, mailbox_spec(&relay));
         assert_eq!(status.relays[0].owed, 1);
         assert_eq!(status.relays[0].owed_since_ms, Some(5));
-
-        let _ = std::fs::remove_dir_all(temp_root("relay-status"));
     }
 
     #[tokio::test]
     async fn effective_relays__should_bind_a_records_relays_to_its_first_key_only() {
         // Given: one record leading with bob's key and merely listing a
         // sibling's — relays bind to the publishing device (SPEC §3.6)
-        let a = Client::open_or_create(&temp_key("relay-bind", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([55; 32]);
         let sibling = DeviceKey::from_seed([56; 32]);
         let record = ContactRecord::new(
@@ -1597,16 +1563,13 @@ mod tests {
             a.effective_relays(sibling.public(), Some(&record)).await,
             vec![]
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("relay-bind"));
     }
 
     #[tokio::test]
     async fn preview_contact__should_report_a_new_record_with_the_self_claim() {
         // Given: an empty store; a record self-claiming "carol"
-        let a = Client::open_or_create(&temp_key("preview-new", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([40; 32]);
         let record = signed_record(&carol, "carol", 0, mailbox_only("cc@203.0.113.1:1"));
 
@@ -1618,8 +1581,6 @@ mod tests {
             matched,
             RecordMatch::New { suggested_petname: Some(ref name) } if name == "carol"
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("preview-new"));
     }
 
     #[tokio::test]
@@ -1627,9 +1588,8 @@ mod tests {
         // Given: anna stored under her original record (self-claim "Anna",
         // one relay); a re-scan with a renamed claim, a replaced relay,
         // and a second device key
-        let a = Client::open_or_create(&temp_key("preview-diff", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let anna = DeviceKey::from_seed([41; 32]);
         let laptop = DeviceKey::from_seed([42; 32]);
         let stored = signed_record(&anna, "Anna", 0, mailbox_only("old@203.0.113.1:1"));
@@ -1666,16 +1626,13 @@ mod tests {
         assert_eq!(update.relays_removed, vec!["old@203.0.113.1:1".to_string()]);
         assert_eq!(update.keys_added, 1);
         assert_eq!(update.keys_removed, 0);
-
-        let _ = std::fs::remove_dir_all(temp_root("preview-diff"));
     }
 
     #[tokio::test]
     async fn preview_contact__should_report_a_record_spanning_contacts() {
         // Given: bob and carol stored; a record carrying both their keys
-        let a = Client::open_or_create(&temp_key("preview-span", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([43; 32]);
         let carol = DeviceKey::from_seed([44; 32]);
         for (device, name, mailbox) in [
@@ -1703,17 +1660,14 @@ mod tests {
             matched,
             RecordMatch::Ambiguous { ref petnames } if *petnames == ["bob", "carol"]
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("preview-span"));
     }
 
     #[tokio::test]
     async fn update_contact__should_replace_the_record_and_keep_the_petname() {
         // Given: anna stored, then renamed on her side and re-homed to a
         // new relay — the B1 migration regression (5-relay-lifecycle §3)
-        let a = Client::open_or_create(&temp_key("update-keeps", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let anna = DeviceKey::from_seed([45; 32]);
         let stored = signed_record(&anna, "Anna", 0, mailbox_only("old@203.0.113.1:1"));
         a.add_contact(&stored, Some("anna".to_string()))
@@ -1732,16 +1686,13 @@ mod tests {
         assert_eq!(contacts[0].1, rescanned);
         let contact = a.resolve_contact("anna").await.expect("resolve");
         assert_eq!(contact.relays, vec!["new@203.0.113.9:9".to_string()]);
-
-        let _ = std::fs::remove_dir_all(temp_root("update-keeps"));
     }
 
     #[tokio::test]
     async fn update_contact__should_refuse_a_record_matching_no_contact() {
         // Given: bob stored; a record sharing none of his keys
-        let a = Client::open_or_create(&temp_key("update-none", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([46; 32]);
         let stranger = DeviceKey::from_seed([47; 32]);
         a.add_contact(
@@ -1750,10 +1701,7 @@ mod tests {
         )
         .await
         .expect("add");
-        let contacts_dir =
-            std::path::PathBuf::from(format!("{}.state", temp_key("update-none", "a")))
-                .join("contacts");
-        let before = dir_bytes(&contacts_dir);
+        let before = stored_under(&a, "contacts");
 
         // When / Then: refused — updating what isn't stored is an add
         assert!(matches!(
@@ -1765,17 +1713,14 @@ mod tests {
             .await,
             Err(Error::NotAContact(_))
         ));
-        assert_eq!(dir_bytes(&contacts_dir), before);
-
-        let _ = std::fs::remove_dir_all(temp_root("update-none"));
+        assert_eq!(stored_under(&a, "contacts"), before);
     }
 
     #[tokio::test]
     async fn update_contact__should_refuse_a_record_spanning_contacts() {
         // Given: bob and carol stored; a record carrying both their keys
-        let a = Client::open_or_create(&temp_key("update-span", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([48; 32]);
         let carol = DeviceKey::from_seed([49; 32]);
         for (device, name, mailbox) in [
@@ -1789,10 +1734,7 @@ mod tests {
             .await
             .expect("add");
         }
-        let contacts_dir =
-            std::path::PathBuf::from(format!("{}.state", temp_key("update-span", "a")))
-                .join("contacts");
-        let before = dir_bytes(&contacts_dir);
+        let before = stored_under(&a, "contacts");
 
         // When / Then: merging is never silent — refused, store untouched
         assert!(matches!(
@@ -1804,9 +1746,7 @@ mod tests {
             .await,
             Err(Error::AmbiguousOverlap(_))
         ));
-        assert_eq!(dir_bytes(&contacts_dir), before);
-
-        let _ = std::fs::remove_dir_all(temp_root("update-span"));
+        assert_eq!(stored_under(&a, "contacts"), before);
     }
 
     #[tokio::test]
@@ -1814,12 +1754,9 @@ mod tests {
         // Given: A holds a full conversation, B only its tip — and the
         // mirror image for the reverse direction. Neither is the other's
         // contact; recognition is the only thing that will open the gate.
-        let a = Client::open_or_create(&temp_key("recognize-gate", "a"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("recognize-gate", "b"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         let held_by_a = chain(&DeviceKey::from_seed([42; 32]), a.public_key(), 3);
         let conv_a = held_by_a[0].id();
         for envelope in &held_by_a {
@@ -1841,7 +1778,7 @@ mod tests {
 
         // When: B pulls as a stranger
         let refused = b
-            .backfill_addr(conv_a, a.transport.peer())
+            .backfill_addr(conv_a, loop_peer(&a))
             .await
             .expect("declined, not an error");
 
@@ -1857,7 +1794,7 @@ mod tests {
         .await
         .expect("recognize");
         let served = b
-            .backfill_addr(conv_a, a.transport.peer())
+            .backfill_addr(conv_a, loop_peer(&a))
             .await
             .expect("served");
 
@@ -1867,7 +1804,7 @@ mod tests {
 
         // …while the reverse direction stays closed
         let reverse = a
-            .backfill_addr(conv_b, b.transport.peer())
+            .backfill_addr(conv_b, loop_peer(&b))
             .await
             .expect("declined");
         assert_eq!(reverse, 0, "recognition moved nothing the other way");
@@ -1881,22 +1818,18 @@ mod tests {
         .await
         .expect("recognize back");
         let reverse = a
-            .backfill_addr(conv_b, b.transport.peer())
+            .backfill_addr(conv_b, loop_peer(&b))
             .await
             .expect("served");
 
         // Then
         assert_eq!(reverse, 2);
-
-        let _ = std::fs::remove_dir_all(temp_root("recognize-gate"));
     }
 
     #[tokio::test]
     async fn recognize__should_put_the_vouch_in_my_record_and_nowhere_else() {
         // Given: a profiled phone and its laptop's record
-        let a = Client::open_or_create(&temp_key("recognize-vouch", "a"))
-            .await
-            .expect("open");
+        let a = loop_client(&Loopback::new()).await.0;
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
         a.set_profile("mårten phone", std::slice::from_ref(&relay))
             .await
@@ -1950,10 +1883,7 @@ mod tests {
         );
 
         // And: the recognition persists across a reopen
-        a.close().await;
-        let a = Client::open(&temp_key("recognize-vouch", "a"))
-            .await
-            .expect("reopen");
+        let a = reopen(&a).await;
         assert_eq!(a.recognized_devices().await.len(), 1);
         assert_eq!(
             zink_protocol::link_tier(
@@ -1963,16 +1893,13 @@ mod tests {
             ),
             zink_protocol::LinkTier::VouchedFromTrust
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("recognize-vouch"));
     }
 
     #[tokio::test]
     async fn device_evidence__should_tier_from_held_records() {
         // Given: P is a contact whose record vouches an unknown key
-        let a = Client::open_or_create(&temp_key("evidence", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let p = DeviceKey::from_seed([52; 32]);
         let laptop = DeviceKey::from_seed([53; 32]);
         let vouch = |attester: &DeviceKey, linked: PublicKey| {
@@ -2038,17 +1965,14 @@ mod tests {
                 .expect("evidence")
                 .is_empty()
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("evidence"));
     }
 
     #[tokio::test]
     async fn claims_to_be_my_device__should_surface_the_pair_back_record_only() {
         // Given: my laptop; a phone whose learned record self-links MY key
         // (the one-way pairing artifact), a forger, and an unrelated link
-        let a = Client::open_or_create(&temp_key("pairback", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let me = a.public_key();
         let phone = DeviceKey::from_seed([61; 32]);
         let stranger = DeviceKey::from_seed([62; 32]);
@@ -2126,16 +2050,13 @@ mod tests {
             .await
             .expect("learn voided");
         assert_eq!(a.claims_to_be_my_device(phone.public()).await, None);
-
-        let _ = std::fs::remove_dir_all(temp_root("pairback"));
     }
 
     #[tokio::test]
     async fn vouch__should_persist_and_supersede_per_revision() {
         // Given
-        let a = Client::open_or_create(&temp_key("vouch", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([84; 32]);
         a.add_contact(
             &ContactRecord::new(
@@ -2172,17 +2093,14 @@ mod tests {
             a.vouch("nobody").await,
             Err(Error::NotAContact(_))
         ));
-
-        let _ = std::fs::remove_dir_all(temp_root("vouch"));
     }
 
     #[tokio::test]
     async fn vouch__should_publish_the_person_label_not_the_entry_petname() {
         // Given: carol added under an entry petname, then the person row
         // renamed — the label and the petname now differ
-        let a = Client::open_or_create(&temp_key("vouch-label", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([85; 32]);
         a.add_contact(
             &ContactRecord::new(
@@ -2204,17 +2122,14 @@ mod tests {
         // addresses by, exactly what the toggle copy promises
         let stored = a.state.vouch_for(&carol.public()).await.expect("stored");
         assert_eq!(stored.attestation.claim, Claim::Name("Carol".to_string()));
-
-        let _ = std::fs::remove_dir_all(temp_root("vouch-label"));
     }
 
     #[tokio::test]
     async fn repudiate__should_supersede_the_vouch_and_unrecognize_the_sibling() {
         // Given: a profiled phone that vouched a contact and recognized a
         // laptop
-        let a = Client::open_or_create(&temp_key("repudiate", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
         a.set_profile("mårten phone", std::slice::from_ref(&relay))
             .await
@@ -2276,8 +2191,6 @@ mod tests {
         let restored = a.state.vouch_for(&carol.public()).await.expect("stance");
         assert_eq!(restored.attestation.revision, 2);
         assert!(matches!(restored.attestation.claim, Claim::Name(_)));
-
-        let _ = std::fs::remove_dir_all(temp_root("repudiate"));
     }
 
     #[tokio::test]
@@ -2285,9 +2198,8 @@ mod tests {
         // Given: bob's learned endorsements about carol carry a vouch
         // superseded by his own negative — but bob and carol share no
         // entry and no link: a third-party claim
-        let a = Client::open_or_create(&temp_key("disavow", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let bob = DeviceKey::from_seed([92; 32]);
         let carol = DeviceKey::from_seed([93; 32]);
         for (device, name, mailbox) in [
@@ -2345,8 +2257,6 @@ mod tests {
         assert_eq!(disavowals.len(), 1);
         assert_eq!(disavowals[0].attester_label, "bob");
         assert!(!disavowals[0].excludes);
-
-        let _ = std::fs::remove_dir_all(temp_root("disavow"));
     }
 
     #[tokio::test]
@@ -2462,9 +2372,8 @@ mod tests {
     async fn learned_candidates__should_pair_each_name_with_the_freshest_record() {
         // Given: two responders serve the same claimed name, but with
         // different records — the later receipt carries fresher relays
-        let a = Client::open_or_create(&temp_key("cands", "asker"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([25; 32]);
         let older = signed_record(
             &carol,
@@ -2517,36 +2426,29 @@ mod tests {
         assert_eq!(candidates[0].0.name, "Carol");
         assert_eq!(candidates[0].0.held_by.len(), 2);
         assert_eq!(candidates[0].1.relays[0].mailbox, "new@203.0.113.2:2");
-
-        let _ = std::fs::remove_dir_all(temp_root("cands"));
     }
 
     #[tokio::test]
     async fn dismiss__should_persist_across_reopens() {
         // Given
-        let key_path = temp_key("dismiss", "me");
-        let a = Client::open_or_create(&key_path).await.expect("open");
+        let a = loop_client(&Loopback::new()).await.0;
         let noisy = DeviceKey::from_seed([28; 32]).public();
 
         // When
         a.dismiss(noisy).await.expect("dismiss");
         a.dismiss(noisy).await.expect("idempotent");
-        drop(a);
-        let a = Client::open_or_create(&key_path).await.expect("reopen");
+        let a = reopen(&a).await;
 
         // Then
         assert!(a.dismissed().await.contains(&noisy));
-
-        let _ = std::fs::remove_dir_all(temp_root("dismiss"));
     }
 
     #[tokio::test]
     async fn resolve_name__should_rank_by_revision_and_group_agreement() {
         // Given: two responders hold Carol's old name (revision 0), one
         // holds the rename (revision 1) — a rename caught mid-propagation
-        let a = Client::open_or_create(&temp_key("names", "asker"))
-            .await
-            .expect("open A");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([25; 32]);
         let old = signed_record(&carol, "Carol", 0, vec![]);
         let new = signed_record(&carol, "Caroline", 1, vec![]);
@@ -2575,7 +2477,5 @@ mod tests {
         assert_eq!((names[0].name.as_str(), names[0].revision), ("Caroline", 1));
         assert_eq!(names[1].name, "Carol");
         assert_eq!(names[1].held_by.len(), 2);
-
-        let _ = std::fs::remove_dir_all(temp_root("names"));
     }
 }

@@ -553,18 +553,17 @@ pub(crate) async fn build_own_record<S: Store>(
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::client::test_kit::{befriend, loop_client, temp_key, temp_root};
+    use crate::client::test_kit::{LoopClient, befriend, loop_client};
     use crate::hex;
     use crate::ports::transport::Loopback;
 
     #[tokio::test]
     async fn set_profile__should_bump_the_name_attestation_revision_on_rename_only() {
         // Given: a valid dial string (any 32-byte key is an endpoint id)
-        let a = Client::open_or_create(&temp_key("rev", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
-        let revision = async |client: &Client| {
+        let revision = async |client: &LoopClient| {
             client
                 .my_record()
                 .await
@@ -588,16 +587,13 @@ mod tests {
             .await
             .expect("rename");
         assert_eq!(revision(&a).await, 1);
-
-        let _ = std::fs::remove_dir_all(temp_root("rev"));
     }
 
     #[tokio::test]
     async fn set_device_label__should_supersede_independently_of_the_name() {
         // Given
-        let a = Client::open_or_create(&temp_key("label", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
         a.set_profile("mårten", std::slice::from_ref(&relay))
             .await
@@ -621,17 +617,14 @@ mod tests {
         assert_eq!(re_set.self_device_label_claim(), Some(("phone", 0)));
         assert_eq!(renamed.self_device_label_claim(), Some(("laptop", 1)));
         assert_eq!(renamed.self_name_claim(), Some(("mårten ii", 1)));
-
-        let _ = std::fs::remove_dir_all(temp_root("label"));
     }
 
     #[tokio::test]
     async fn set_avatar__should_supersede_and_render_our_own() {
         // Given (avatars first: no profile relays yet, so the push loop has
         // nothing to dial and the test stays offline)
-        let a = Client::open_or_create(&temp_key("avatar", "me"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
 
         // When: an avatar is set, then replaced
         let first = a
@@ -659,8 +652,6 @@ mod tests {
         );
         let rendered = a.avatar(a.public_key()).await.expect("avatar");
         assert_eq!(rendered.as_deref(), Some(b"second image bytes".as_slice()));
-
-        let _ = std::fs::remove_dir_all(temp_root("avatar"));
     }
 
     #[tokio::test]
@@ -668,12 +659,9 @@ mod tests {
         // Given: A set an avatar and published a record carrying the claim;
         // B stores that record as a contact and holds the ciphertext in its
         // blob cache — exactly what a successful fetch leaves behind
-        let a = Client::open_or_create(&temp_key("avatarb", "a"))
-            .await
-            .expect("open A");
-        let b = Client::open_or_create(&temp_key("avatarb", "b"))
-            .await
-            .expect("open B");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
+        let b = loop_client(&wire).await.0;
         let receipt = a.set_avatar(b"portrait".to_vec()).await.expect("set");
         let relay = format!("{}@203.0.113.1:1", hex::encode(&a.public_key().0));
         a.set_profile("alice", std::slice::from_ref(&relay))
@@ -705,8 +693,6 @@ mod tests {
             b"portrait".to_vec(),
             "cache holds ciphertext, like a relay would"
         );
-
-        let _ = std::fs::remove_dir_all(temp_root("avatarb"));
     }
 
     #[tokio::test]
@@ -780,9 +766,8 @@ mod tests {
     #[tokio::test]
     async fn share_avatar__should_reshare_on_a_new_photo_and_die_with_repudiation() {
         // Given: a shared photo of carol
-        let a = Client::open_or_create(&temp_key("share-life", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([91; 32]).public();
         a.add_contact(
             &ContactRecord::new(
@@ -825,16 +810,13 @@ mod tests {
         let negative = a.state.vouch_for(&carol).await.expect("negative stored");
         assert!(matches!(negative.attestation.claim, Claim::Negative));
         assert!(negative.attestation.revision > 1);
-
-        let _ = std::fs::remove_dir_all(temp_root("share-life"));
     }
 
     #[tokio::test]
     async fn clear_local_avatar__should_withdraw_the_share() {
         // Given: a shared photo
-        let a = Client::open_or_create(&temp_key("share-clear", "a"))
-            .await
-            .expect("open");
+        let wire = Loopback::new();
+        let a = loop_client(&wire).await.0;
         let carol = DeviceKey::from_seed([92; 32]).public();
         a.add_contact(
             &ContactRecord::new(
@@ -859,8 +841,6 @@ mod tests {
 
         // Then: a photo no longer held cannot honestly stay shared
         assert!(a.state.avatar_share_for(&carol).await.is_none());
-
-        let _ = std::fs::remove_dir_all(temp_root("share-clear"));
     }
 
     #[test]

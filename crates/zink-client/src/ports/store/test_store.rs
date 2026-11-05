@@ -54,6 +54,19 @@ impl TestStore {
         TestStore(Arc::new(Mutex::new(crashed)))
     }
 
+    /// Everything stored under `dir`, keys and bytes — the
+    /// store-was-not-touched probe.
+    pub(crate) fn values_under(&self, dir: &Key) -> BTreeMap<Key, Vec<u8>> {
+        self.0
+            .lock()
+            .unwrap()
+            .values
+            .iter()
+            .filter(|(key, _)| key.0.len() > dir.0.len() && key.0.starts_with(&dir.0))
+            .map(|(key, bytes)| (key.clone(), bytes.clone()))
+            .collect()
+    }
+
     /// Drop everything under `dir` — what a user deleting a directory by
     /// hand does to the store. Journaled like any write, so crash states
     /// taken afterwards stay faithful.

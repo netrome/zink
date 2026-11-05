@@ -17,8 +17,8 @@ use zink_protocol::{
 use crate::adapters::system_clock::SystemClock;
 use crate::adapters::system_rng::SystemRng;
 use crate::ports::clock::TestClock;
-use crate::ports::store::{Store, TestStore};
-use crate::ports::transport::{Loopback, ScriptedConn, TestTransport};
+use crate::ports::store::{Key, Store, TestStore};
+use crate::ports::transport::{Loopback, Peer, ScriptedConn, TestTransport};
 use crate::state::ClientState;
 use crate::{hex, keystore};
 
@@ -398,18 +398,37 @@ pub(crate) async fn crash_states(client: &LoopClient, since: usize) -> Vec<(usiz
     );
     let mut states = Vec::new();
     for writes in since..=store.writes() {
-        let reopened = Client::with_transport(
-            DeviceKey::from_seed(client.device.seed()),
-            store.crashed_after(writes),
-            ClientConfig::default(),
-            TestClock::new(),
-            SystemClock,
-            TestTransport::new(),
-        )
-        .await;
+        let reopened = reopen_on(client, store.crashed_after(writes)).await;
         states.push((writes - since, reopened));
     }
     states
+}
+
+/// `client` restarted: same device, same store, fresh doubles otherwise
+/// (a reopen is a new process).
+pub(crate) async fn reopen(client: &LoopClient) -> LoopClient {
+    reopen_on(client, client.state.store().clone()).await
+}
+
+async fn reopen_on(client: &LoopClient, store: TestStore) -> LoopClient {
+    Client::with_transport(
+        DeviceKey::from_seed(client.device.seed()),
+        store,
+        ClientConfig::default(),
+        TestClock::new(),
+        SystemClock,
+        TestTransport::new(),
+    )
+    .await
+}
+
+/// How another loopback client dials `client`: the wire routes by key.
+pub(crate) fn loop_peer(client: &LoopClient) -> Peer {
+    Peer {
+        key: client.public_key(),
+        relays: vec![],
+        sockets: vec![],
+    }
 }
 
 /// A fresh device key, held in memory only — doubles-wired clients need
@@ -434,18 +453,14 @@ pub(crate) fn summary(id: u8, known: bool, first_seen_ms: u64) -> ConversationSu
     }
 }
 
-/// Every file under `dir` with its bytes — the store-was-not-touched
-/// probe for the D1b "network input never mutates stored records" rule.
-pub(crate) fn dir_bytes(dir: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
-    let mut out = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        out.insert(
-            entry.file_name().to_string_lossy().into_owned(),
-            std::fs::read(entry.path()).unwrap_or_default(),
-        );
-    }
-    out
+/// Everything `client` stores under `dir`, keys and bytes — the
+/// store-was-not-touched probe for the D1b "network input never mutates
+/// stored records" rule. Never empty: a probe of nothing proves nothing.
+pub(crate) fn stored_under(client: &LoopClient, dir: &str) -> BTreeMap<Key, Vec<u8>> {
+    let stored = client
+        .state
+        .store()
+        .values_under(&Key::parse(dir).expect("key"));
+    assert!(!stored.is_empty(), "nothing stored under {dir}");
+    stored
 }
