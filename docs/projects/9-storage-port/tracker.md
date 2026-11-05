@@ -104,14 +104,17 @@ across it — the edits are mechanical.
   promise: `replace_contact`'s write-then-drop, contact-add + person row,
   merge/split ordering, the `persons()` self-heal, the lens applied-ops
   ledger's mark-after-effect.
+- **S3b · Local-logic tests onto the doubles.** Of the tests on the
+  production constructors (`Client::open_or_create` / `open_homed` — real
+  iroh endpoint, real key file), a rough classification (2026-11-05) puts
+  ~57 as local logic only (contact overlap, petname collisions, persons,
+  vouches) and ~16 as genuinely networked. The local ones move to
+  `loop_client`; their `dir_bytes` probes become store assertions. The
+  networked ones — including the labelled real-network smoke tier
+  (transport.md §8) — stay on the production constructors: they are the
+  integration check that real iroh and `FsStore` work together. Self-
+  checking: a misclassified test makes an unscripted dial, which
+  `TestTransport` turns into a loud panic.
 - **S4 · Close.** The audit line ("no `std::fs` outside `adapters/`") —
   the CLI/app edges' own fs use is theirs; this is about the client core.
   ADR 0004 addendum (storage joins the ports), client-core.md, docs.
-
-## Follow-ups
-
-- The production-constructor tier (`Client::open_or_create` /
-  `open_homed` — real iroh endpoint, real key file, ~90 call sites) still
-  runs on temp dirs. Moving it onto the double means moving it onto
-  `TestTransport` too, where an unscripted dial panics — a transport
-  migration, not a storage one; schedule separately if wanted.
